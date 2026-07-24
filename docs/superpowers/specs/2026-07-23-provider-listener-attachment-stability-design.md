@@ -21,9 +21,9 @@ Add a small framework-independent listener scope that:
 - immediately unregisters listeners that resolve after disposal;
 - unregisters already-resolved listeners exactly once.
 
-Use the scope for asynchronous Tauri registrations in system audio and both completion hooks. System-audio event handling also records a short-lived fingerprint of the last `speech-detected` payload so an identical backend event cannot append or answer twice.
+Use the scope for asynchronous Tauri registrations in system audio and both completion hooks. System-audio event handling also records a bounded set of recent `speech-detected` payload fingerprints so an identical backend event cannot append or answer twice, including an A-B-A arrival pattern.
 
-The fingerprint uses the audio payload plus its start/end timestamps and expires after the event-processing window. It does not compare transcript text, so genuinely repeated spoken questions remain valid.
+The fingerprint uses a compact hash of the audio payload plus its start/end timestamps. Keep at most 32 entries for 60 seconds, which is longer than the 30-second STT timeout while remaining tightly bounded. It does not compare transcript text, so genuinely repeated spoken questions remain valid.
 
 ## Provider Authentication
 
@@ -46,7 +46,7 @@ Add focused Vitest coverage for:
 
 - disposal before and after listener registration resolves;
 - stale callbacks being inert after disposal;
-- duplicate event fingerprints and expiry;
+- duplicate event fingerprints, A-B-A ordering, expiry, and capacity;
 - loopback versus remote API-key requirements;
 - omission of empty templated authentication headers;
 - image filtering and remaining-capacity behavior.

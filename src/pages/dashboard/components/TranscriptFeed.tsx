@@ -14,12 +14,12 @@ export const TranscriptFeed = ({
   conversation,
   live = false,
   partialTranscription = "",
-  isAIProcessing = false,
+  liveAnswerDraft = null,
 }: {
   conversation: ChatConversation | null;
   live?: boolean;
   partialTranscription?: string;
-  isAIProcessing?: boolean;
+  liveAnswerDraft?: string | null;
 }) => {
   // Live conversation state is newest-first; DB reads are chronological.
   // Sort by timestamp so both render oldest → newest.
@@ -47,13 +47,18 @@ export const TranscriptFeed = ({
     const el = scrollRef.current;
     if (!el || !live || !stickToBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
-  }, [live, turns.length, lastContent, partialTranscription]);
+  }, [
+    live,
+    turns.length,
+    lastContent,
+    partialTranscription,
+    liveAnswerDraft,
+  ]);
 
-  const lastAssistantId = [...turns]
-    .reverse()
-    .find((m) => m.role === "assistant")?.id;
-
-  const empty = turns.length === 0 && !partialTranscription;
+  const empty =
+    turns.length === 0 &&
+    !partialTranscription &&
+    liveAnswerDraft === null;
 
   return (
     <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto">
@@ -79,9 +84,6 @@ export const TranscriptFeed = ({
                   </div>
                   <div className="prose prose-sm max-w-none text-sm dark:prose-invert">
                     <Markdown>{m.content}</Markdown>
-                    {live && isAIProcessing && m.id === lastAssistantId && (
-                      <span className="ml-1 inline-block h-4 w-2 animate-pulse bg-primary align-middle" />
-                    )}
                   </div>
                 </div>
               ) : (
@@ -105,6 +107,22 @@ export const TranscriptFeed = ({
                 </div>
                 <div className="text-sm italic leading-relaxed text-muted-foreground">
                   {partialTranscription}
+                </div>
+              </div>
+            </div>
+          )}
+          {live && liveAnswerDraft !== null && (
+            <div className="flex gap-3">
+              <span className="min-w-[40px] pt-0.5 font-mono text-[11px] text-meta">
+                …
+              </span>
+              <div className="min-w-0 flex-1 border-l-[3px] border-[var(--emerald)] pl-3">
+                <div className="mb-1 font-mono text-[11px] text-primary">
+                  answer
+                </div>
+                <div className="prose prose-sm max-w-none text-sm dark:prose-invert">
+                  <Markdown>{liveAnswerDraft}</Markdown>
+                  <span className="ml-1 inline-block h-4 w-2 animate-pulse bg-primary align-middle" />
                 </div>
               </div>
             </div>

@@ -196,6 +196,8 @@ pub async fn start_system_audio_capture(
         .lock()
         .map_err(|e| format!("Failed to read VAD config: {}", e))?
         .clone();
+    state.stop_flag.store(false, Ordering::Release);
+    let stop_flag = state.stop_flag.clone();
 
     *state
         .is_capturing
@@ -207,9 +209,17 @@ pub async fn start_system_audio_capture(
     let state_clone = app.state::<crate::AudioState>();
     let task = tokio::spawn(async move {
         let session_path = if vad_config.enabled {
-            run_vad_capture(app_clone.clone(), stream, sr, vad_config, monitor_output_uid).await
+            run_vad_capture(
+                app_clone.clone(),
+                stream,
+                sr,
+                vad_config,
+                monitor_output_uid,
+                stop_flag,
+            )
+            .await
         } else {
-            run_continuous_capture(app_clone.clone(), stream, sr, vad_config).await;
+            run_continuous_capture(app_clone.clone(), stream, sr, vad_config, stop_flag).await;
             None
         };
 
@@ -242,6 +252,7 @@ async fn run_vad_capture(
     // the frontend can restart on the new device instead of silently tapping
     // the old one.
     monitor_output_uid: Option<String>,
+    stop_flag: Arc<AtomicBool>,
 ) -> Option<std::path::PathBuf> {
     let mut stream = stream;
     let mut last_device_check = Instant::now();
@@ -280,6 +291,10 @@ async fn run_vad_capture(
     let mut utterance_start_time: f32 = 0.0;
 
     while let Some(sample) = stream.next().await {
+        if stop_flag.load(Ordering::Acquire) {
+            break;
+        }
+
         // Detect a mid-session default-output-device switch (checked ~1x/sec so
         // the CoreAudio query stays off the hot path). On a switch the tap is
         // still bound to the old device and would capture silence, so stop and
@@ -548,6 +563,7 @@ async fn run_continuous_capture(
     stream: impl StreamExt<Item = f32> + Unpin,
     sr: u32,
     config: VadConfig,
+    stop_flag: Arc<AtomicBool>,
 ) -> Option<std::path::PathBuf> {
     let mut stream = stream;
     let max_samples = (sr as u64 * config.max_recording_duration_secs) as usize;
@@ -562,8 +578,6 @@ async fn run_continuous_capture(
     let mut last_chunk_time = Instant::now();
     let chunk_interval = Duration::from_millis(config.chunk_interval_ms);
 
-    // Atomic flag for manual stop
-    let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_for_listener = stop_flag.clone();
 
     // Listen for manual stop event
@@ -810,11 +824,31 @@ fn samples_to_raw_f32_b64(mono_f32: &[f32]) -> Result<String, String> {
     Ok(B64.encode(&bytes))
 }
 
+async fn await_capture_shutdown(
+    mut task: tokio::task::JoinHandle<Option<std::path::PathBuf>>,
+    deadline: Duration,
+) -> Option<std::path::PathBuf> {
+    match tokio::time::timeout(deadline, &mut task).await {
+        Ok(Ok(path)) => path,
+        Ok(Err(error)) => {
+            error!("Capture task ended before cleanup completed: {}", error);
+            None
+        }
+        Err(_) => {
+            error!("Capture task did not finish within the shutdown deadline");
+            task.abort();
+            let _ = task.await;
+            None
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn stop_system_audio_capture(
     app: AppHandle,
 ) -> Result<Option<std::path::PathBuf>, String> {
     let state = app.state::<crate::AudioState>();
+    state.stop_flag.store(true, Ordering::Release);
 
     // Take the task and await it so the capture function can finish writing
     // its session WAV before we return to the frontend.
@@ -827,15 +861,7 @@ pub async fn stop_system_audio_capture(
     };
 
     let session_path = if let Some(task) = task {
-        task.abort();
-        match tokio::time::timeout(tokio::time::Duration::from_secs(5), task).await {
-            Ok(Ok(path)) => path,
-            Ok(Err(_)) => None,
-            Err(_) => {
-                error!("Capture task did not finish within 5 seconds after abort");
-                None
-            }
-        }
+        await_capture_shutdown(task, Duration::from_secs(5)).await
     } else {
         None
     };
@@ -1050,6 +1076,32 @@ mod tests {
         assert!(silero_is_speech(true, 0.35));
         assert!(!silero_is_speech(true, 0.34));
         assert!(!silero_is_speech(true, 0.10));
+    }
+
+    #[tokio::test]
+    async fn capture_shutdown_waits_for_cleanup_result() {
+        let expected = std::env::temp_dir().join("capture-cleanup.wav");
+        let task_path = expected.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Some(task_path)
+        });
+
+        let result = await_capture_shutdown(task, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn capture_shutdown_times_out_without_hanging() {
+        let task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+            None
+        });
+
+        let result = await_capture_shutdown(task, Duration::from_millis(1)).await;
+
+        assert_eq!(result, None);
     }
 }
 

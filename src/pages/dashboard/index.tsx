@@ -5,7 +5,10 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatConversation } from "@/types/completion";
-import { TOGGLE_WINDOW_VISIBILITY } from "@/lib/live-session";
+import {
+  deriveLiveAnswerDraft,
+  TOGGLE_WINDOW_VISIBILITY,
+} from "@/lib/live-session";
 import { useLiveSession } from "@/hooks/useLiveSession";
 import { EmbeddedBar } from "./components/EmbeddedBar";
 import { TranscriptFeed } from "./components/TranscriptFeed";
@@ -79,6 +82,7 @@ const Dashboard = () => {
       : null;
   const isLive = Boolean(snapshot?.capturing || liveConversation);
   const displayed = liveConversation ?? conversations[0] ?? null;
+  const liveAnswerDraft = deriveLiveAnswerDraft(snapshot);
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-background">
@@ -105,7 +109,7 @@ const Dashboard = () => {
             conversation={displayed}
             live={isLive}
             partialTranscription={snapshot?.partialTranscription ?? ""}
-            isAIProcessing={snapshot?.isAIProcessing ?? false}
+            liveAnswerDraft={liveAnswerDraft}
           />
           <button
             onClick={() => setRailCollapsed((v) => !v)}

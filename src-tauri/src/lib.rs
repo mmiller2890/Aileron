@@ -3,6 +3,7 @@ mod capture;
 mod db;
 mod shortcuts;
 mod window;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, WebviewWindow};
 use tokio::task::JoinHandle;
@@ -19,6 +20,7 @@ pub struct AudioState {
     stream_task: Arc<Mutex<Option<JoinHandle<Option<std::path::PathBuf>>>>>,
     vad_config: Arc<Mutex<VadConfig>>,
     is_capturing: Arc<Mutex<bool>>,
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl Default for AudioState {
@@ -27,6 +29,7 @@ impl Default for AudioState {
             stream_task: Arc::new(Mutex::new(None)),
             vad_config: Arc::new(Mutex::new(VadConfig::default())),
             is_capturing: Arc::new(Mutex::new(false)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 }

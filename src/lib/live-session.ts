@@ -66,6 +66,12 @@ export type LiveSessionCommand =
   | { action: Exclude<LiveSessionCommandAction, "submit"> }
   | { action: "submit"; text: string };
 
+export function deriveLiveAnswerDraft(
+  snapshot: LiveSessionSnapshot | null
+): string | null {
+  return snapshot?.isAIProcessing ? snapshot.lastAIResponse : null;
+}
+
 /**
  * The one status ladder for rendering session state (word + slate classes).
  * Priority mirrors the overlay's StatusIndicator: error > answering >

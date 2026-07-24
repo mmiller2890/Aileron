@@ -35,6 +35,7 @@ import {
 import { useQuickActions } from "./system-audio/useQuickActions";
 import { useContextSettings } from "./system-audio/useContextSettings";
 import { useCaptureKeyboardShortcuts } from "./system-audio/useCaptureKeyboardShortcuts";
+import { beginCaptureSession } from "./system-audio/startCaptureSession";
 
 export type { VadConfig };
 
@@ -899,43 +900,6 @@ export function useSystemAudio() {
       }
 
       const isContinuous = !vadConfig.enabled;
-
-      const conversationId = generateConversationId("sysaudio");
-      setConversation({
-        id: conversationId,
-        title: "",
-        messages: [],
-        createdAt: 0,
-        updatedAt: 0,
-      });
-
-      setCapturing(true);
-      capturingRef.current = true;
-      setSessionStartedAt(Date.now());
-      setIsPopoverOpen(true);
-      setIsContinuousMode(isContinuous);
-      setRecordingProgress(0);
-      setAudioLevel(0);
-      setNoAudioDetected(false);
-      // Cancel a summary still streaming from the previous session: clearing
-      // the text isn't enough, its chunks would repopulate the panel. Bumping
-      // the sequence also invalidates it if the generator outlives the abort.
-      summaryAbortRef.current?.abort();
-      summarySeqRef.current++;
-      setSessionSummary("");
-      setIsSummarizing(false);
-      utteranceTimestampsRef.current = [];
-      setSpeakerSegments([]);
-      setIsLabelingSpeakers(false);
-      setCurrentSpeaker(null);
-
-      if (isContinuous) {
-        setIsRecordingInContinuousMode(false);
-        return;
-      }
-
-      await invoke<string>("stop_system_audio_capture");
-
       const deviceId =
         selectedAudioDevices.output.id !== "default"
           ? selectedAudioDevices.output.id
@@ -945,10 +909,45 @@ export function useSystemAudio() {
         (p) => p.id === selectedSttProvider.provider
       );
 
-      await invoke<string>("start_system_audio_capture", {
-        vadConfig: vadConfig,
-        deviceId: deviceId,
-        streaming: providerConfig?.streaming === true,
+      await beginCaptureSession({
+        isContinuous,
+        startBackend: async () => {
+          await invoke<string>("stop_system_audio_capture");
+          await invoke<string>("start_system_audio_capture", {
+            vadConfig: vadConfig,
+            deviceId: deviceId,
+            streaming: providerConfig?.streaming === true,
+          });
+        },
+        commitStarted: () => {
+          const conversationId = generateConversationId("sysaudio");
+          setConversation({
+            id: conversationId,
+            title: "",
+            messages: [],
+            createdAt: 0,
+            updatedAt: 0,
+          });
+          setCapturing(true);
+          capturingRef.current = true;
+          setSessionStartedAt(Date.now());
+          setIsPopoverOpen(true);
+          setIsContinuousMode(isContinuous);
+          setRecordingProgress(0);
+          setAudioLevel(0);
+          setNoAudioDetected(false);
+          summaryAbortRef.current?.abort();
+          summarySeqRef.current++;
+          setSessionSummary("");
+          setIsSummarizing(false);
+          utteranceTimestampsRef.current = [];
+          setSpeakerSegments([]);
+          setIsLabelingSpeakers(false);
+          setCurrentSpeaker(null);
+          if (isContinuous) {
+            setIsRecordingInContinuousMode(false);
+          }
+        },
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);

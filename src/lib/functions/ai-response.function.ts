@@ -10,6 +10,10 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import curl2Json from "@bany/curl-to-json";
 import { getResponseSettings, RESPONSE_LENGTHS, LANGUAGES } from "@/lib";
 import { MARKDOWN_FORMATTING_INSTRUCTIONS } from "@/config/constants";
+import {
+  isApiKeyOptional,
+  omitEmptyApiKeyHeaders,
+} from "./provider-auth";
 
 function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
   const responseSettings = getResponseSettings();
@@ -88,10 +92,21 @@ export async function* fetchAIResponse(params: {
     }
 
     const extractedVariables = extractVariables(provider.curl);
-    // Local providers (Ollama, LM Studio) hit localhost and ignore the
-    // Authorization header, so API_KEY is optional for them even though their
-    // template carries {{API_KEY}}.
-    const apiKeyOptional = ["ollama", "lm-studio"].includes(provider.id ?? "");
+    const allVariables = {
+      API_KEY: "",
+      ...Object.fromEntries(
+        Object.entries(selectedProvider.variables).map(([key, value]) => [
+          key.toUpperCase(),
+          value,
+        ])
+      ),
+      SYSTEM_PROMPT: enhancedSystemPrompt || "",
+    };
+    const resolvedUrl = deepVariableReplacer(
+      curlJson.url || "",
+      allVariables
+    );
+    const apiKeyOptional = isApiKeyOptional(provider.id, resolvedUrl);
     const requiredVars = extractedVariables.filter(
       ({ key }) =>
         key !== "SYSTEM_PROMPT" &&
@@ -136,21 +151,19 @@ export async function* fetchAIResponse(params: {
       bodyObj[messagesKey] = finalMessages;
     }
 
-    const allVariables = {
-      API_KEY: "",
-      ...Object.fromEntries(
-        Object.entries(selectedProvider.variables).map(([key, value]) => [
-          key.toUpperCase(),
-          value,
-        ])
-      ),
-      SYSTEM_PROMPT: enhancedSystemPrompt || "",
-    };
-
     bodyObj = deepVariableReplacer(bodyObj, allVariables);
-    let url = deepVariableReplacer(curlJson.url || "", allVariables);
+    const url = resolvedUrl;
 
-    const headers = deepVariableReplacer(curlJson.header || {}, allVariables);
+    const templateHeaders = (curlJson.header || {}) as Record<string, unknown>;
+    let headers = deepVariableReplacer(
+      templateHeaders,
+      allVariables
+    ) as Record<string, string>;
+    headers = omitEmptyApiKeyHeaders(
+      headers,
+      templateHeaders,
+      allVariables.API_KEY
+    );
     headers["Content-Type"] = "application/json";
 
     if (provider?.streaming) {

@@ -17,6 +17,11 @@ import {
 } from "@/lib";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { createAsyncListenerScope } from "@/lib/async-listener-scope";
+import {
+  appendWithinLimit,
+  selectImageFilesWithinLimit,
+} from "@/lib/attachments";
 
 // Types for completion
 interface AttachedFile {
@@ -120,7 +125,7 @@ export const useCompletion = () => {
 
       setState((prev) => ({
         ...prev,
-        attachedFiles: [...prev.attachedFiles, attachedFile],
+        attachedFiles: appendWithinLimit(prev.attachedFiles, [attachedFile]),
       }));
     } catch (error) {
       console.error("Failed to process file:", error);
@@ -526,15 +531,12 @@ export const useCompletion = () => {
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    const MAX_FILES = 6;
-
-    files.forEach((file) => {
-      if (
-        file.type.startsWith("image/") &&
-        state.attachedFiles.length < MAX_FILES
-      ) {
-        addFile(file);
-      }
+    const selectedFiles = selectImageFilesWithinLimit(
+      files,
+      state.attachedFiles.length
+    );
+    selectedFiles.forEach((file) => {
+      addFile(file);
     });
 
     // Reset input so same file can be selected again
@@ -737,19 +739,13 @@ export const useCompletion = () => {
       if (hasImages) {
         e.preventDefault();
 
-        const processedFiles: File[] = [];
-
-        Array.from(items).forEach((item) => {
-          if (
-            item.type.startsWith("image/") &&
-            state.attachedFiles.length + processedFiles.length < MAX_FILES
-          ) {
-            const file = item.getAsFile();
-            if (file) {
-              processedFiles.push(file);
-            }
-          }
-        });
+        const clipboardFiles = Array.from(items)
+          .map((item) => item.getAsFile())
+          .filter((file): file is File => file !== null);
+        const processedFiles = selectImageFilesWithinLimit(
+          clipboardFiles,
+          state.attachedFiles.length
+        );
 
         // Process all files
         await Promise.all(processedFiles.map((file) => addFile(file)));
@@ -919,60 +915,72 @@ export const useCompletion = () => {
   }, [handleScreenshotSubmit]);
 
   useEffect(() => {
-    let unlisten: any;
+    const scope = createAsyncListenerScope();
+    void scope
+      .add(
+        listen<string>(
+          "captured-selection",
+          scope.guard(async (event) => {
+            if (!screenshotInitiatedByThisContext.current) {
+              return;
+            }
 
-    const setupListener = async () => {
-      unlisten = await listen("captured-selection", async (event: any) => {
-        if (!screenshotInitiatedByThisContext.current) {
-          return;
-        }
+            if (isProcessingScreenshotRef.current) {
+              return;
+            }
 
-        if (isProcessingScreenshotRef.current) {
-          return;
-        }
+            isProcessingScreenshotRef.current = true;
+            const base64 = event.payload;
+            const config = screenshotConfigRef.current;
 
-        isProcessingScreenshotRef.current = true;
-        const base64 = event.payload;
-        const config = screenshotConfigRef.current;
-
-        try {
-          if (config.mode === "auto") {
-            // Auto mode: Submit directly to AI with the configured prompt
-            await handleScreenshotSubmit(base64 as string, config.autoPrompt);
-          } else if (config.mode === "manual") {
-            // Manual mode: Add to attached files without prompt
-            await handleScreenshotSubmit(base64 as string);
-          }
-        } catch (error) {
-          console.error("Error processing selection:", error);
-        } finally {
-          setIsScreenshotLoading(false);
-          screenshotInitiatedByThisContext.current = false;
-          setTimeout(() => {
-            isProcessingScreenshotRef.current = false;
-          }, 100);
-        }
+            try {
+              if (config.mode === "auto") {
+                // Auto mode: Submit directly to AI with the configured prompt
+                await handleScreenshotSubmit(base64, config.autoPrompt);
+              } else if (config.mode === "manual") {
+                // Manual mode: Add to attached files without prompt
+                await handleScreenshotSubmit(base64);
+              }
+            } catch (error) {
+              console.error("Error processing selection:", error);
+            } finally {
+              setIsScreenshotLoading(false);
+              screenshotInitiatedByThisContext.current = false;
+              setTimeout(() => {
+                isProcessingScreenshotRef.current = false;
+              }, 100);
+            }
+          })
+        )
+      )
+      .catch((error) => {
+        console.error("Failed to listen for captured selection:", error);
       });
-    };
-
-    setupListener();
 
     return () => {
-      if (unlisten) {
-        unlisten();
-      }
+      scope.dispose();
     };
   }, [handleScreenshotSubmit]);
 
   useEffect(() => {
-    const unlisten = listen("capture-closed", () => {
-      setIsScreenshotLoading(false);
-      isProcessingScreenshotRef.current = false;
-      screenshotInitiatedByThisContext.current = false;
-    });
+    const scope = createAsyncListenerScope();
+    void scope
+      .add(
+        listen(
+          "capture-closed",
+          scope.guard(() => {
+            setIsScreenshotLoading(false);
+            isProcessingScreenshotRef.current = false;
+            screenshotInitiatedByThisContext.current = false;
+          })
+        )
+      )
+      .catch((error) => {
+        console.error("Failed to listen for capture close:", error);
+      });
 
     return () => {
-      unlisten.then((fn) => fn());
+      scope.dispose();
     };
   }, []);
 

@@ -36,6 +36,11 @@ import { useQuickActions } from "./system-audio/useQuickActions";
 import { useContextSettings } from "./system-audio/useContextSettings";
 import { useCaptureKeyboardShortcuts } from "./system-audio/useCaptureKeyboardShortcuts";
 import { beginCaptureSession } from "./system-audio/startCaptureSession";
+import { createAsyncListenerScope } from "@/lib/async-listener-scope";
+import {
+  RecentSpeechEventFingerprints,
+  type SpeechEventPayload,
+} from "@/lib/speech-event-dedupe";
 
 export type { VadConfig };
 
@@ -149,6 +154,7 @@ export function useSystemAudio() {
   const isSavingRef = useRef<boolean>(false);
   const capturedSampleRateRef = useRef<number>(16000);
   const utteranceTimestampsRef = useRef<Array<{ start: number; end: number }>>([]);
+  const recentSpeechEventsRef = useRef(new RecentSpeechEventFingerprints());
 
   const capturingRef = useRef(capturing);
   const selectedSttProviderRef = useRef(selectedSttProvider);
@@ -197,209 +203,224 @@ export function useSystemAudio() {
   });
 
   useEffect(() => {
-    let progressUnlisten: (() => void) | undefined;
-    let startUnlisten: (() => void) | undefined;
-    let stopUnlisten: (() => void) | undefined;
-    let errorUnlisten: (() => void) | undefined;
-    let discardedUnlisten: (() => void) | undefined;
-    let captureStartedUnlisten: (() => void) | undefined;
-
-    const setupContinuousListeners = async () => {
-      try {
-        captureStartedUnlisten = await listen("capture-started", (event) => {
-          capturedSampleRateRef.current = event.payload as number;
-        });
-
-        progressUnlisten = await listen("recording-progress", (event) => {
-          const seconds = event.payload as number;
-          setRecordingProgress(seconds);
-        });
-
-        startUnlisten = await listen("continuous-recording-start", () => {
-          setRecordingProgress(0);
-          setIsRecordingInContinuousMode(true);
-          openStreamingSocket();
-        });
-
-        stopUnlisten = await listen("continuous-recording-stopped", () => {
-          setRecordingProgress(0);
-          setIsRecordingInContinuousMode(false);
-          closeStreamingSocket();
-        });
-
-        errorUnlisten = await listen("audio-encoding-error", (event) => {
-          const errorMsg = event.payload as string;
-          console.error("Audio encoding error:", errorMsg);
-          setError(`Failed to process audio: ${errorMsg}`);
-          setIsProcessing(false);
-          setIsAIProcessing(false);
-          setIsRecordingInContinuousMode(false);
-        });
-
-        discardedUnlisten = await listen("speech-discarded", () => {});
-      } catch (err) {
-        console.error("Failed to setup continuous recording listeners:", err);
-      }
-    };
-
-    setupContinuousListeners();
+    const scope = createAsyncListenerScope();
+    void Promise.all([
+      scope.add(
+        listen(
+          "capture-started",
+          scope.guard((event) => {
+            capturedSampleRateRef.current = event.payload as number;
+            recentSpeechEventsRef.current.clear();
+          })
+        )
+      ),
+      scope.add(
+        listen(
+          "recording-progress",
+          scope.guard((event) => {
+            const seconds = event.payload as number;
+            setRecordingProgress(seconds);
+          })
+        )
+      ),
+      scope.add(
+        listen(
+          "continuous-recording-start",
+          scope.guard(() => {
+            setRecordingProgress(0);
+            setIsRecordingInContinuousMode(true);
+            openStreamingSocket();
+          })
+        )
+      ),
+      scope.add(
+        listen(
+          "continuous-recording-stopped",
+          scope.guard(() => {
+            setRecordingProgress(0);
+            setIsRecordingInContinuousMode(false);
+            closeStreamingSocket();
+          })
+        )
+      ),
+      scope.add(
+        listen(
+          "audio-encoding-error",
+          scope.guard((event) => {
+            const errorMsg = event.payload as string;
+            console.error("Audio encoding error:", errorMsg);
+            setError(`Failed to process audio: ${errorMsg}`);
+            setIsProcessing(false);
+            setIsAIProcessing(false);
+            setIsRecordingInContinuousMode(false);
+          })
+        )
+      ),
+      scope.add(listen("speech-discarded", scope.guard(() => {}))),
+    ]).catch((err) => {
+      console.error("Failed to setup continuous recording listeners:", err);
+    });
 
     return () => {
-      if (progressUnlisten) progressUnlisten();
-      if (startUnlisten) startUnlisten();
-      if (stopUnlisten) stopUnlisten();
-      if (errorUnlisten) errorUnlisten();
-      if (discardedUnlisten) discardedUnlisten();
-      if (captureStartedUnlisten) captureStartedUnlisten();
+      scope.dispose();
     };
   }, []);
 
   useEffect(() => {
-    let speechUnlisten: (() => void) | undefined;
-    let speechStartUnlisten: (() => void) | undefined;
-    let speechChunkUnlisten: (() => void) | undefined;
-
-    const setupEventListener = async () => {
-      try {
-        speechStartUnlisten = await listen("speech-start", () => {
-          if (selectedSttProviderRef.current.provider === "local-fluidaudio") {
-            return;
-          }
-          openStreamingSocket();
-        });
-
-        speechChunkUnlisten = await listen("speech-chunk", (event) => {
-          sendAudioChunk(event.payload as string);
-        });
-
-        speechUnlisten = await listen("speech-detected", async (event) => {
-          try {
-            if (!capturingRef.current) return;
-
-            if (streamingFinalizedRef.current) {
-              streamingFinalizedRef.current = false;
-              closeStreamingSocket();
+    const scope = createAsyncListenerScope();
+    void Promise.all([
+      scope.add(
+        listen(
+          "speech-start",
+          scope.guard(() => {
+            if (
+              selectedSttProviderRef.current.provider === "local-fluidaudio"
+            ) {
               return;
             }
-
-            closeStreamingSocket();
-            batchProcessedForCurrentUtteranceRef.current = true;
-
-            const payload = event.payload as {
-              audio: string;
-              start_time: number;
-              end_time: number;
-            };
-
-            const base64Audio = payload.audio;
-            if (!base64Audio || base64Audio.length < 100) {
-              return;
-            }
-
-            if (payload.start_time !== 0 || payload.end_time !== 0) {
-              utteranceTimestampsRef.current.push({
-                start: payload.start_time,
-                end: payload.end_time,
-              });
-            }
-
-            const binaryString = atob(base64Audio);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-              bytes[i] = binaryString.charCodeAt(i);
-            }
-            const audioBlob = new Blob([bytes], { type: "audio/wav" });
-
-            const currentSelected = selectedSttProviderRef.current;
-            const currentProviders = allSttProvidersRef.current;
-
-            if (!currentSelected.provider) {
-              setError("No speech provider selected.");
-              return;
-            }
-
-            const providerConfig = currentProviders.find(
-              (p) => p.id === currentSelected.provider
-            );
-
-            if (!providerConfig) {
-              setError("Speech provider config not found.");
-              return;
-            }
-
-            setIsProcessing(true);
-
-            const sttAbortController = new AbortController();
-            const timeoutId = setTimeout(() => {
-              sttAbortController.abort();
-            }, 30000);
-
+            openStreamingSocket();
+          })
+        )
+      ),
+      scope.add(
+        listen(
+          "speech-chunk",
+          scope.guard((event) => {
+            sendAudioChunk(event.payload as string);
+          })
+        )
+      ),
+      scope.add(
+        listen(
+          "speech-detected",
+          scope.guard(async (event) => {
             try {
-              const transcription = await fetchSTT({
-                provider: providerConfig,
-                selectedProvider: currentSelected,
-                audio: audioBlob,
-                signal: sttAbortController.signal,
-              });
+              if (!capturingRef.current) return;
 
-              if (transcription.trim()) {
-                setLastTranscription(transcription);
-                setError("");
+              const payload = event.payload as SpeechEventPayload;
+              const base64Audio = payload.audio;
+              if (!base64Audio || base64Audio.length < 100) {
+                return;
+              }
+              if (!recentSpeechEventsRef.current.claim(payload)) {
+                return;
+              }
 
-                // Every utterance lands in the transcript; only likely
-                // questions earn an automatic answer. The rest can be
-                // answered on demand via the answer-last shortcut.
-                const messageId = appendUtteranceMessage(transcription);
-                lastUtteranceRef.current = { text: transcription, messageId };
+              if (streamingFinalizedRef.current) {
+                streamingFinalizedRef.current = false;
+                closeStreamingSocket();
+                return;
+              }
 
-                if (isLikelyQuestion(transcription)) {
-                  const effectiveSystemPrompt = getEffectiveSystemPrompt();
+              closeStreamingSocket();
+              batchProcessedForCurrentUtteranceRef.current = true;
 
-                  const previousMessages = buildAIHistory(
-                    conversationMessagesRef.current,
-                    messageId
-                  );
+              if (payload.start_time !== 0 || payload.end_time !== 0) {
+                utteranceTimestampsRef.current.push({
+                  start: payload.start_time,
+                  end: payload.end_time,
+                });
+              }
 
-                  await processWithAIRef.current(
-                    transcription,
-                    effectiveSystemPrompt,
-                    previousMessages,
-                    messageId
+              const binaryString = atob(base64Audio);
+              const bytes = new Uint8Array(binaryString.length);
+              for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+              }
+              const audioBlob = new Blob([bytes], { type: "audio/wav" });
+
+              const currentSelected = selectedSttProviderRef.current;
+              const currentProviders = allSttProvidersRef.current;
+
+              if (!currentSelected.provider) {
+                setError("No speech provider selected.");
+                return;
+              }
+
+              const providerConfig = currentProviders.find(
+                (p) => p.id === currentSelected.provider
+              );
+
+              if (!providerConfig) {
+                setError("Speech provider config not found.");
+                return;
+              }
+
+              setIsProcessing(true);
+
+              const sttAbortController = new AbortController();
+              const timeoutId = setTimeout(() => {
+                sttAbortController.abort();
+              }, 30000);
+
+              try {
+                const transcription = await fetchSTT({
+                  provider: providerConfig,
+                  selectedProvider: currentSelected,
+                  audio: audioBlob,
+                  signal: sttAbortController.signal,
+                });
+
+                if (transcription.trim()) {
+                  setLastTranscription(transcription);
+                  setError("");
+
+                  // Every utterance lands in the transcript; only likely
+                  // questions earn an automatic answer. The rest can be
+                  // answered on demand via the answer-last shortcut.
+                  const messageId = appendUtteranceMessage(transcription);
+                  lastUtteranceRef.current = {
+                    text: transcription,
+                    messageId,
+                  };
+
+                  if (isLikelyQuestion(transcription)) {
+                    const effectiveSystemPrompt = getEffectiveSystemPrompt();
+
+                    const previousMessages = buildAIHistory(
+                      conversationMessagesRef.current,
+                      messageId
+                    );
+
+                    await processWithAIRef.current(
+                      transcription,
+                      effectiveSystemPrompt,
+                      previousMessages,
+                      messageId
+                    );
+                  }
+                } else {
+                  // Non-speech segments (music, ambience) legitimately transcribe
+                  // to nothing — skip them quietly instead of surfacing an error.
+                  console.warn(
+                    "Skipping empty transcription for non-speech segment"
                   );
                 }
-              } else {
-                // Non-speech segments (music, ambience) legitimately transcribe
-                // to nothing — skip them quietly instead of surfacing an error.
-                console.warn("Skipping empty transcription for non-speech segment");
+              } catch (sttError: any) {
+                console.error("STT Error:", sttError);
+                if (sttAbortController.signal.aborted) {
+                  setError("Speech transcription timed out (30s)");
+                } else {
+                  setError(sttError.message || "Failed to transcribe audio");
+                }
+                setIsPopoverOpen(true);
+              } finally {
+                clearTimeout(timeoutId);
               }
-            } catch (sttError: any) {
-              console.error("STT Error:", sttError);
-              if (sttAbortController.signal.aborted) {
-                setError("Speech transcription timed out (30s)");
-              } else {
-                setError(sttError.message || "Failed to transcribe audio");
-              }
-              setIsPopoverOpen(true);
+            } catch (err) {
+              setError("Failed to process speech");
             } finally {
-              clearTimeout(timeoutId);
+              setIsProcessing(false);
             }
-          } catch (err) {
-            setError("Failed to process speech");
-          } finally {
-            setIsProcessing(false);
-          }
-        });
-      } catch (err) {
-        setError("Failed to setup speech listener");
-      }
-    };
-
-    setupEventListener();
+          })
+        )
+      ),
+    ]).catch(() => {
+      setError("Failed to setup speech listener");
+    });
 
     return () => {
-      if (speechUnlisten) speechUnlisten();
-      if (speechStartUnlisten) speechStartUnlisten();
-      if (speechChunkUnlisten) speechChunkUnlisten();
+      scope.dispose();
       closeStreamingSocket();
       streamingFinalizedRef.current = false;
       batchProcessedForCurrentUtteranceRef.current = false;
@@ -765,44 +786,53 @@ export function useSystemAudio() {
   }, []);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        unlisten = await listen("custom-shortcut-triggered", (event) => {
-          const action = (event.payload as { action?: string })?.action;
-          if (action === "answer_last") {
-            answerLastRef.current();
-          }
-        });
-      } catch (err) {
+    const scope = createAsyncListenerScope();
+    void scope
+      .add(
+        listen(
+          "custom-shortcut-triggered",
+          scope.guard((event) => {
+            const action = (event.payload as { action?: string })?.action;
+            if (action === "answer_last") {
+              answerLastRef.current();
+            }
+          })
+        )
+      )
+      .catch((err) => {
         console.warn("Failed to listen for answer-last shortcut:", err);
-      }
-    })();
+      });
     return () => {
-      unlisten?.();
+      scope.dispose();
     };
   }, []);
 
   // Input-level meter + no-audio detection from the VAD capture loop.
   // Registered once.
   useEffect(() => {
-    let unlistenLevel: (() => void) | undefined;
-    let unlistenSilent: (() => void) | undefined;
-    (async () => {
-      try {
-        unlistenLevel = await listen("audio-level", (event) => {
-          setAudioLevel((event.payload as number) ?? 0);
-        });
-        unlistenSilent = await listen("audio-silent", () => {
-          setNoAudioDetected(true);
-        });
-      } catch (err) {
-        console.warn("Failed to listen for audio level events:", err);
-      }
-    })();
+    const scope = createAsyncListenerScope();
+    void Promise.all([
+      scope.add(
+        listen(
+          "audio-level",
+          scope.guard((event) => {
+            setAudioLevel((event.payload as number) ?? 0);
+          })
+        )
+      ),
+      scope.add(
+        listen(
+          "audio-silent",
+          scope.guard(() => {
+            setNoAudioDetected(true);
+          })
+        )
+      ),
+    ]).catch((err) => {
+      console.warn("Failed to listen for audio level events:", err);
+    });
     return () => {
-      unlistenLevel?.();
-      unlistenSilent?.();
+      scope.dispose();
     };
   }, []);
 
@@ -811,34 +841,37 @@ export function useSystemAudio() {
   // otherwise keep capturing silence. Transparently restart on the new device.
   // Registered once; reads everything through refs.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        unlisten = await listen("audio-device-changed", async () => {
-          if (!capturingRef.current) return;
-          setError("Audio device changed — reconnecting…");
-          try {
-            await invoke("stop_system_audio_capture");
-            const providerConfig = allSttProvidersRef.current.find(
-              (p) => p.id === selectedSttProviderRef.current.provider
-            );
-            await invoke<string>("start_system_audio_capture", {
-              vadConfig: vadConfigRef.current,
-              deviceId: null, // follow the new default device
-              streaming: providerConfig?.streaming === true,
-            });
-            setError("");
-          } catch (err) {
-            console.error("Failed to reconnect after device change:", err);
-            setError(`Audio device changed and reconnecting failed: ${err}`);
-          }
-        });
-      } catch (err) {
+    const scope = createAsyncListenerScope();
+    void scope
+      .add(
+        listen(
+          "audio-device-changed",
+          scope.guard(async () => {
+            if (!capturingRef.current) return;
+            setError("Audio device changed — reconnecting…");
+            try {
+              await invoke("stop_system_audio_capture");
+              const providerConfig = allSttProvidersRef.current.find(
+                (p) => p.id === selectedSttProviderRef.current.provider
+              );
+              await invoke<string>("start_system_audio_capture", {
+                vadConfig: vadConfigRef.current,
+                deviceId: null, // follow the new default device
+                streaming: providerConfig?.streaming === true,
+              });
+              setError("");
+            } catch (err) {
+              console.error("Failed to reconnect after device change:", err);
+              setError(`Audio device changed and reconnecting failed: ${err}`);
+            }
+          })
+        )
+      )
+      .catch((err) => {
         console.warn("Failed to listen for audio-device-changed:", err);
-      }
-    })();
+      });
     return () => {
-      unlisten?.();
+      scope.dispose();
     };
   }, []);
 
@@ -1323,26 +1356,33 @@ export function useSystemAudio() {
     setup: () => void handleSetup(),
   };
   useEffect(() => {
-    const unlisten = listen<LiveSessionCommand>(
-      LIVE_SESSION_COMMAND,
-      (event) => {
-        const payload = event.payload;
-        if (!payload?.action) return;
-        if (payload.action === "submit") {
-          const text = payload.text?.trim();
-          if (text) {
-            submitTypedPromptRef.current(text);
-          }
-          return;
-        }
-        const handler = liveCommandHandlersRef.current[payload.action];
-        if (handler) {
-          handler();
-        }
-      }
-    );
+    const scope = createAsyncListenerScope();
+    void scope
+      .add(
+        listen<LiveSessionCommand>(
+          LIVE_SESSION_COMMAND,
+          scope.guard((event) => {
+            const payload = event.payload;
+            if (!payload?.action) return;
+            if (payload.action === "submit") {
+              const text = payload.text?.trim();
+              if (text) {
+                submitTypedPromptRef.current(text);
+              }
+              return;
+            }
+            const handler = liveCommandHandlersRef.current[payload.action];
+            if (handler) {
+              handler();
+            }
+          })
+        )
+      )
+      .catch((error) => {
+        console.error("Failed to listen for live session commands:", error);
+      });
     return () => {
-      unlisten.then((fn) => fn());
+      scope.dispose();
     };
   }, []);
 

@@ -10,11 +10,15 @@ export const MAX_AI_HISTORY_MESSAGES = 12;
 /**
  * Build the AI context window from conversation state.
  *
- * Conversation state stores messages **newest-first**, but the model needs
- * them **oldest-first** (chronological). This takes the most recent
- * `MAX_AI_HISTORY_MESSAGES`, drops the message currently being answered (so it
- * isn't duplicated as both history and the live user turn), and returns them
- * sorted by timestamp.
+ * The model needs messages **oldest-first** (chronological). This drops the
+ * message currently being answered (so it isn't duplicated as both history and
+ * the live user turn), sorts by timestamp, and keeps the most recent
+ * `MAX_AI_HISTORY_MESSAGES`.
+ *
+ * Ordering-agnostic by design: the live-session state holds messages
+ * newest-first while the overlay chat holds them oldest-first, and both call
+ * this. Sorting *before* the window is what makes that safe — slicing first
+ * would keep the oldest messages for an oldest-first caller.
  *
  * Regression guard: an earlier version sent the full history newest-first, so
  * the model saw the entire conversation reversed.
@@ -25,8 +29,8 @@ export function buildAIHistory(
 ): Message[] {
   return messages
     .filter((m) => m.id !== excludeMessageId)
-    .slice(0, MAX_AI_HISTORY_MESSAGES)
     .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-MAX_AI_HISTORY_MESSAGES)
     .map((m) => ({ role: m.role, content: m.content }));
 }
 

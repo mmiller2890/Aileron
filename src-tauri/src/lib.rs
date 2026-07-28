@@ -49,6 +49,7 @@ pub fn run() {
         )
         .manage(AudioState::default())
         .manage(stt::SttState::default())
+        .manage(stt::UtteranceStore::default())
         .manage(CaptureState::default())
         .manage(shortcuts::WindowVisibility {
             is_hidden: Mutex::new(false),
@@ -104,7 +105,9 @@ pub fn run() {
             stt::stt_init_vad,
             stt::stt_init_diarization,
             stt::stt_transcribe_speech,
+            stt::stt_transcribe_utterance,
             stt::stt_diarize_file,
+            stt::stt_discard_session_audio,
             stt::stt_get_status,
         ])
         .setup(|app| {

@@ -9,6 +9,12 @@ import {
   removeCustomAiProvider,
   validateCurl,
 } from "@/lib";
+import {
+  AI_PROVIDER_SECRET_KEY,
+  removeProviderAndSecret,
+  syncProviderMetadataChange,
+} from "@/lib/provider-sync";
+import { removeSecret } from "@/lib/storage/secure-secrets";
 
 export function useCustomAiProviders() {
   const { loadData } = useApp();
@@ -19,6 +25,7 @@ export function useCustomAiProviders() {
     streaming: false,
     responseContentPath: "",
     isCustom: true,
+    capabilities: {},
     curl: "",
   });
 
@@ -58,10 +65,15 @@ export function useCustomAiProviders() {
     if (!deleteConfirm) return;
 
     try {
-      const success = removeCustomAiProvider(deleteConfirm);
+      const success = await removeProviderAndSecret({
+        providerId: deleteConfirm,
+        baseKey: AI_PROVIDER_SECRET_KEY,
+        removeProvider: removeCustomAiProvider,
+        removeSecret,
+      });
       if (success) {
         setDeleteConfirm(null);
-        loadData(); // Refresh data
+        syncProviderMetadataChange(loadData);
       }
     } catch (error) {
       console.error("Error deleting custom provider:", error);
@@ -102,6 +114,7 @@ export function useCustomAiProviders() {
           curl: formData.curl,
           streaming: formData.streaming,
           responseContentPath: formData.responseContentPath,
+          capabilities: formData.capabilities,
         });
 
         if (success) {
@@ -112,9 +125,10 @@ export function useCustomAiProviders() {
             streaming: false,
             responseContentPath: "",
             isCustom: true,
+            capabilities: {},
             curl: "",
           });
-          loadData(); // Refresh data
+          syncProviderMetadataChange(loadData);
         }
       } else {
         // Create new provider
@@ -122,6 +136,7 @@ export function useCustomAiProviders() {
           curl: formData.curl,
           streaming: formData.streaming,
           responseContentPath: formData.responseContentPath,
+          capabilities: formData.capabilities,
         };
 
         const saved = addCustomAiProvider(newProvider);
@@ -132,9 +147,10 @@ export function useCustomAiProviders() {
             streaming: false,
             responseContentPath: "",
             isCustom: true,
+            capabilities: {},
             curl: "",
           });
-          loadData(); // Refresh data
+          syncProviderMetadataChange(loadData);
         }
       }
     } catch (error) {

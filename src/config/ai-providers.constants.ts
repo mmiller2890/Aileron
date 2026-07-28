@@ -78,6 +78,12 @@ export const AI_PROVIDERS = [
   },
   {
     id: "groq",
+    capabilities: {
+      reasoningEffort: {
+        offValue: "none" as const,
+        modelPrefixes: ["qwen/"],
+      },
+    },
     curl: `curl https://api.groq.com/openai/v1/chat/completions \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer {{API_KEY}}" \
@@ -88,7 +94,6 @@ export const AI_PROVIDERS = [
       "max_completion_tokens": 8192,
       "top_p": 1,
       "stream": true,
-      "reasoning_effort": "medium",
       "stop": null
     }'`,
     responseContentPath: "choices[0].message.content",
@@ -120,6 +125,10 @@ export const AI_PROVIDERS = [
   },
   {
     id: "ollama",
+    capabilities: {
+      reasoningEffort: { offValue: "none" as const },
+      warmup: "ollama" as const,
+    },
     curl: `curl -X POST http://localhost:11434/v1/chat/completions \\
     -H "Authorization: Bearer {{API_KEY}}" \\
     -H "Content-Type: application/json" \\
@@ -132,6 +141,9 @@ export const AI_PROVIDERS = [
   },
   {
     id: "lm-studio",
+    capabilities: {
+      reasoningEffort: { offValue: "none" as const },
+    },
     curl: `curl -X POST http://localhost:1234/v1/chat/completions \\
     -H "Content-Type: application/json" \\
     -H "Authorization: Bearer {{API_KEY}}" \\

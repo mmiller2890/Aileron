@@ -4,6 +4,10 @@ import {
   extractVariables,
   getByPath,
   getStreamingContent,
+  describeError,
+  resolveCurlUrl,
+  providerEndpointLabel,
+  redactProviderError,
 } from "./common.function";
 import { Message, TYPE_PROVIDER } from "@/types";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
@@ -85,14 +89,12 @@ export async function* fetchAIResponse(params: {
       curlJson = curl2Json(provider.curl);
     } catch (error) {
       throw new Error(
-        `Failed to parse curl: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`
+        `Failed to parse curl: ${describeError(error)}`
       );
     }
 
     const extractedVariables = extractVariables(provider.curl);
-    const allVariables = {
+    const allVariables: Record<string, string> = {
       API_KEY: "",
       ...Object.fromEntries(
         Object.entries(selectedProvider.variables).map(([key, value]) => [
@@ -102,10 +104,7 @@ export async function* fetchAIResponse(params: {
       ),
       SYSTEM_PROMPT: enhancedSystemPrompt || "",
     };
-    const resolvedUrl = deepVariableReplacer(
-      curlJson.url || "",
-      allVariables
-    );
+    const resolvedUrl = resolveCurlUrl(curlJson, allVariables);
     const apiKeyOptional = isApiKeyOptional(provider.id, resolvedUrl);
     const requiredVars = extractedVariables.filter(
       ({ key }) =>
@@ -179,6 +178,23 @@ export async function* fetchAIResponse(params: {
       }
     }
 
+    const reasoningCapability = provider.capabilities?.reasoningEffort;
+    const configuredModel = allVariables.MODEL?.trim().toLowerCase() || "";
+    const supportsConfiguredModel =
+      !reasoningCapability?.modelPrefixes?.length ||
+      reasoningCapability.modelPrefixes.some((prefix) =>
+        configuredModel.startsWith(prefix.toLowerCase())
+      );
+    if (
+      getResponseSettings().thinking === "off" &&
+      reasoningCapability &&
+      supportsConfiguredModel &&
+      typeof bodyObj === "object" &&
+      bodyObj !== null
+    ) {
+      bodyObj.reasoning_effort = reasoningCapability.offValue;
+    }
+
     const fetchFunction = url?.startsWith("https") ? fetch : tauriFetch;
 
     let response;
@@ -197,10 +213,28 @@ export async function* fetchAIResponse(params: {
       ) {
         return; // Silently return on abort
       }
-      yield `Network error during API request: ${
-        fetchError instanceof Error ? fetchError.message : "Unknown error"
-      }`;
-      return;
+      // Thrown, never yielded: a yielded failure would be indistinguishable
+      // from model output, so the caller would render it as the answer and
+      // persist it to the conversation — poisoning the history it sends back
+      // on the next turn.
+      //
+      // The URL is included because the overwhelmingly common cause is a local
+      // provider whose server simply isn't running (Ollama not started, LM
+      // Studio's server toggle off), and the bare transport message doesn't
+      // say which host failed.
+      const detail = redactProviderError(
+        describeError(fetchError),
+        allVariables
+      );
+      const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(url);
+      const endpoint = providerEndpointLabel(url);
+      throw new Error(
+        `Could not reach ${endpoint}${detail ? ` — ${detail}` : ""}.${
+          isLocal
+            ? " Check that the local server is running and serving this port."
+            : " Check the provider URL and your connection."
+        }`
+      );
     }
 
     if (!response.ok) {
@@ -208,10 +242,12 @@ export async function* fetchAIResponse(params: {
       try {
         errorText = await response.text();
       } catch {}
-      yield `API request failed: ${response.status} ${response.statusText}${
-        errorText ? ` - ${errorText}` : ""
-      }`;
-      return;
+      const safeErrorText = redactProviderError(errorText, allVariables);
+      throw new Error(
+        `API request failed: ${response.status} ${response.statusText}${
+          safeErrorText ? ` - ${safeErrorText}` : ""
+        }`
+      );
     }
 
     if (!provider?.streaming) {
@@ -219,10 +255,9 @@ export async function* fetchAIResponse(params: {
       try {
         json = await response.json();
       } catch (parseError) {
-        yield `Failed to parse non-streaming response: ${
-          parseError instanceof Error ? parseError.message : "Unknown error"
-        }`;
-        return;
+        throw new Error(
+          `Failed to parse non-streaming response: ${describeError(parseError)}`
+        );
       }
       const content =
         getByPath(json, provider?.responseContentPath || "") || "";
@@ -231,8 +266,7 @@ export async function* fetchAIResponse(params: {
     }
 
     if (!response.body) {
-      yield "Streaming not supported or response body missing";
-      return;
+      throw new Error("Streaming not supported or response body missing");
     }
 
     const reader = response.body.getReader();
@@ -257,10 +291,9 @@ export async function* fetchAIResponse(params: {
         ) {
           return; // Silently return on abort
         }
-        yield `Error reading stream: ${
-          readError instanceof Error ? readError.message : "Unknown error"
-        }`;
-        return;
+        throw new Error(
+          `Error reading stream: ${describeError(readError)}`
+        );
       }
       const { done, value } = readResult;
       if (done) break;
@@ -295,10 +328,11 @@ export async function* fetchAIResponse(params: {
       }
     }
   } catch (error) {
-    throw new Error(
-      `Error in fetchAIResponse: ${
-        error instanceof Error ? error.message : "Unknown error"
-      }`
-    );
+    // Errors raised above are already user-facing; re-wrapping them would
+    // prefix every API failure with an internal function name.
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error(`Error in fetchAIResponse: ${String(error)}`);
   }
 }

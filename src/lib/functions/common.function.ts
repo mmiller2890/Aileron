@@ -222,6 +222,114 @@ export function buildDynamicMessages(
  * @param variables A key-value map of variables to replace.
  * @returns The processed object.
  */
+/**
+ * Best-effort human-readable text for a thrown value.
+ *
+ * `instanceof Error` alone is not enough at the Tauri boundary: the HTTP
+ * plugin rejects with a plain string, which collapsed to a literal "Unknown
+ * error" and hid the actual cause (connection refused, scope denied, DNS).
+ */
+export function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message) return message;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      /* fall through to the generic label */
+    }
+  }
+  return error === undefined || error === null ? "" : String(error);
+}
+
+export function providerEndpointLabel(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "provider endpoint";
+  }
+}
+
+export function redactProviderError(
+  text: string,
+  variables: Record<string, string>
+): string {
+  let redacted = text.replace(
+    /https?:\/\/[^\s]+/gi,
+    (url) => providerEndpointLabel(url)
+  );
+  const secretValues = Object.entries(variables)
+    .filter(
+      ([key, value]) =>
+        value &&
+        /(api_?key|token|secret|password|authorization|auth)/i.test(key)
+    )
+    .map(([, value]) => value)
+    .sort((a, b) => b.length - a.length);
+
+  for (const secret of secretValues) {
+    redacted = redacted.split(secret).join("[REDACTED]");
+  }
+  return redacted;
+}
+
+/**
+ * Undo the URL normalisation `curl2Json` applies to variable placeholders.
+ *
+ * Parsing a curl command runs its URL through a URL parser, which lowercases
+ * the host and percent-encodes the path. Either mangles a `{{NAME}}`
+ * placeholder — `{{HOST}}` comes back as `{{host}}`, and a placeholder in the
+ * path as `%7B%7BNAME%7D%7D` — so the literal, uppercase match in
+ * `deepVariableReplacer` misses it and the variable is silently left
+ * unsubstituted in the request URL.
+ *
+ * No stock provider puts a variable in its URL, but custom providers can
+ * (Gemini-style `/models/{{MODEL}}:generateContent`).
+ */
+export function restoreUrlPlaceholders(url: string): string {
+  if (typeof url !== "string") return "";
+  return url
+    .replace(
+      /%7[Bb]%7[Bb]([A-Za-z0-9_]+)%7[Dd]%7[Dd]/g,
+      (_, name: string) => `{{${name.toUpperCase()}}}`
+    )
+    .replace(
+      /\{\{([A-Za-z0-9_]+)\}\}/g,
+      (_, name: string) => `{{${name.toUpperCase()}}}`
+    );
+}
+
+export function resolveCurlUrl(
+  parsedCurl: {
+    url?: string;
+    params?: Record<string, unknown>;
+  },
+  variables: Record<string, string>
+): string {
+  let url = deepVariableReplacer(
+    restoreUrlPlaceholders(parsedCurl.url || ""),
+    variables
+  );
+  const decodedParams = Object.fromEntries(
+    Object.entries(parsedCurl.params || {}).map(([key, value]) => {
+      if (typeof value !== "string") return [key, ""];
+      try {
+        return [key, decodeURIComponent(value)];
+      } catch {
+        return [key, value];
+      }
+    })
+  );
+  const replacedParams = deepVariableReplacer(decodedParams, variables);
+  const query = new URLSearchParams(replacedParams).toString();
+  if (query) {
+    url += `${url.includes("?") ? "&" : "?"}${query}`;
+  }
+  return url;
+}
+
 export function deepVariableReplacer(
   node: any,
   variables: Record<string, string>
@@ -229,7 +337,13 @@ export function deepVariableReplacer(
   if (typeof node === "string") {
     let result = node;
     for (const [key, value] of Object.entries(variables)) {
-      result = result.replace(new RegExp(`\\{\\{${key}\\}\\}`, "g"), value);
+      // Replacement *function*, not a replacement string: `$&`, `` $` ``, `$'`
+      // and `$1` are special in the string form, so a transcription or system
+      // prompt containing them would be silently corrupted.
+      result = result.replace(
+        new RegExp(`\\{\\{${key}\\}\\}`, "g"),
+        () => value
+      );
     }
     return result;
   }

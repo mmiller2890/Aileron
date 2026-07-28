@@ -227,6 +227,44 @@ export const CreateEditProvider = ({
               }
             />
           </div>
+          <div className="flex justify-between items-center space-x-2">
+            <Header
+              title="Thinking Off Support"
+              description='Enable only when this provider accepts reasoning_effort: "none".'
+            />
+            <Switch
+              checked={Boolean(formData.capabilities?.reasoningEffort)}
+              onCheckedChange={(checked) =>
+                setFormData((prev) => ({
+                  ...prev,
+                  capabilities: {
+                    ...prev.capabilities,
+                    reasoningEffort: checked
+                      ? { offValue: "none" }
+                      : undefined,
+                  },
+                }))
+              }
+            />
+          </div>
+          <div className="flex justify-between items-center space-x-2">
+            <Header
+              title="Ollama Model Warmup"
+              description="Enable only for an Ollama-compatible server that exposes /api/generate."
+            />
+            <Switch
+              checked={formData.capabilities?.warmup === "ollama"}
+              onCheckedChange={(checked) =>
+                setFormData((prev) => ({
+                  ...prev,
+                  capabilities: {
+                    ...prev.capabilities,
+                    warmup: checked ? "ollama" : undefined,
+                  },
+                }))
+              }
+            />
+          </div>
           {/* Response Configuration */}
           <div className="space-y-2">
             <Header

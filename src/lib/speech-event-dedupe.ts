@@ -2,6 +2,11 @@ export interface SpeechEventPayload {
   audio: string;
   start_time: number;
   end_time: number;
+  /**
+   * Handle for the same utterance's samples, still held by the Rust capture
+   * loop. Absent if the cache couldn't be written; callers must cope.
+   */
+  utterance_id?: string | null;
 }
 
 const DEFAULT_TTL_MS = 60_000;

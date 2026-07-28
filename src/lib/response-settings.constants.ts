@@ -218,3 +218,40 @@ export const LANGUAGES: LanguageOption[] = [
 export const DEFAULT_RESPONSE_LENGTH = "auto";
 export const DEFAULT_LANGUAGE = "english";
 export const DEFAULT_AUTO_SCROLL = true;
+
+export type ThinkingMode = "default" | "off";
+
+export interface ThinkingOption {
+  id: ThinkingMode;
+  title: string;
+  description: string;
+}
+
+/**
+ * Whether to let the model "think" (emit chain-of-thought) before answering.
+ *
+ * Reasoning models can spend the overwhelming majority of their output on
+ * thinking the UI never shows — a local Qwen3.5 measured 1,349 completion
+ * tokens to produce a 106-character answer, taking minutes. Turning it off
+ * trades some answer quality for an answer that arrives during the
+ * conversation rather than after it.
+ *
+ * Note this is a *cap on latency*, not a token cap: `max_tokens` would cut off
+ * the thinking and leave no answer at all.
+ */
+export const THINKING_MODES: ThinkingOption[] = [
+  {
+    id: "default",
+    title: "Model default",
+    description:
+      "Let the model decide. Reasoning models may think at length before answering, which can add seconds — or minutes on a local model.",
+  },
+  {
+    id: "off",
+    title: "Off (fastest)",
+    description:
+      "Ask the model to skip chain-of-thought and answer directly. Best for live conversation, where a fast good answer beats a slow better one.",
+  },
+];
+
+export const DEFAULT_THINKING: ThinkingMode = "default";

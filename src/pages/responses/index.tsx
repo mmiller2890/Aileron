@@ -2,6 +2,7 @@ import {
   ResponseLength,
   LanguageSelector,
   AutoScrollToggle,
+  ThinkingModeSelector,
 } from "./components";
 import { PageLayout } from "@/layouts";
 import { useApp } from "@/contexts";
@@ -26,6 +27,9 @@ const Responses = () => {
           </p>
         </div>
       )}
+
+      {/* Thinking — first because it dominates time-to-answer */}
+      <ThinkingModeSelector />
 
       {/* Response Length */}
       <ResponseLength />

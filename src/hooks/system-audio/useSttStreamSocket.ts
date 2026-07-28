@@ -9,6 +9,17 @@ interface SelectedSttProvider {
   variables: Record<string, string>;
 }
 
+export function isActiveStreamingSession<T>(
+  currentSocket: T | null,
+  socket: T,
+  generation: number,
+  isCurrentGeneration: (generation: number) => boolean
+): boolean {
+  return (
+    currentSocket === socket && isCurrentGeneration(generation)
+  );
+}
+
 function buildStreamingUrl(
   provider: TYPE_PROVIDER,
   selected: SelectedSttProvider
@@ -41,11 +52,17 @@ export function useSttStreamSocket({
   allSttProvidersRef,
   capturedSampleRateRef,
   onFinalTranscriptRef,
+  captureGenerationRef,
+  isCaptureGenerationCurrentRef,
 }: {
   selectedSttProviderRef: MutableRefObject<SelectedSttProvider>;
   allSttProvidersRef: MutableRefObject<TYPE_PROVIDER[]>;
   capturedSampleRateRef: MutableRefObject<number>;
   onFinalTranscriptRef: MutableRefObject<(text: string) => void>;
+  captureGenerationRef: MutableRefObject<number>;
+  isCaptureGenerationCurrentRef: MutableRefObject<
+    (generation: number) => boolean
+  >;
 }) {
   const wsRef = useRef<WebSocket | null>(null);
   const streamingFinalizedRef = useRef<boolean>(false);
@@ -64,7 +81,12 @@ export function useSttStreamSocket({
     if (!providerConfig?.streaming) return;
 
     if (wsRef.current) {
-      if (wsRef.current.readyState === WebSocket.OPEN) return;
+      if (
+        wsRef.current.readyState === WebSocket.OPEN ||
+        wsRef.current.readyState === WebSocket.CONNECTING
+      ) {
+        return;
+      }
     }
 
     streamingFinalizedRef.current = false;
@@ -73,9 +95,18 @@ export function useSttStreamSocket({
     try {
       const wsUrl = buildStreamingUrl(providerConfig, currentSelected);
       const ws = new WebSocket(wsUrl);
+      const generation = captureGenerationRef.current;
       ws.binaryType = "arraybuffer";
+      const isActive = () =>
+        isActiveStreamingSession(
+          wsRef.current,
+          ws,
+          generation,
+          isCaptureGenerationCurrentRef.current
+        );
 
       ws.onopen = () => {
+        if (!isActive()) return;
         ws.send(
           JSON.stringify({
             sample_rate: capturedSampleRateRef.current,
@@ -85,6 +116,7 @@ export function useSttStreamSocket({
       };
 
       ws.onmessage = (event) => {
+        if (!isActive()) return;
         try {
           const data = JSON.parse(event.data);
           if (data.error) {
@@ -106,11 +138,13 @@ export function useSttStreamSocket({
       };
 
       ws.onerror = (e) => {
+        if (!isActive()) return;
         console.error("[STT-Stream] WebSocket error:", e);
         setIsStreaming(false);
       };
 
       ws.onclose = () => {
+        if (!isActive()) return;
         wsRef.current = null;
         setIsStreaming(false);
       };
@@ -124,6 +158,8 @@ export function useSttStreamSocket({
     allSttProvidersRef,
     capturedSampleRateRef,
     onFinalTranscriptRef,
+    captureGenerationRef,
+    isCaptureGenerationCurrentRef,
   ]);
 
   const closeStreamingSocket = useCallback(() => {

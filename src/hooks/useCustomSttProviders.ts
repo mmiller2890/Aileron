@@ -9,6 +9,12 @@ import {
   updateCustomSttProvider,
   validateCurl,
 } from "@/lib";
+import {
+  STT_PROVIDER_SECRET_KEY,
+  removeProviderAndSecret,
+  syncProviderMetadataChange,
+} from "@/lib/provider-sync";
+import { removeSecret } from "@/lib/storage/secure-secrets";
 
 export function useCustomSttProviders() {
   const { loadData } = useApp();
@@ -58,10 +64,15 @@ export function useCustomSttProviders() {
     if (!deleteConfirm) return;
 
     try {
-      const success = removeCustomSttProvider(deleteConfirm);
+      const success = await removeProviderAndSecret({
+        providerId: deleteConfirm,
+        baseKey: STT_PROVIDER_SECRET_KEY,
+        removeProvider: removeCustomSttProvider,
+        removeSecret,
+      });
       if (success) {
         setDeleteConfirm(null);
-        loadData(); // Refresh data
+        syncProviderMetadataChange(loadData);
       }
     } catch (error) {
       console.error("Error deleting custom provider:", error);
@@ -120,7 +131,7 @@ export function useCustomSttProviders() {
             isCustom: true,
             curl: "",
           });
-          loadData(); // Refresh data
+          syncProviderMetadataChange(loadData);
         }
       } else {
         // Create new provider
@@ -140,7 +151,7 @@ export function useCustomSttProviders() {
             isCustom: true,
             curl: "",
           });
-          loadData(); // Refresh data
+          syncProviderMetadataChange(loadData);
         }
       }
     } catch (error) {

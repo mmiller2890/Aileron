@@ -6,11 +6,25 @@ import {
 } from "@/config";
 import { getPlatform, safeLocalStorage, trackAppStart, isMacOS } from "@/lib";
 import { getShortcutsConfig } from "@/lib/storage";
-import { saveSecret, getSecret } from "@/lib/storage/secure-secrets";
-
-// Keychain keys for the selected providers' secret variables (API keys, etc.).
-const AI_PROVIDER_SECRET_KEY = "selected_ai_provider_variables";
-const STT_PROVIDER_SECRET_KEY = "selected_stt_provider_variables";
+import {
+  saveSecret,
+  getSecret,
+  removeSecret,
+} from "@/lib/storage/secure-secrets";
+import {
+  AI_PROVIDER_SECRET_KEY,
+  STT_PROVIDER_SECRET_KEY,
+  createProviderLoadGuard,
+  createSerializedAsyncWriter,
+  createStartupProviderSecretReader,
+  decideProviderPersist,
+  emitProviderConfigChanged,
+  hydrateProviderSwitch,
+  listenForProviderConfigChange,
+  providerSecretKey,
+  readScopedProviderSecret,
+  serializeProviderSelection,
+} from "@/lib/provider-sync";
 
 // Provider variable names are stored/compared uppercase.
 function uppercaseKeys(
@@ -21,6 +35,22 @@ function uppercaseKeys(
     out[k.toUpperCase()] = v as string;
   }
   return out;
+}
+
+const providerSecretStore = {
+  get: getSecret,
+  save: saveSecret,
+  remove: removeSecret,
+};
+
+function storedProviderId(key: string): string {
+  const saved = safeLocalStorage.getItem(key);
+  if (!saved) return "";
+  try {
+    return JSON.parse(saved).provider ?? "";
+  } catch {
+    return "";
+  }
 }
 import {
   getCustomizableState,
@@ -177,6 +207,80 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     syncLicenseState();
   }, []);
 
+  // Serialized form of the last provider config this window wrote, used by the
+  // persist effects below to tell a real edit from a value that merely came
+  // back out of storage.
+  const lastAiPersistRef = useRef<string | null>(null);
+  const lastSttPersistRef = useRef<string | null>(null);
+  const aiLoadGuardRef = useRef(createProviderLoadGuard());
+  const sttLoadGuardRef = useRef(createProviderLoadGuard());
+  const aiStartupSecretReaderRef = useRef<ReturnType<
+    typeof createStartupProviderSecretReader
+  > | null>(null);
+  const sttStartupSecretReaderRef = useRef<ReturnType<
+    typeof createStartupProviderSecretReader
+  > | null>(null);
+  if (!aiStartupSecretReaderRef.current) {
+    aiStartupSecretReaderRef.current = createStartupProviderSecretReader(
+      storedProviderId(STORAGE_KEYS.SELECTED_AI_PROVIDER),
+      providerSecretStore
+    );
+  }
+  if (!sttStartupSecretReaderRef.current) {
+    sttStartupSecretReaderRef.current = createStartupProviderSecretReader(
+      storedProviderId(STORAGE_KEYS.SELECTED_STT_PROVIDER),
+      providerSecretStore
+    );
+  }
+  const aiSecretWriterRef = useRef(
+    createSerializedAsyncWriter<{
+      key: string;
+      value: string;
+      serialized: string;
+      emit: boolean;
+    }>(async (job) => {
+      await saveSecret(job.key, job.value);
+      if (job.emit && lastAiPersistRef.current === job.serialized) {
+        emitProviderConfigChanged();
+      }
+    })
+  );
+  const sttSecretWriterRef = useRef(
+    createSerializedAsyncWriter<{
+      key: string;
+      value: string;
+      serialized: string;
+      emit: boolean;
+    }>(async (job) => {
+      await saveSecret(job.key, job.value);
+      if (job.emit && lastSttPersistRef.current === job.serialized) {
+        emitProviderConfigChanged();
+      }
+    })
+  );
+
+  /**
+   * Record a provider config as already-persisted.
+   *
+   * Applying values that came *from* storage must not look like a local edit.
+   * Without this the reload triggered by another window's change would run the
+   * persist effect, write the values straight back, and emit again — and that
+   * echo lands in the window where someone is typing, replacing the field's
+   * contents with a value that is one async write behind the keystrokes.
+   */
+  const markAiPersisted = (value: {
+    provider: string;
+    variables?: Record<string, string>;
+  }) => {
+    lastAiPersistRef.current = serializeProviderSelection(value);
+  };
+  const markSttPersisted = (value: {
+    provider: string;
+    variables?: Record<string, string>;
+  }) => {
+    lastSttPersistRef.current = serializeProviderSelection(value);
+  };
+
   // Function to load AI, STT, system prompt and screenshot config data from storage
   const loadData = () => {
     // Load system prompt
@@ -239,27 +343,47 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           : undefined;
         // Set immediately from whatever localStorage holds (old blobs still
         // carry inline variables), so the provider is usable right away.
-        setSelectedAIProvider({
-          provider: parsed.provider ?? "",
+        const provider = parsed.provider ?? "";
+        const loadedAi = {
+          provider,
           variables: inlineVars ?? {},
-        });
+        };
+        const loadToken = aiLoadGuardRef.current.begin(provider);
+        markAiPersisted(loadedAi);
+        setSelectedAIProvider(loadedAi);
         // Then reconcile secrets with the keychain (async).
         void (async () => {
           if (inlineVars && Object.keys(inlineVars).length) {
             // Migrate legacy plaintext: move secrets to the keychain, then
             // strip them from localStorage (saveSecret guarantees the value is
             // stored before we drop the plaintext copy).
-            await saveSecret(AI_PROVIDER_SECRET_KEY, JSON.stringify(inlineVars));
-            safeLocalStorage.setItem(
-              STORAGE_KEYS.SELECTED_AI_PROVIDER,
-              JSON.stringify({ provider: parsed.provider })
+            await saveSecret(
+              providerSecretKey(AI_PROVIDER_SECRET_KEY, provider),
+              JSON.stringify(inlineVars)
             );
+            await removeSecret(AI_PROVIDER_SECRET_KEY);
+            if (aiLoadGuardRef.current.isCurrent(loadToken)) {
+              safeLocalStorage.setItem(
+                STORAGE_KEYS.SELECTED_AI_PROVIDER,
+                JSON.stringify({ provider })
+              );
+            }
           } else {
-            const secret = await getSecret(AI_PROVIDER_SECRET_KEY);
+            const secret = await aiStartupSecretReaderRef.current!.read(
+              AI_PROVIDER_SECRET_KEY,
+              provider
+            );
             if (secret) {
               try {
                 const vars = uppercaseKeys(JSON.parse(secret));
-                setSelectedAIProvider((prev) => ({ ...prev, variables: vars }));
+                setSelectedAIProvider((prev) => {
+                  if (!aiLoadGuardRef.current.canApply(loadToken, prev.provider)) {
+                    return prev;
+                  }
+                  const next = { ...prev, variables: vars };
+                  markAiPersisted(next);
+                  return next;
+                });
               } catch {
                 /* corrupt secret blob — leave variables empty */
               }
@@ -282,26 +406,48 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         const inlineVars = parsed.variables
           ? uppercaseKeys(parsed.variables)
           : undefined;
-        setSelectedSttProvider({
-          provider: parsed.provider ?? "",
+        const provider = parsed.provider ?? "";
+        const loadedStt = {
+          provider,
           variables: inlineVars ?? {},
-        });
+        };
+        const loadToken = sttLoadGuardRef.current.begin(provider);
+        markSttPersisted(loadedStt);
+        setSelectedSttProvider(loadedStt);
         void (async () => {
           if (inlineVars && Object.keys(inlineVars).length) {
             await saveSecret(
-              STT_PROVIDER_SECRET_KEY,
+              providerSecretKey(STT_PROVIDER_SECRET_KEY, provider),
               JSON.stringify(inlineVars)
             );
-            safeLocalStorage.setItem(
-              STORAGE_KEYS.SELECTED_STT_PROVIDER,
-              JSON.stringify({ provider: parsed.provider })
-            );
+            await removeSecret(STT_PROVIDER_SECRET_KEY);
+            if (sttLoadGuardRef.current.isCurrent(loadToken)) {
+              safeLocalStorage.setItem(
+                STORAGE_KEYS.SELECTED_STT_PROVIDER,
+                JSON.stringify({ provider })
+              );
+            }
           } else {
-            const secret = await getSecret(STT_PROVIDER_SECRET_KEY);
+            const secret = await sttStartupSecretReaderRef.current!.read(
+              STT_PROVIDER_SECRET_KEY,
+              provider
+            );
             if (secret) {
               try {
                 const vars = uppercaseKeys(JSON.parse(secret));
-                setSelectedSttProvider((prev) => ({ ...prev, variables: vars }));
+                setSelectedSttProvider((prev) => {
+                  if (
+                    !sttLoadGuardRef.current.canApply(
+                      loadToken,
+                      prev.provider
+                    )
+                  ) {
+                    return prev;
+                  }
+                  const next = { ...prev, variables: vars };
+                  markSttPersisted(next);
+                  return next;
+                });
               } catch {
                 /* corrupt secret blob — leave variables empty */
               }
@@ -523,7 +669,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         e.key === STORAGE_KEYS.SYSTEM_PROMPT ||
         e.key === STORAGE_KEYS.SCREENSHOT_CONFIG ||
         e.key === STORAGE_KEYS.CUSTOMIZABLE ||
-        e.key === STORAGE_KEYS.SELECTED_AUDIO_DEVICES
+        e.key === STORAGE_KEYS.SELECTED_AUDIO_DEVICES ||
+        // Provider *variables* (model name, API key) live under their own
+        // keys, so a change to them never touches the provider-id key above.
+        e.key?.startsWith(
+          `secure_fallback_${AI_PROVIDER_SECRET_KEY}:`
+        ) ||
+        e.key?.startsWith(
+          `secure_fallback_${STT_PROVIDER_SECRET_KEY}:`
+        )
       ) {
         if (reloadTimer) clearTimeout(reloadTimer);
         reloadTimer = setTimeout(() => {
@@ -536,6 +690,30 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     return () => {
       window.removeEventListener("storage", handleStorageChange);
       if (reloadTimer) clearTimeout(reloadTimer);
+    };
+  }, []);
+
+  // Authoritative cross-window sync. The `storage` listener above cannot see a
+  // variable-only edit (the provider-id value it watches is unchanged, so no
+  // event fires) and is unreliable across separate webviews regardless.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listenForProviderConfigChange(() => {
+      if (!disposed) loadDataRef.current();
+    })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch((error) => {
+        console.error("Failed to listen for provider config changes:", error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -558,31 +736,72 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   }, [selectedAIProvider.provider]);
 
   // Persist selected AI: provider id in localStorage, secrets in the keychain.
+  //
+  // The announce-after-write is what keeps the overlay in step: the provider id
+  // in localStorage is unchanged when only a variable is edited, so nothing
+  // else tells the other window its model just changed. Guarded by the last
+  // persisted value so a window reloading in response doesn't echo back.
   useEffect(() => {
-    if (selectedAIProvider.provider) {
-      safeLocalStorage.setItem(
-        STORAGE_KEYS.SELECTED_AI_PROVIDER,
-        JSON.stringify({ provider: selectedAIProvider.provider })
-      );
-      void saveSecret(
-        AI_PROVIDER_SECRET_KEY,
-        JSON.stringify(selectedAIProvider.variables || {})
-      );
-    }
+    if (!selectedAIProvider.provider) return;
+
+    const decision = decideProviderPersist(
+      lastAiPersistRef.current,
+      selectedAIProvider
+    );
+    if (decision.skip) return;
+    lastAiPersistRef.current = decision.serialized;
+
+    safeLocalStorage.setItem(
+      STORAGE_KEYS.SELECTED_AI_PROVIDER,
+      JSON.stringify({ provider: selectedAIProvider.provider })
+    );
+    if (!decision.writeSecret) return;
+
+    void aiSecretWriterRef.current
+      .enqueue({
+        key: providerSecretKey(
+          AI_PROVIDER_SECRET_KEY,
+          selectedAIProvider.provider
+        ),
+        value: JSON.stringify(selectedAIProvider.variables || {}),
+        serialized: decision.serialized,
+        emit: decision.emit,
+      })
+      .catch((error) => {
+        console.error("Failed to persist AI provider variables:", error);
+      });
   }, [selectedAIProvider]);
 
   // Persist selected STT: provider id in localStorage, secrets in the keychain.
   useEffect(() => {
-    if (selectedSttProvider.provider) {
-      safeLocalStorage.setItem(
-        STORAGE_KEYS.SELECTED_STT_PROVIDER,
-        JSON.stringify({ provider: selectedSttProvider.provider })
-      );
-      void saveSecret(
-        STT_PROVIDER_SECRET_KEY,
-        JSON.stringify(selectedSttProvider.variables || {})
-      );
-    }
+    if (!selectedSttProvider.provider) return;
+
+    const decision = decideProviderPersist(
+      lastSttPersistRef.current,
+      selectedSttProvider
+    );
+    if (decision.skip) return;
+    lastSttPersistRef.current = decision.serialized;
+
+    safeLocalStorage.setItem(
+      STORAGE_KEYS.SELECTED_STT_PROVIDER,
+      JSON.stringify({ provider: selectedSttProvider.provider })
+    );
+    if (!decision.writeSecret) return;
+
+    void sttSecretWriterRef.current
+      .enqueue({
+        key: providerSecretKey(
+          STT_PROVIDER_SECRET_KEY,
+          selectedSttProvider.provider
+        ),
+        value: JSON.stringify(selectedSttProvider.variables || {}),
+        serialized: decision.serialized,
+        emit: decision.emit,
+      })
+      .catch((error) => {
+        console.error("Failed to persist STT provider variables:", error);
+      });
   }, [selectedSttProvider]);
 
   // Computed all AI providers
@@ -641,11 +860,39 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       }
     }
 
-    setSelectedAIProvider((prev) => ({
-      ...prev,
+    const isProviderSwitch = provider !== selectedAIProvider.provider;
+    const hasProvidedVariables = Object.keys(variables).length > 0;
+    if (!isProviderSwitch || hasProvidedVariables || !provider) {
+      aiLoadGuardRef.current.invalidate();
+      setSelectedAIProvider({ provider, variables });
+      return;
+    }
+
+    const loadToken = aiLoadGuardRef.current.begin(provider);
+    const loadingValue = { provider, variables: {} };
+    markAiPersisted(loadingValue);
+    safeLocalStorage.setItem(
+      STORAGE_KEYS.SELECTED_AI_PROVIDER,
+      JSON.stringify({ provider })
+    );
+    setSelectedAIProvider(loadingValue);
+
+    void hydrateProviderSwitch({
       provider,
-      variables,
-    }));
+      readSecret: () =>
+        readScopedProviderSecret(
+          AI_PROVIDER_SECRET_KEY,
+          provider,
+          getSecret
+        ),
+      canApply: () => aiLoadGuardRef.current.isCurrent(loadToken),
+      parseVariables: (secret) => uppercaseKeys(JSON.parse(secret)),
+      apply: (next) => {
+        markAiPersisted(next);
+        setSelectedAIProvider(next);
+      },
+      announce: emitProviderConfigChanged,
+    });
   };
 
   // Setter for selected STT with validation
@@ -661,7 +908,39 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       return;
     }
 
-    setSelectedSttProvider((prev) => ({ ...prev, provider, variables }));
+    const isProviderSwitch = provider !== selectedSttProvider.provider;
+    const hasProvidedVariables = Object.keys(variables).length > 0;
+    if (!isProviderSwitch || hasProvidedVariables || !provider) {
+      sttLoadGuardRef.current.invalidate();
+      setSelectedSttProvider({ provider, variables });
+      return;
+    }
+
+    const loadToken = sttLoadGuardRef.current.begin(provider);
+    const loadingValue = { provider, variables: {} };
+    markSttPersisted(loadingValue);
+    safeLocalStorage.setItem(
+      STORAGE_KEYS.SELECTED_STT_PROVIDER,
+      JSON.stringify({ provider })
+    );
+    setSelectedSttProvider(loadingValue);
+
+    void hydrateProviderSwitch({
+      provider,
+      readSecret: () =>
+        readScopedProviderSecret(
+          STT_PROVIDER_SECRET_KEY,
+          provider,
+          getSecret
+        ),
+      canApply: () => sttLoadGuardRef.current.isCurrent(loadToken),
+      parseVariables: (secret) => uppercaseKeys(JSON.parse(secret)),
+      apply: (next) => {
+        markSttPersisted(next);
+        setSelectedSttProvider(next);
+      },
+      announce: emitProviderConfigChanged,
+    });
   };
 
   // Toggle handlers

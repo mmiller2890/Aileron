@@ -19,6 +19,7 @@ import {
   generateMessageId,
   isMacOS,
   isWindows,
+  createTokenBatcher,
 } from "@/lib";
 import { ChatConversation, Message } from "@/types/completion";
 import { useSpeakerLabels } from "./system-audio/useSpeakerLabels";
@@ -41,6 +42,11 @@ import {
   RecentSpeechEventFingerprints,
   type SpeechEventPayload,
 } from "@/lib/speech-event-dedupe";
+import {
+  createCaptureSessionWork,
+  getSessionAudioStopAction,
+} from "@/lib/capture-session-work";
+import { completedStreamValue } from "@/lib/completed-stream";
 
 export type { VadConfig };
 
@@ -130,6 +136,9 @@ export function useSystemAudio() {
   const { isSupported, asrReady, isInitializing: isSttInitializing, init: initStt } =
     useSttStatus();
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeAiBatcherRef = useRef<ReturnType<
+    typeof createTokenBatcher
+  > | null>(null);
   // Monotonic id for AI requests; processWithAI uses it to detect when a
   // newer utterance has superseded an in-flight stream.
   const aiRequestSeqRef = useRef(0);
@@ -149,18 +158,28 @@ export function useSystemAudio() {
   // abort + sequence guard; without them a summary from a previous stop keeps
   // streaming into the panel after the next capture begins.
   const summaryAbortRef = useRef<AbortController | null>(null);
+  const activeSummaryBatcherRef = useRef<ReturnType<
+    typeof createTokenBatcher
+  > | null>(null);
   const summarySeqRef = useRef(0);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
   const capturedSampleRateRef = useRef<number>(16000);
   const utteranceTimestampsRef = useRef<Array<{ start: number; end: number }>>([]);
   const recentSpeechEventsRef = useRef(new RecentSpeechEventFingerprints());
+  const captureSessionWorkRef = useRef(createCaptureSessionWork());
+  const captureGenerationRef = useRef(0);
+  const captureStoppingRef = useRef(false);
+  const isCaptureGenerationCurrentRef = useRef<(generation: number) => boolean>(
+    () => false
+  );
 
   const capturingRef = useRef(capturing);
   const selectedSttProviderRef = useRef(selectedSttProvider);
   const allSttProvidersRef = useRef(allSttProviders);
   const conversationMessagesRef = useRef(conversation.messages);
   const vadConfigRef = useRef(vadConfig);
+  const labelMessagesWithSpeakersRef = useRef(labelMessagesWithSpeakers);
   // `processWithAI` is invoked from the `speech-detected` listener and the
   // streaming socket, both registered once with empty/stable deps. They capture
   // their closure on the first render — when `selectedAIProvider` is still the
@@ -182,6 +201,9 @@ export function useSystemAudio() {
   allSttProvidersRef.current = allSttProviders;
   conversationMessagesRef.current = conversation.messages;
   vadConfigRef.current = vadConfig;
+  labelMessagesWithSpeakersRef.current = labelMessagesWithSpeakers;
+  isCaptureGenerationCurrentRef.current = (generation) =>
+    captureSessionWorkRef.current.isCurrent(generation);
 
   // Handles a streaming provider's final transcript. Ref-backed because the
   // socket handlers are created once per socket; assigned below once the
@@ -200,6 +222,8 @@ export function useSystemAudio() {
     allSttProvidersRef,
     capturedSampleRateRef,
     onFinalTranscriptRef,
+    captureGenerationRef,
+    isCaptureGenerationCurrentRef,
   });
 
   useEffect(() => {
@@ -294,8 +318,14 @@ export function useSystemAudio() {
         listen(
           "speech-detected",
           scope.guard(async (event) => {
+            const generation = captureGenerationRef.current;
             try {
               if (!capturingRef.current) return;
+              if (
+                !captureSessionWorkRef.current.isCurrent(generation)
+              ) {
+                return;
+              }
 
               const payload = event.payload as SpeechEventPayload;
               const base64Audio = payload.audio;
@@ -322,12 +352,17 @@ export function useSystemAudio() {
                 });
               }
 
-              const binaryString = atob(base64Audio);
-              const bytes = new Uint8Array(binaryString.length);
-              for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-              }
-              const audioBlob = new Blob([bytes], { type: "audio/wav" });
+              // Deferred: the local provider transcribes by handle (below) and
+              // never needs the decoded WAV, and this loop runs over every byte
+              // of the utterance on the UI thread.
+              const audioBlob = () => {
+                const binaryString = atob(base64Audio);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
+                }
+                return new Blob([bytes], { type: "audio/wav" });
+              };
 
               const currentSelected = selectedSttProviderRef.current;
               const currentProviders = allSttProvidersRef.current;
@@ -354,12 +389,21 @@ export function useSystemAudio() {
               }, 30000);
 
               try {
-                const transcription = await fetchSTT({
-                  provider: providerConfig,
-                  selectedProvider: currentSelected,
-                  audio: audioBlob,
-                  signal: sttAbortController.signal,
-                });
+                const transcription = await captureSessionWorkRef.current.track(
+                  generation,
+                  fetchSTT({
+                    provider: providerConfig,
+                    selectedProvider: currentSelected,
+                    audio: audioBlob,
+                    utteranceId: payload.utterance_id ?? undefined,
+                    signal: sttAbortController.signal,
+                  })
+                );
+                if (
+                  !captureSessionWorkRef.current.isCurrent(generation)
+                ) {
+                  return;
+                }
 
                 if (transcription.trim()) {
                   setLastTranscription(transcription);
@@ -374,7 +418,10 @@ export function useSystemAudio() {
                     messageId,
                   };
 
-                  if (isLikelyQuestion(transcription)) {
+                  if (
+                    isLikelyQuestion(transcription) &&
+                    !captureStoppingRef.current
+                  ) {
                     const effectiveSystemPrompt = getEffectiveSystemPrompt();
 
                     const previousMessages = buildAIHistory(
@@ -382,7 +429,7 @@ export function useSystemAudio() {
                       messageId
                     );
 
-                    await processWithAIRef.current(
+                    void processWithAIRef.current(
                       transcription,
                       effectiveSystemPrompt,
                       previousMessages,
@@ -397,6 +444,11 @@ export function useSystemAudio() {
                   );
                 }
               } catch (sttError: any) {
+                if (
+                  !captureSessionWorkRef.current.isCurrent(generation)
+                ) {
+                  return;
+                }
                 console.error("STT Error:", sttError);
                 if (sttAbortController.signal.aborted) {
                   setError("Speech transcription timed out (30s)");
@@ -408,9 +460,13 @@ export function useSystemAudio() {
                 clearTimeout(timeoutId);
               }
             } catch (err) {
-              setError("Failed to process speech");
+              if (captureSessionWorkRef.current.isCurrent(generation)) {
+                setError("Failed to process speech");
+              }
             } finally {
-              setIsProcessing(false);
+              if (captureSessionWorkRef.current.isCurrent(generation)) {
+                setIsProcessing(false);
+              }
             }
           })
         )
@@ -545,6 +601,8 @@ export function useSystemAudio() {
       previousMessages: Message[],
       existingUserMessageId?: string
     ) => {
+      activeAiBatcherRef.current?.cancel();
+      activeAiBatcherRef.current = null;
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
@@ -556,7 +614,8 @@ export function useSystemAudio() {
       // stream from appending chunks that were already in flight — without
       // both, concurrent utterances interleave into the same response text.
       const requestId = ++aiRequestSeqRef.current;
-      const isCurrent = () => requestId === aiRequestSeqRef.current;
+      const isCurrent = () =>
+        requestId === aiRequestSeqRef.current && !signal.aborted;
 
       try {
         setIsAIProcessing(true);
@@ -564,6 +623,7 @@ export function useSystemAudio() {
         setError("");
 
         let fullResponse = "";
+        let streamCompleted = false;
 
         if (!selectedAIProvider.provider) {
           setError("No AI provider selected.");
@@ -579,25 +639,53 @@ export function useSystemAudio() {
         }
 
         try {
-          for await (const chunk of fetchAIResponse({
-            provider,
-            selectedProvider: selectedAIProvider,
-            systemPrompt: prompt,
-            history: previousMessages,
-            userMessage: transcription,
-            imagesBase64: [],
-            signal,
-          })) {
-            if (!isCurrent()) return;
-            fullResponse += chunk;
-            setLastAIResponse((prev) => prev + chunk);
+          const batcher = createTokenBatcher(
+            (batched) => setLastAIResponse((prev) => prev + batched),
+            undefined,
+            isCurrent
+          );
+          activeAiBatcherRef.current = batcher;
+          try {
+            for await (const chunk of fetchAIResponse({
+              provider,
+              selectedProvider: selectedAIProvider,
+              systemPrompt: prompt,
+              history: previousMessages,
+              userMessage: transcription,
+              imagesBase64: [],
+              signal,
+            })) {
+              if (!isCurrent()) {
+                batcher.cancel();
+                return;
+              }
+              fullResponse += chunk;
+              batcher.push(chunk);
+            }
+            if (!isCurrent()) {
+              batcher.cancel();
+              return;
+            }
+            batcher.flush();
+            streamCompleted = true;
+          } catch (streamError) {
+            batcher.cancel();
+            throw streamError;
+          } finally {
+            if (activeAiBatcherRef.current === batcher) {
+              activeAiBatcherRef.current = null;
+            }
           }
         } catch (aiError: any) {
           if (!isCurrent() || signal.aborted) return;
           setError(aiError.message || "Failed to get AI response");
         }
 
-        if (fullResponse && isCurrent()) {
+        const responseToPersist = completedStreamValue(
+          fullResponse,
+          streamCompleted
+        );
+        if (responseToPersist && isCurrent()) {
           const timestamp = Date.now();
           const latestUtterance =
             utteranceTimestampsRef.current[
@@ -614,7 +702,7 @@ export function useSystemAudio() {
             const assistantMessage = {
               id: generateMessageId("assistant", timestamp + 1),
               role: "assistant" as const,
-              content: fullResponse,
+              content: responseToPersist,
               timestamp: timestamp + 1,
             };
             // Utterances recorded by appendUtteranceMessage are already in
@@ -674,12 +762,19 @@ export function useSystemAudio() {
   // Mirrors the batch path: record it, then answer if it looks like a question
   // (unless the batch path already handled this utterance).
   onFinalTranscriptRef.current = (text: string) => {
+    const generation = captureGenerationRef.current;
+    if (
+      !capturingRef.current ||
+      !captureSessionWorkRef.current.isCurrent(generation)
+    ) {
+      return;
+    }
     setLastTranscription(text);
     if (!batchProcessedForCurrentUtteranceRef.current && text.trim()) {
       const messageId = appendUtteranceMessage(text);
       lastUtteranceRef.current = { text, messageId };
 
-      if (isLikelyQuestion(text)) {
+      if (isLikelyQuestion(text) && !captureStoppingRef.current) {
         const effectiveSystemPrompt = getEffectiveSystemPrompt();
         const previousMessages = buildAIHistory(
           conversationMessagesRef.current,
@@ -739,6 +834,8 @@ export function useSystemAudio() {
 
     // Supersede any summary still streaming from a previous stop, so its
     // chunks can't interleave into this one's output.
+    activeSummaryBatcherRef.current?.cancel();
+    activeSummaryBatcherRef.current = null;
     summaryAbortRef.current?.abort();
     const controller = new AbortController();
     summaryAbortRef.current = controller;
@@ -754,17 +851,40 @@ export function useSystemAudio() {
     setIsSummarizing(true);
     setSessionSummary("");
     try {
-      for await (const chunk of fetchAIResponse({
-        provider,
-        selectedProvider: selectedAIProvider,
-        systemPrompt: summaryPrompt,
-        history: [],
-        userMessage: `Transcript:\n\n${transcript}`,
-        imagesBase64: [],
-        signal: controller.signal,
-      })) {
-        if (!isCurrent()) return;
-        setSessionSummary((prev) => prev + chunk);
+      const batcher = createTokenBatcher(
+        (batched) => setSessionSummary((prev) => prev + batched),
+        undefined,
+        isCurrent
+      );
+      activeSummaryBatcherRef.current = batcher;
+      try {
+        for await (const chunk of fetchAIResponse({
+          provider,
+          selectedProvider: selectedAIProvider,
+          systemPrompt: summaryPrompt,
+          history: [],
+          userMessage: `Transcript:\n\n${transcript}`,
+          imagesBase64: [],
+          signal: controller.signal,
+        })) {
+          if (!isCurrent()) {
+            batcher.cancel();
+            return;
+          }
+          batcher.push(chunk);
+        }
+        if (!isCurrent()) {
+          batcher.cancel();
+          return;
+        }
+        batcher.flush();
+      } catch (streamError) {
+        batcher.cancel();
+        throw streamError;
+      } finally {
+        if (activeSummaryBatcherRef.current === batcher) {
+          activeSummaryBatcherRef.current = null;
+        }
       }
     } catch (err) {
       if (!controller.signal.aborted) {
@@ -778,6 +898,8 @@ export function useSystemAudio() {
 
   const dismissSummary = useCallback(() => {
     // Dismissing mid-stream must stop it, or chunks keep arriving after.
+    activeSummaryBatcherRef.current?.cancel();
+    activeSummaryBatcherRef.current = null;
     summaryAbortRef.current?.abort();
     summarySeqRef.current++;
     setIsSummarizing(false);
@@ -786,26 +908,11 @@ export function useSystemAudio() {
   }, []);
 
   useEffect(() => {
-    const scope = createAsyncListenerScope();
-    void scope
-      .add(
-        listen(
-          "custom-shortcut-triggered",
-          scope.guard((event) => {
-            const action = (event.payload as { action?: string })?.action;
-            if (action === "answer_last") {
-              answerLastRef.current();
-            }
-          })
-        )
-      )
-      .catch((err) => {
-        console.warn("Failed to listen for answer-last shortcut:", err);
-      });
-    return () => {
-      scope.dispose();
-    };
-  }, []);
+    return globalShortcuts.registerCustomShortcutCallback(
+      "answer_last",
+      () => answerLastRef.current()
+    );
+  }, [globalShortcuts.registerCustomShortcutCallback]);
 
   // Input-level meter + no-audio detection from the VAD capture loop.
   // Registered once.
@@ -942,46 +1049,54 @@ export function useSystemAudio() {
         (p) => p.id === selectedSttProvider.provider
       );
 
-      await beginCaptureSession({
-        isContinuous,
-        startBackend: async () => {
-          await invoke<string>("stop_system_audio_capture");
-          await invoke<string>("start_system_audio_capture", {
-            vadConfig: vadConfig,
-            deviceId: deviceId,
-            streaming: providerConfig?.streaming === true,
-          });
-        },
-        commitStarted: () => {
-          const conversationId = generateConversationId("sysaudio");
-          setConversation({
-            id: conversationId,
-            title: "",
-            messages: [],
-            createdAt: 0,
-            updatedAt: 0,
-          });
-          setCapturing(true);
-          capturingRef.current = true;
-          setSessionStartedAt(Date.now());
-          setIsPopoverOpen(true);
-          setIsContinuousMode(isContinuous);
-          setRecordingProgress(0);
-          setAudioLevel(0);
-          setNoAudioDetected(false);
-          summaryAbortRef.current?.abort();
-          summarySeqRef.current++;
-          setSessionSummary("");
-          setIsSummarizing(false);
-          utteranceTimestampsRef.current = [];
-          setSpeakerSegments([]);
-          setIsLabelingSpeakers(false);
-          setCurrentSpeaker(null);
-          if (isContinuous) {
-            setIsRecordingInContinuousMode(false);
-          }
-        },
-      });
+      captureStoppingRef.current = false;
+      const generation = captureSessionWorkRef.current.begin();
+      captureGenerationRef.current = generation;
+      try {
+        await beginCaptureSession({
+          isContinuous,
+          startBackend: async () => {
+            await invoke<string>("stop_system_audio_capture");
+            await invoke<string>("start_system_audio_capture", {
+              vadConfig: vadConfig,
+              deviceId: deviceId,
+              streaming: providerConfig?.streaming === true,
+            });
+          },
+          commitStarted: () => {
+            const conversationId = generateConversationId("sysaudio");
+            setConversation({
+              id: conversationId,
+              title: "",
+              messages: [],
+              createdAt: 0,
+              updatedAt: 0,
+            });
+            setCapturing(true);
+            capturingRef.current = true;
+            setSessionStartedAt(Date.now());
+            setIsPopoverOpen(true);
+            setIsContinuousMode(isContinuous);
+            setRecordingProgress(0);
+            setAudioLevel(0);
+            setNoAudioDetected(false);
+            summaryAbortRef.current?.abort();
+            summarySeqRef.current++;
+            setSessionSummary("");
+            setIsSummarizing(false);
+            utteranceTimestampsRef.current = [];
+            setSpeakerSegments([]);
+            setIsLabelingSpeakers(false);
+            setCurrentSpeaker(null);
+            if (isContinuous) {
+              setIsRecordingInContinuousMode(false);
+            }
+          },
+        });
+      } catch (error) {
+        captureSessionWorkRef.current.invalidate(generation);
+        throw error;
+      }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
@@ -1000,7 +1115,11 @@ export function useSystemAudio() {
   ]);
 
   const stopCapture = useCallback(async () => {
+    const generation = captureGenerationRef.current;
+    captureStoppingRef.current = true;
     try {
+      activeAiBatcherRef.current?.cancel();
+      activeAiBatcherRef.current = null;
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
@@ -1012,22 +1131,47 @@ export function useSystemAudio() {
         "stop_system_audio_capture"
       );
 
-      if (selectedSttProvider.provider === "local-fluidaudio" && sessionPath) {
-        try {
-          setIsLabelingSpeakers(true);
-          const segments = await invoke<
-            Array<{
-              speaker_id: string;
-              start_time: number;
-              end_time: number;
-            }>
-          >("stt_diarize_file", { path: sessionPath });
-          setSpeakerSegments(segments);
-          labelMessagesWithSpeakers(segments, utteranceTimestampsRef.current);
-        } catch (err) {
-          console.warn("Diarization failed:", err);
-        } finally {
-          setIsLabelingSpeakers(false);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const sttDrained = await captureSessionWorkRef.current.drain(
+        generation,
+        10_000
+      );
+      captureSessionWorkRef.current.invalidate(generation);
+      capturingRef.current = false;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      const sessionAudioStopAction = getSessionAudioStopAction(
+        selectedSttProviderRef.current.provider,
+        sessionPath,
+        sttDrained
+      );
+      if (sessionPath) {
+        if (sessionAudioStopAction === "diarize") {
+          try {
+            setIsLabelingSpeakers(true);
+            const segments = await invoke<
+              Array<{
+                speaker_id: string;
+                start_time: number;
+                end_time: number;
+              }>
+            >("stt_diarize_file", { path: sessionPath });
+            setSpeakerSegments(segments);
+            labelMessagesWithSpeakersRef.current(
+              segments,
+              utteranceTimestampsRef.current
+            );
+          } catch (err) {
+            console.warn("Diarization failed:", err);
+          } finally {
+            setIsLabelingSpeakers(false);
+          }
+        } else if (sessionAudioStopAction === "discard") {
+          try {
+            await invoke("stt_discard_session_audio", { path: sessionPath });
+          } catch (err) {
+            console.warn("Failed to discard session audio:", err);
+          }
         }
       }
 
@@ -1052,8 +1196,8 @@ export function useSystemAudio() {
       // popover-open effect keeps it up); otherwise it closes normally.
       streamingFinalizedRef.current = false;
       batchProcessedForCurrentUtteranceRef.current = false;
-      capturingRef.current = false;
     } catch (err) {
+      captureStoppingRef.current = false;
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(`Failed to stop capture: ${errorMessage}`);
       console.error("Stop capture error:", err);
@@ -1125,8 +1269,8 @@ export function useSystemAudio() {
   ]);
 
   useEffect(() => {
-    globalShortcuts.registerSystemAudioCallback(async () => {
-      if (capturing) {
+    return globalShortcuts.registerSystemAudioCallback(async () => {
+      if (capturingRef.current) {
         await stopCapture();
       } else {
         await startCapture();
@@ -1136,6 +1280,10 @@ export function useSystemAudio() {
 
   useEffect(() => {
     return () => {
+      activeAiBatcherRef.current?.cancel();
+      activeAiBatcherRef.current = null;
+      activeSummaryBatcherRef.current?.cancel();
+      activeSummaryBatcherRef.current = null;
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }

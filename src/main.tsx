@@ -27,7 +27,7 @@ if (windowLabel.startsWith("capture-overlay-")) {
     <React.StrictMode>
       <ThemeProvider>
         <AppProvider>
-          <AppRoutes />
+          <AppRoutes enableModelWarmup={windowLabel === "main"} />
         </AppProvider>
       </ThemeProvider>
     </React.StrictMode>

@@ -3,18 +3,22 @@ import {
   DEFAULT_RESPONSE_LENGTH,
   DEFAULT_LANGUAGE,
   DEFAULT_AUTO_SCROLL,
+  DEFAULT_THINKING,
+  type ThinkingMode,
 } from "../response-settings.constants";
 
 export interface ResponseSettings {
   responseLength: string;
   language: string;
   autoScroll: boolean;
+  thinking: ThinkingMode;
 }
 
 export const DEFAULT_RESPONSE_SETTINGS: ResponseSettings = {
   responseLength: DEFAULT_RESPONSE_LENGTH,
   language: DEFAULT_LANGUAGE,
   autoScroll: DEFAULT_AUTO_SCROLL,
+  thinking: DEFAULT_THINKING,
 };
 
 /**
@@ -38,6 +42,10 @@ export const getResponseSettings = (): ResponseSettings => {
         parsedSettings.autoScroll !== undefined
           ? parsedSettings.autoScroll
           : DEFAULT_RESPONSE_SETTINGS.autoScroll,
+      thinking:
+        parsedSettings.thinking === "off" || parsedSettings.thinking === "default"
+          ? parsedSettings.thinking
+          : DEFAULT_RESPONSE_SETTINGS.thinking,
     };
   } catch (error) {
     console.error("Failed to get response settings:", error);
@@ -87,6 +95,16 @@ export const updateLanguage = (language: string): ResponseSettings => {
 export const updateAutoScroll = (autoScroll: boolean): ResponseSettings => {
   const currentSettings = getResponseSettings();
   const newSettings = { ...currentSettings, autoScroll };
+  setResponseSettings(newSettings);
+  return newSettings;
+};
+
+/**
+ * Update whether the model is asked to skip chain-of-thought
+ */
+export const updateThinking = (thinking: ThinkingMode): ResponseSettings => {
+  const currentSettings = getResponseSettings();
+  const newSettings = { ...currentSettings, thinking };
   setResponseSettings(newSettings);
   return newSettings;
 };

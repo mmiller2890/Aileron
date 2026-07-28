@@ -14,7 +14,9 @@ import {
   generateRequestId,
   getResponseSettings,
   isMacOS,
+  createTokenBatcher,
 } from "@/lib";
+import { buildAIHistory } from "@/lib/functions";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createAsyncListenerScope } from "@/lib/async-listener-scope";
@@ -102,6 +104,9 @@ export const useCompletion = () => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeBatcherRef = useRef<ReturnType<typeof createTokenBatcher> | null>(
+    null
+  );
   const currentRequestIdRef = useRef<string | null>(null);
 
   const setInput = useCallback((value: string) => {
@@ -141,231 +146,6 @@ export const useCompletion = () => {
 
   const clearFiles = useCallback(() => {
     setState((prev) => ({ ...prev, attachedFiles: [] }));
-  }, []);
-
-  const submit = useCallback(
-    async (speechText?: string) => {
-      const input = speechText || state.input;
-
-      if (!input.trim()) {
-        return;
-      }
-
-      if (speechText) {
-        setState((prev) => ({
-          ...prev,
-          input: speechText,
-        }));
-      }
-
-      // Generate unique request ID
-      const requestId = generateRequestId();
-      currentRequestIdRef.current = requestId;
-
-      // Cancel any existing request
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-
-      abortControllerRef.current = new AbortController();
-      const signal = abortControllerRef.current.signal;
-
-      try {
-        // Prepare message history for the AI
-        const messageHistory = state.conversationHistory.map((msg) => ({
-          role: msg.role,
-          content: msg.content,
-        }));
-
-        // Handle image attachments
-        const imagesBase64: string[] = [];
-        if (state.attachedFiles.length > 0) {
-          state.attachedFiles.forEach((file) => {
-            if (file.type.startsWith("image/")) {
-              imagesBase64.push(file.base64);
-            }
-          });
-        }
-
-        let fullResponse = "";
-
-        // Check if AI provider is configured
-        if (!selectedAIProvider.provider) {
-          setState((prev) => ({
-            ...prev,
-            error: "Please select an AI provider in settings",
-          }));
-          return;
-        }
-
-        const provider = allAiProviders.find(
-          (p) => p.id === selectedAIProvider.provider
-        );
-        if (!provider) {
-          setState((prev) => ({
-            ...prev,
-            error: "Invalid provider selected",
-          }));
-          return;
-        }
-
-        // Clear previous response and set loading state
-        setState((prev) => ({
-          ...prev,
-          isLoading: true,
-          error: null,
-          response: "",
-        }));
-
-        try {
-          // Use the fetchAIResponse function with signal
-          for await (const chunk of fetchAIResponse({
-            provider,
-            selectedProvider: selectedAIProvider,
-            systemPrompt: systemPrompt || undefined,
-            history: messageHistory,
-            userMessage: input,
-            imagesBase64,
-            signal,
-          })) {
-            // Only update if this is still the current request
-            if (currentRequestIdRef.current !== requestId) {
-              return; // Request was superseded, stop processing
-            }
-
-            // Check if request was aborted
-            if (signal.aborted) {
-              return; // Request was cancelled, stop processing
-            }
-
-            fullResponse += chunk;
-            setState((prev) => ({
-              ...prev,
-              response: prev.response + chunk,
-            }));
-          }
-        } catch (e: any) {
-          // Only show error if this is still the current request and not aborted
-          if (currentRequestIdRef.current === requestId && !signal.aborted) {
-            setState((prev) => ({
-              ...prev,
-              isLoading: false,
-              error: e.message || "An error occurred",
-            }));
-          }
-          return;
-        }
-
-        // Only proceed if this is still the current request
-        if (currentRequestIdRef.current !== requestId || signal.aborted) {
-          return;
-        }
-
-        setState((prev) => ({ ...prev, isLoading: false }));
-
-        // Focus input after AI response is complete
-        setTimeout(() => {
-          inputRef.current?.focus();
-        }, 100);
-
-        // Save the conversation after successful completion
-        if (fullResponse) {
-          await saveCurrentConversation(
-            input,
-            fullResponse,
-            state.attachedFiles
-          );
-          // Clear input and attached files after saving
-          setState((prev) => ({
-            ...prev,
-            input: "",
-            attachedFiles: [],
-          }));
-        }
-      } catch (error) {
-        // Only show error if not aborted
-        if (!signal?.aborted && currentRequestIdRef.current === requestId) {
-          setState((prev) => ({
-            ...prev,
-            error: error instanceof Error ? error.message : "An error occurred",
-            isLoading: false,
-          }));
-        }
-      }
-    },
-    [
-      state.input,
-      state.attachedFiles,
-      selectedAIProvider,
-      allAiProviders,
-      systemPrompt,
-      state.conversationHistory,
-    ]
-  );
-
-  const cancel = useCallback(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    currentRequestIdRef.current = null;
-    setState((prev) => ({ ...prev, isLoading: false }));
-  }, []);
-
-  const reset = useCallback(() => {
-    // Don't reset if keep engaged mode is active
-    if (keepEngaged) {
-      return;
-    }
-    cancel();
-    setState((prev) => ({
-      ...prev,
-      input: "",
-      response: "",
-      error: null,
-      attachedFiles: [],
-    }));
-  }, [cancel, keepEngaged]);
-
-  // Helper function to convert file to base64
-  const fileToBase64 = useCallback(async (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => {
-        const base64 = (reader.result as string)?.split(",")[1] || "";
-        resolve(base64);
-      };
-      reader.onerror = reject;
-    });
-  }, []);
-
-  // Note: saveConversation, getConversationById, and generateConversationTitle
-  // are now imported from lib/database/chat-history.action.ts
-
-  const loadConversation = useCallback((conversation: ChatConversation) => {
-    setState((prev) => ({
-      ...prev,
-      currentConversationId: conversation.id,
-      conversationHistory: conversation.messages,
-      input: "",
-      response: "",
-      error: null,
-      isLoading: false,
-    }));
-  }, []);
-
-  const startNewConversation = useCallback(() => {
-    setState((prev) => ({
-      ...prev,
-      currentConversationId: null,
-      conversationHistory: [],
-      input: "",
-      response: "",
-      error: null,
-      isLoading: false,
-      attachedFiles: [],
-    }));
   }, []);
 
   const saveCurrentConversation = useCallback(
@@ -445,6 +225,254 @@ export const useCompletion = () => {
     },
     [state.currentConversationId, state.conversationHistory]
   );
+
+  const submit = useCallback(
+    async (speechText?: string) => {
+      const input = speechText || state.input;
+
+      if (!input.trim()) {
+        return;
+      }
+
+      if (speechText) {
+        setState((prev) => ({
+          ...prev,
+          input: speechText,
+        }));
+      }
+
+      // Generate unique request ID
+      const requestId = generateRequestId();
+      currentRequestIdRef.current = requestId;
+
+      // Cancel any existing request
+      activeBatcherRef.current?.cancel();
+      activeBatcherRef.current = null;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+
+      abortControllerRef.current = new AbortController();
+      const signal = abortControllerRef.current.signal;
+
+      try {
+        // Windowed, not the full transcript: prefill dominates time-to-first-
+        // token on a local model, so an unbounded history makes every turn
+        // slower than the last (and eventually overflows the context window).
+        const messageHistory = buildAIHistory(state.conversationHistory);
+
+        // Handle image attachments
+        const imagesBase64: string[] = [];
+        if (state.attachedFiles.length > 0) {
+          state.attachedFiles.forEach((file) => {
+            if (file.type.startsWith("image/")) {
+              imagesBase64.push(file.base64);
+            }
+          });
+        }
+
+        let fullResponse = "";
+
+        // Check if AI provider is configured
+        if (!selectedAIProvider.provider) {
+          setState((prev) => ({
+            ...prev,
+            error: "Please select an AI provider in settings",
+          }));
+          return;
+        }
+
+        const provider = allAiProviders.find(
+          (p) => p.id === selectedAIProvider.provider
+        );
+        if (!provider) {
+          setState((prev) => ({
+            ...prev,
+            error: "Invalid provider selected",
+          }));
+          return;
+        }
+
+        // Clear previous response and set loading state
+        setState((prev) => ({
+          ...prev,
+          isLoading: true,
+          error: null,
+          response: "",
+        }));
+
+        // Rendering the response re-parses the whole markdown string, so
+        // batch tokens instead of re-rendering per token.
+        const isCurrent = () =>
+          currentRequestIdRef.current === requestId && !signal.aborted;
+        const batcher = createTokenBatcher(
+          (batched) => {
+            setState((prev) => ({
+              ...prev,
+              response: prev.response + batched,
+            }));
+          },
+          undefined,
+          isCurrent
+        );
+        activeBatcherRef.current = batcher;
+
+        try {
+          // Use the fetchAIResponse function with signal
+          for await (const chunk of fetchAIResponse({
+            provider,
+            selectedProvider: selectedAIProvider,
+            systemPrompt: systemPrompt || undefined,
+            history: messageHistory,
+            userMessage: input,
+            imagesBase64,
+            signal,
+          })) {
+            // Only update if this is still the current request
+            if (!isCurrent()) {
+              batcher.cancel();
+              return;
+            }
+
+            fullResponse += chunk;
+            batcher.push(chunk);
+          }
+          if (!isCurrent()) {
+            batcher.cancel();
+            return;
+          }
+          batcher.flush();
+        } catch (e: any) {
+          batcher.cancel();
+          // Only show error if this is still the current request and not aborted
+          if (currentRequestIdRef.current === requestId && !signal.aborted) {
+            setState((prev) => ({
+              ...prev,
+              isLoading: false,
+              error: e.message || "An error occurred",
+            }));
+          }
+          return;
+        } finally {
+          if (activeBatcherRef.current === batcher) {
+            activeBatcherRef.current = null;
+          }
+        }
+
+        // Only proceed if this is still the current request
+        if (currentRequestIdRef.current !== requestId || signal.aborted) {
+          return;
+        }
+
+        setState((prev) => ({ ...prev, isLoading: false }));
+
+        // Focus input after AI response is complete
+        setTimeout(() => {
+          inputRef.current?.focus();
+        }, 100);
+
+        // Save the conversation after successful completion
+        if (fullResponse) {
+          await saveCurrentConversation(
+            input,
+            fullResponse,
+            state.attachedFiles
+          );
+          // Clear input and attached files after saving
+          setState((prev) => ({
+            ...prev,
+            input: "",
+            attachedFiles: [],
+          }));
+        }
+      } catch (error) {
+        // Only show error if not aborted
+        if (!signal?.aborted && currentRequestIdRef.current === requestId) {
+          setState((prev) => ({
+            ...prev,
+            error: error instanceof Error ? error.message : "An error occurred",
+            isLoading: false,
+          }));
+        }
+      }
+    },
+    [
+      state.input,
+      state.attachedFiles,
+      selectedAIProvider,
+      allAiProviders,
+      systemPrompt,
+      state.conversationHistory,
+      saveCurrentConversation,
+    ]
+  );
+
+  const cancel = useCallback(() => {
+    activeBatcherRef.current?.cancel();
+    activeBatcherRef.current = null;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    currentRequestIdRef.current = null;
+    setState((prev) => ({ ...prev, isLoading: false }));
+  }, []);
+
+  const reset = useCallback(() => {
+    // Don't reset if keep engaged mode is active
+    if (keepEngaged) {
+      return;
+    }
+    cancel();
+    setState((prev) => ({
+      ...prev,
+      input: "",
+      response: "",
+      error: null,
+      attachedFiles: [],
+    }));
+  }, [cancel, keepEngaged]);
+
+  // Helper function to convert file to base64
+  const fileToBase64 = useCallback(async (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => {
+        const base64 = (reader.result as string)?.split(",")[1] || "";
+        resolve(base64);
+      };
+      reader.onerror = reject;
+    });
+  }, []);
+
+  // Note: saveConversation, getConversationById, and generateConversationTitle
+  // are now imported from lib/database/chat-history.action.ts
+
+  const loadConversation = useCallback((conversation: ChatConversation) => {
+    setState((prev) => ({
+      ...prev,
+      currentConversationId: conversation.id,
+      conversationHistory: conversation.messages,
+      input: "",
+      response: "",
+      error: null,
+      isLoading: false,
+    }));
+  }, []);
+
+  const startNewConversation = useCallback(() => {
+    setState((prev) => ({
+      ...prev,
+      currentConversationId: null,
+      conversationHistory: [],
+      input: "",
+      response: "",
+      error: null,
+      isLoading: false,
+      attachedFiles: [],
+    }));
+  }, []);
 
   // Listen for conversation events from the main ChatHistory component
   useEffect(() => {
@@ -569,6 +597,8 @@ export const useCompletion = () => {
           currentRequestIdRef.current = requestId;
 
           // Cancel any existing request
+          activeBatcherRef.current?.cancel();
+          activeBatcherRef.current = null;
           if (abortControllerRef.current) {
             abortControllerRef.current.abort();
           }
@@ -577,11 +607,7 @@ export const useCompletion = () => {
           const signal = abortControllerRef.current.signal;
 
           try {
-            // Prepare message history for the AI
-            const messageHistory = state.conversationHistory.map((msg) => ({
-              role: msg.role,
-              content: msg.content,
-            }));
+            const messageHistory = buildAIHistory(state.conversationHistory);
 
             let fullResponse = "";
 
@@ -614,26 +640,52 @@ export const useCompletion = () => {
               response: "",
             }));
 
-            // Use the fetchAIResponse function with image and signal
-            for await (const chunk of fetchAIResponse({
-              provider,
-              selectedProvider: selectedAIProvider,
-              systemPrompt: systemPrompt || undefined,
-              history: messageHistory,
-              userMessage: prompt,
-              imagesBase64: [base64],
-              signal,
-            })) {
-              // Only update if this is still the current request
-              if (currentRequestIdRef.current !== requestId || signal.aborted) {
-                return; // Request was superseded or cancelled
-              }
+            const isCurrent = () =>
+              currentRequestIdRef.current === requestId && !signal.aborted;
+            const batcher = createTokenBatcher(
+              (batched) => {
+                setState((prev) => ({
+                  ...prev,
+                  response: prev.response + batched,
+                }));
+              },
+              undefined,
+              isCurrent
+            );
+            activeBatcherRef.current = batcher;
 
-              fullResponse += chunk;
-              setState((prev) => ({
-                ...prev,
-                response: prev.response + chunk,
-              }));
+            // Use the fetchAIResponse function with image and signal
+            try {
+              for await (const chunk of fetchAIResponse({
+                provider,
+                selectedProvider: selectedAIProvider,
+                systemPrompt: systemPrompt || undefined,
+                history: messageHistory,
+                userMessage: prompt,
+                imagesBase64: [base64],
+                signal,
+              })) {
+                // Only update if this is still the current request
+                if (!isCurrent()) {
+                  batcher.cancel();
+                  return;
+                }
+
+                fullResponse += chunk;
+                batcher.push(chunk);
+              }
+              if (!isCurrent()) {
+                batcher.cancel();
+                return;
+              }
+              batcher.flush();
+            } catch (streamError) {
+              batcher.cancel();
+              throw streamError;
+            } finally {
+              if (activeBatcherRef.current === batcher) {
+                activeBatcherRef.current = null;
+              }
             }
 
             // Only proceed if this is still the current request
@@ -685,7 +737,7 @@ export const useCompletion = () => {
 
           setState((prev) => ({
             ...prev,
-            attachedFiles: [...prev.attachedFiles, attachedFile],
+            attachedFiles: appendWithinLimit(prev.attachedFiles, [attachedFile]),
           }));
         }
       } catch (error) {
@@ -994,6 +1046,8 @@ export const useCompletion = () => {
   // Cleanup abort controller on unmount
   useEffect(() => {
     return () => {
+      activeBatcherRef.current?.cancel();
+      activeBatcherRef.current = null;
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
@@ -1004,9 +1058,17 @@ export const useCompletion = () => {
 
   // register callbacks for global shortcuts
   useEffect(() => {
-    globalShortcuts.registerAudioCallback(toggleRecording);
-    globalShortcuts.registerInputRef(inputRef.current);
-    globalShortcuts.registerScreenshotCallback(captureScreenshot);
+    const disposeAudio =
+      globalShortcuts.registerAudioCallback(toggleRecording);
+    const disposeInput =
+      globalShortcuts.registerInputRef(inputRef.current);
+    const disposeScreenshot =
+      globalShortcuts.registerScreenshotCallback(captureScreenshot);
+    return () => {
+      disposeAudio();
+      disposeInput?.();
+      disposeScreenshot();
+    };
   }, [
     globalShortcuts.registerAudioCallback,
     globalShortcuts.registerInputRef,

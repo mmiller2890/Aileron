@@ -11,6 +11,8 @@ import {
   generateRequestId,
   getResponseSettings,
   isMacOS,
+  createTokenBatcher,
+  buildAIHistory,
 } from "@/lib";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -83,6 +85,9 @@ export const useChatCompletion = (
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeBatcherRef = useRef<ReturnType<typeof createTokenBatcher> | null>(
+    null
+  );
   const currentRequestIdRef = useRef<string | null>(null);
   const isProcessingScreenshotRef = useRef(false);
   const screenshotConfigRef = useRef(screenshotConfiguration);
@@ -155,6 +160,8 @@ export const useChatCompletion = (
       currentRequestIdRef.current = requestId;
 
       // Cancel any existing request
+      activeBatcherRef.current?.cancel();
+      activeBatcherRef.current = null;
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
@@ -164,10 +171,7 @@ export const useChatCompletion = (
 
       try {
         // Prepare message history for the AI
-        const messageHistory = (messages?.messages || []).map((msg) => ({
-          role: msg.role,
-          content: msg.content,
-        }));
+        const messageHistory = buildAIHistory(messages?.messages || []);
 
         // Handle image attachments
         const imagesBase64: string[] = [];
@@ -236,51 +240,68 @@ export const useChatCompletion = (
             timestamp: timestamp + MESSAGE_ID_OFFSET,
           };
 
-          // Use the fetchAIResponse function with signal
-          for await (const chunk of fetchAIResponse({
-            provider,
-            selectedProvider: selectedAIProvider,
-            systemPrompt: systemPrompt || undefined,
-            history: messageHistory,
-            userMessage: input,
-            imagesBase64,
-            signal,
-          })) {
-            // Only update if this is still the current request
-            if (currentRequestIdRef.current !== requestId) {
-              return; // Request was superseded, stop processing
+          // Rendering re-parses the whole markdown string, so batch tokens
+          // instead of re-rendering the message per token.
+          const isCurrent = () =>
+            currentRequestIdRef.current === requestId && !signal.aborted;
+          const batcher = createTokenBatcher(
+            () => {
+              assistantMsg.content = fullResponse;
+
+              const baseMsgs = updatedMessages.messages;
+              const last = baseMsgs[baseMsgs.length - 1];
+              if (last && last.role === "assistant") {
+                setMessages({
+                  ...updatedMessages,
+                  messages: [
+                    ...baseMsgs.slice(0, -1),
+                    { ...assistantMsg },
+                  ],
+                });
+              } else {
+                setMessages({
+                  ...updatedMessages,
+                  messages: [...baseMsgs, { ...assistantMsg }],
+                });
+              }
+
+              scrollToBottom();
+            },
+            undefined,
+            isCurrent
+          );
+          activeBatcherRef.current = batcher;
+
+          try {
+            for await (const chunk of fetchAIResponse({
+              provider,
+              selectedProvider: selectedAIProvider,
+              systemPrompt: systemPrompt || undefined,
+              history: messageHistory,
+              userMessage: input,
+              imagesBase64,
+              signal,
+            })) {
+              if (!isCurrent()) {
+                batcher.cancel();
+                return;
+              }
+
+              fullResponse += chunk;
+              batcher.push(chunk);
             }
-
-            // Check if request was aborted
-            if (signal.aborted) {
-              return; // Request was cancelled, stop processing
+            if (!isCurrent()) {
+              batcher.cancel();
+              return;
             }
-
-            fullResponse += chunk;
-            assistantMsg.content = fullResponse;
-
-            // Update the assistant message in real-time. On the first chunk we
-            // append the assistant message; on subsequent chunks we replace the
-            // last (assistant) message to avoid O(n^2) array growth.
-            const baseMsgs = updatedMessages.messages;
-            const last = baseMsgs[baseMsgs.length - 1];
-            if (last && last.role === "assistant") {
-              setMessages({
-                ...updatedMessages,
-                messages: [
-                  ...baseMsgs.slice(0, -1),
-                  { ...assistantMsg },
-                ],
-              });
-            } else {
-              setMessages({
-                ...updatedMessages,
-                messages: [...baseMsgs, { ...assistantMsg }],
-              });
+            batcher.flush();
+          } catch (streamError) {
+            batcher.cancel();
+            throw streamError;
+          } finally {
+            if (activeBatcherRef.current === batcher) {
+              activeBatcherRef.current = null;
             }
-
-            // Auto-scroll during streaming
-            scrollToBottom();
           }
         } catch (e: any) {
           // Only show error if this is still the current request and not aborted
@@ -389,6 +410,8 @@ export const useChatCompletion = (
   );
 
   const cancel = useCallback(() => {
+    activeBatcherRef.current?.cancel();
+    activeBatcherRef.current = null;
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
@@ -684,6 +707,8 @@ export const useChatCompletion = (
   // Cleanup abort controller on unmount
   useEffect(() => {
     return () => {
+      activeBatcherRef.current?.cancel();
+      activeBatcherRef.current = null;
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;

@@ -139,6 +139,8 @@ dependencies = [
  "image",
  "libpulse-binding",
  "libpulse-simple-binding",
+ "objc2 0.6.2",
+ "objc2-app-kit",
  "once_cell",
  "reqwest",
  "ringbuf",

@@ -23,45 +23,38 @@ export const useShortcuts = ({
     registerScreenshotCallback,
     registerSystemAudioCallback,
     registerCustomShortcutCallback,
-    unregisterCustomShortcutCallback,
   } = useGlobalShortcuts();
 
   // Register standard callbacks
   useEffect(() => {
     if (onAudioRecording) {
-      registerAudioCallback(onAudioRecording);
+      return registerAudioCallback(onAudioRecording);
     }
   }, [onAudioRecording, registerAudioCallback]);
 
   useEffect(() => {
     if (onScreenshot) {
-      registerScreenshotCallback(onScreenshot);
+      return registerScreenshotCallback(onScreenshot);
     }
   }, [onScreenshot, registerScreenshotCallback]);
 
   useEffect(() => {
     if (onSystemAudio) {
-      registerSystemAudioCallback(onSystemAudio);
+      return registerSystemAudioCallback(onSystemAudio);
     }
   }, [onSystemAudio, registerSystemAudioCallback]);
 
   // Register custom shortcut callbacks
   useEffect(() => {
-    Object.entries(customShortcuts).forEach(([actionId, callback]) => {
-      registerCustomShortcutCallback(actionId, callback);
-    });
+    const disposers = Object.entries(customShortcuts).map(
+      ([actionId, callback]) =>
+        registerCustomShortcutCallback(actionId, callback)
+    );
 
-    // Cleanup on unmount
     return () => {
-      Object.keys(customShortcuts).forEach((actionId) => {
-        unregisterCustomShortcutCallback(actionId);
-      });
+      disposers.forEach((dispose) => dispose());
     };
-  }, [
-    customShortcuts,
-    registerCustomShortcutCallback,
-    unregisterCustomShortcutCallback,
-  ]);
+  }, [customShortcuts, registerCustomShortcutCallback]);
 
   return useGlobalShortcuts();
 };

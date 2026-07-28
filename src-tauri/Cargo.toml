@@ -21,6 +21,15 @@ edition = "2021"
 name = "assistant_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Named explicitly rather than inherited from `package.name`. `tauri dev` runs
+# this binary directly with no .app bundle around it, and macOS labels an
+# unbundled process by its executable filename — so the Cargo package name is
+# what shows in the dock during development, not `productName`.
+# Must stay in sync with `mainBinaryName` in tauri.conf.json.
+[[bin]]
+name = "Aileron"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -53,6 +62,8 @@ tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 tauri-plugin-macos-permissions = "2"
 cidre = "0.11.3"
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
 # crates.io 0.14.1 predates the TDT decoder-state fix (upstream PR #15). In that
 # release the Swift bridge persists `asrDecoderState` across calls, so each
 # transcription is primed with the previous utterance's end-of-sentence state and

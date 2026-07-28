@@ -208,13 +208,17 @@ fn setup_dashboard_close_handler<R: Runtime>(window: &WebviewWindow<R>) {
 /// active application (no menu bar, window can stay behind). Activating the
 /// NSApplication explicitly is what a normal windowed app needs.
 #[cfg(target_os = "macos")]
-pub fn activate_app() {
-    use tauri_nspanel::cocoa::appkit::NSApplication;
-    use tauri_nspanel::cocoa::base::{nil, YES};
-    unsafe {
-        let ns_app = NSApplication::sharedApplication(nil);
-        ns_app.activateIgnoringOtherApps_(YES);
-    }
+pub fn activate_app<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    app.run_on_main_thread(|| {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSApplication;
+
+        let main_thread =
+            MainThreadMarker::new().expect("application activation must run on the main thread");
+        let ns_app = NSApplication::sharedApplication(main_thread);
+        unsafe { ns_app.activate() };
+    })
+    .map_err(|e| format!("Failed to activate application: {}", e))
 }
 
 pub fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -238,6 +242,6 @@ pub fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
             .map_err(|e| format!("Failed to focus new dashboard window: {}", e))?;
     }
     #[cfg(target_os = "macos")]
-    activate_app();
+    activate_app(app)?;
     Ok(())
 }

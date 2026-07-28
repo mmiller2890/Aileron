@@ -64,6 +64,24 @@ describe("buildAIHistory", () => {
   it("handles an empty conversation", () => {
     expect(buildAIHistory([])).toEqual([]);
   });
+
+  // The overlay chat stores messages oldest-first, the live session
+  // newest-first. Both call this, so the window must be picked by timestamp
+  // rather than by array position.
+  it("keeps the most recent messages regardless of input ordering", () => {
+    const oldestFirst = Array.from({ length: 20 }, (_, i) =>
+      msg(`m${i}`, "user", `msg-${i + 1}`, (i + 1) * 100)
+    );
+    const newestFirst = [...oldestFirst].reverse();
+
+    const fromOldest = buildAIHistory(oldestFirst);
+    const fromNewest = buildAIHistory(newestFirst);
+
+    expect(fromOldest).toEqual(fromNewest);
+    expect(fromOldest).toHaveLength(MAX_AI_HISTORY_MESSAGES);
+    expect(fromOldest[0].content).toBe("msg-9");
+    expect(fromOldest[fromOldest.length - 1].content).toBe("msg-20");
+  });
 });
 
 describe("buildSummaryTranscript", () => {

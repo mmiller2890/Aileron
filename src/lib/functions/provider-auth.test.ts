@@ -16,11 +16,11 @@ describe("isApiKeyOptional", () => {
   });
 
   test.each(["ollama", "lm-studio"])(
-    "retains the built-in %s exemption",
+    "does not let the built-in %s id exempt a remote URL",
     (providerId) => {
       expect(
         isApiKeyOptional(providerId, "https://invalid.example/v1/chat")
-      ).toBe(true);
+      ).toBe(false);
     }
   );
 

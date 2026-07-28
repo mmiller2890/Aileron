@@ -13,8 +13,15 @@ import {
   Responses,
 } from "@/pages";
 import { DashboardLayout } from "@/layouts";
+import { useModelWarmup } from "@/hooks";
 
-export default function AppRoutes() {
+export default function AppRoutes({
+  enableModelWarmup = false,
+}: {
+  enableModelWarmup?: boolean;
+}) {
+  useModelWarmup(enableModelWarmup);
+
   return (
     <Router>
       <Routes>

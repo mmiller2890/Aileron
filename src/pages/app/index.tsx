@@ -9,6 +9,7 @@ import { useAppLifecycle } from "@/hooks";
 import { useApp } from "@/contexts";
 import { invoke } from "@tauri-apps/api/core";
 import { ErrorBoundary } from "react-error-boundary";
+import { LayoutDashboardIcon } from "lucide-react";
 import { ErrorLayout } from "@/layouts";
 import { getPlatform, isMacOS } from "@/lib";
 
@@ -18,11 +19,14 @@ const App = () => {
   const platform = getPlatform();
   const modKey = isMacOS() ? "⌘" : "Ctrl";
 
-  const openDashboard = async () => {
+  const returnToDashboard = async () => {
     try {
-      await invoke("open_dashboard");
+      // Pops the bar in *and* focuses the dashboard. `open_dashboard` alone
+      // only reveals the dashboard, leaving the bar still floating on top of
+      // it — which is why this button read as doing nothing.
+      await invoke("toggle_overlay");
     } catch (error) {
-      console.error("Failed to open dashboard:", error);
+      console.error("Failed to return to dashboard:", error);
     }
   };
 
@@ -79,11 +83,12 @@ const App = () => {
           {/* Control row */}
           <div className="flex flex-row items-center gap-1.5">
             <button
-              onClick={openDashboard}
-              title="Open Dashboard"
-              className="flex size-9 shrink-0 items-center justify-center rounded-md border border-primary transition-colors hover:bg-primary/10"
+              onClick={returnToDashboard}
+              title="Back to dashboard (pops the bar in)"
+              aria-label="Back to dashboard"
+              className="flex size-9 shrink-0 items-center justify-center rounded-md border border-primary text-primary transition-colors hover:bg-primary/10"
             >
-              <span className="size-2 rounded-sm bg-primary" />
+              <LayoutDashboardIcon className="size-3.5" />
             </button>
             <SystemAudio {...systemAudio} />
             {systemAudio?.capturing ? (

@@ -34,8 +34,8 @@ const AutoSpeechVADInternal = ({
     additionalAudioConstraints: audioConstraints,
     onSpeechEnd: async (audio) => {
       try {
-        // convert float32array to blob
-        const audioBlob = floatArrayToWav(audio, 16000, "wav");
+        // Deferred: only providers that upload the audio need it encoded.
+        const audioBlob = () => floatArrayToWav(audio, 16000, "wav");
 
         let transcription: string;
 
@@ -71,6 +71,10 @@ const AutoSpeechVADInternal = ({
           provider: providerConfig,
           selectedProvider: selectedSttProvider,
           audio: audioBlob,
+          // The local provider wants samples, and VAD already handed us the
+          // exact 16kHz mono buffer — passing it skips encoding a WAV only to
+          // decode it again through the Web Audio API.
+          samples: audio,
         });
 
         if (transcription) {

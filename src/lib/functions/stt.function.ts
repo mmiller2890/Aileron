@@ -1,8 +1,10 @@
 import {
+  describeError,
   deepVariableReplacer,
   getByPath,
   blobToBase64,
   wavBase64ToF32Samples,
+  resolveCurlUrl,
 } from "./common.function";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { invoke } from "@tauri-apps/api/core";
@@ -16,8 +18,35 @@ export interface STTParams {
     provider: string;
     variables: Record<string, string>;
   };
-  audio: File | Blob;
+  /**
+   * The encoded audio, or a thunk producing it.
+   *
+   * Pass a thunk when producing the blob is itself expensive (decoding a
+   * base64 WAV) and the chosen provider may not need it at all — see
+   * `utteranceId` below.
+   */
+  audio: File | Blob | (() => File | Blob);
   signal?: AbortSignal;
+  /**
+   * Handle for an utterance the Rust capture loop still holds in memory.
+   *
+   * When present, the local provider transcribes straight from those samples
+   * instead of decoding `audio` and sending the samples back over IPC. Remote
+   * providers ignore it — they need the encoded audio to upload.
+   */
+  utteranceId?: string;
+  /**
+   * Raw 16kHz mono samples, when the caller already has them (the mic VAD
+   * path). Lets the local provider skip the WAV encode/decode round trip.
+   */
+  samples?: Float32Array;
+}
+
+export const UTTERANCE_CACHE_MISS_PREFIX = "UTTERANCE_CACHE_MISS:";
+
+export function isUtteranceCacheMiss(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith(UTTERANCE_CACHE_MISS_PREFIX);
 }
 
 /**
@@ -27,31 +56,68 @@ export async function fetchSTT(params: STTParams): Promise<string> {
   let warnings: string[] = [];
 
   try {
-    const { provider, selectedProvider, audio, signal } = params;
+    const {
+      provider,
+      selectedProvider,
+      audio: audioSource,
+      signal,
+      utteranceId,
+      samples,
+    } = params;
 
     if (!provider) throw new Error("Provider not provided");
     if (!selectedProvider) throw new Error("Selected provider not provided");
-    if (!audio) throw new Error("Audio file is required");
+    if (!audioSource) throw new Error("Audio file is required");
+
+    let resolvedAudio: File | Blob | null = null;
+    const audioBlob = (): File | Blob => {
+      resolvedAudio ??=
+        typeof audioSource === "function" ? audioSource() : audioSource;
+      return resolvedAudio;
+    };
 
     if (provider.id === "local-fluidaudio") {
-      const file = audio as File;
-      if (file.size === 0) throw new Error("Audio file is empty");
-      const wavBase64 = await blobToBase64(audio);
-      const samples = await wavBase64ToF32Samples(wavBase64);
+      // Fastest path: Rust already holds these samples, so transcribe in
+      // place. Nothing is decoded and nothing crosses IPC but the id.
+      if (utteranceId) {
+        try {
+          const result = await invoke<{ text: string }>(
+            "stt_transcribe_utterance",
+            { utteranceId }
+          );
+          return result.text.trim();
+        } catch (error) {
+          if (!isUtteranceCacheMiss(error)) {
+            throw error;
+          }
+          // The utterance can age out of the cache during a burst of speech.
+          // Falling through re-derives the samples from the audio we were
+          // handed, which is why callers must still supply it.
+          console.warn(
+            "Utterance no longer cached, falling back to decode:",
+            error
+          );
+        }
+      }
+
+      // Caller already has samples (mic VAD): skip the WAV round trip.
+      const f32 =
+        samples ?? (await wavBase64ToF32Samples(await blobToBase64(audioBlob())));
+      if (f32.length === 0) throw new Error("Audio file is empty");
       const result = await invoke<{ text: string }>("stt_transcribe_speech", {
-        samples: Array.from(samples),
+        samples: Array.from(f32),
       });
       return result.text.trim();
     }
+
+    const audio = audioBlob();
 
     let curlJson: any;
     try {
       curlJson = curl2Json(provider.curl);
     } catch (error) {
       throw new Error(
-        `Failed to parse curl: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`
+        `Failed to parse curl: ${describeError(error)}`
       );
     }
 
@@ -75,30 +141,12 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     };
 
     // Prepare request
-    let url = deepVariableReplacer(curlJson.url || "", allVariables);
+    const url = resolveCurlUrl(curlJson, allVariables);
     const headers = deepVariableReplacer(curlJson.header || {}, allVariables);
     const formData = deepVariableReplacer(curlJson.form || {}, allVariables);
 
     // To Check if API accepts Binary Data
     const isBinaryUpload = provider.curl.includes("--data-binary");
-    // Fetch URL Params
-    const rawParams = curlJson.params || {};
-    // Decode Them
-    const decodedParams = Object.fromEntries(
-      Object.entries(rawParams).map(([key, value]) => [
-        key,
-        typeof value === "string" ? decodeURIComponent(value) : "",
-      ])
-    );
-    // Get the Parameters from allVariables
-    const replacedParams = deepVariableReplacer(decodedParams, allVariables);
-
-    // Add query parameters to URL
-    const queryString = new URLSearchParams(replacedParams).toString();
-    if (queryString) {
-      url += (url.includes("?") ? "&" : "?") + queryString;
-    }
-
     let finalHeaders = { ...headers };
     let body: FormData | string | Blob;
 

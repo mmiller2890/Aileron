@@ -1,5 +1,3 @@
-const BUILT_IN_OPTIONAL_KEY_PROVIDERS = new Set(["ollama", "lm-studio"]);
-
 const isLoopbackUrl = (rawUrl: string): boolean => {
   try {
     const hostname = new URL(rawUrl).hostname
@@ -16,13 +14,10 @@ const isLoopbackUrl = (rawUrl: string): boolean => {
 };
 
 export function isApiKeyOptional(
-  providerId: string | undefined,
+  _providerId: string | undefined,
   resolvedUrl: string
 ): boolean {
-  return (
-    BUILT_IN_OPTIONAL_KEY_PROVIDERS.has(providerId ?? "") ||
-    isLoopbackUrl(resolvedUrl)
-  );
+  return isLoopbackUrl(resolvedUrl);
 }
 
 export function omitEmptyApiKeyHeaders(

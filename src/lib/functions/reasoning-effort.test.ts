@@ -6,11 +6,15 @@ import { TYPE_PROVIDER } from "@/types";
  * `reasoning_effort` injection can be asserted against real provider
  * templates rather than reimplemented in the test.
  */
-const sent: { url: string; body: any }[] = [];
+const sent: { url: string; body: any; headers: Record<string, string> }[] = [];
 
 vi.mock("@tauri-apps/plugin-http", () => ({
   fetch: (url: string, init: any) => {
-    sent.push({ url, body: JSON.parse(init.body) });
+    sent.push({
+      url,
+      body: JSON.parse(init.body),
+      headers: init.headers,
+    });
     return Promise.resolve({
       ok: true,
       status: 200,
@@ -71,6 +75,14 @@ beforeEach(() => {
 afterEach(() => vi.clearAllMocks());
 
 describe("reasoning_effort injection", () => {
+  it("removes the packaged webview origin from local AI requests", async () => {
+    await drain(
+      mk("ollama", "http://localhost:11434/v1/chat/completions", OPENAI_BODY)
+    );
+
+    expect(sent[0].headers).toMatchObject({ Origin: "" });
+  });
+
   it("is sent when the provider declares thinking-off support", async () => {
     await drain(
       mk("ollama", "http://localhost:11434/v1/chat/completions", OPENAI_BODY, {

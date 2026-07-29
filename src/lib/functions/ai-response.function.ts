@@ -17,6 +17,7 @@ import { MARKDOWN_FORMATTING_INSTRUCTIONS } from "@/config/constants";
 import {
   isApiKeyOptional,
   omitEmptyApiKeyHeaders,
+  withLoopbackOriginRemoved,
 } from "./provider-auth";
 
 function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
@@ -164,6 +165,7 @@ export async function* fetchAIResponse(params: {
       allVariables.API_KEY
     );
     headers["Content-Type"] = "application/json";
+    headers = withLoopbackOriginRemoved(headers, url);
 
     if (provider?.streaming) {
       if (typeof bodyObj === "object" && bodyObj !== null) {

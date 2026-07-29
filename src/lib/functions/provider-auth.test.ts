@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   isApiKeyOptional,
   omitEmptyApiKeyHeaders,
+  withLoopbackOriginRemoved,
 } from "./provider-auth";
 
 describe("isApiKeyOptional", () => {
@@ -59,5 +60,43 @@ describe("omitEmptyApiKeyHeaders", () => {
     expect(omitEmptyApiKeyHeaders(resolved, templates, "secret")).toEqual(
       resolved
     );
+  });
+});
+
+describe("withLoopbackOriginRemoved", () => {
+  test.each([
+    "http://localhost:11434/v1/chat/completions",
+    "http://127.42.8.9:8000/v1/audio/transcriptions",
+    "http://[::1]:11434/api/generate",
+  ])("removes the packaged webview origin for loopback URL %s", (url) => {
+    expect(
+      withLoopbackOriginRemoved({ Authorization: "Bearer secret" }, url)
+    ).toEqual({
+      Authorization: "Bearer secret",
+      Origin: "",
+    });
+  });
+
+  test.each([
+    "https://api.openai.com/v1/chat/completions",
+    "http://192.168.1.50:11434/v1/chat/completions",
+    "not a valid URL",
+  ])("preserves headers for non-loopback URL %s", (url) => {
+    expect(
+      withLoopbackOriginRemoved({ "X-Provider": "remote" }, url)
+    ).toEqual({
+      "X-Provider": "remote",
+    });
+  });
+
+  test("does not mutate caller-owned headers", () => {
+    const headers = { "Content-Type": "application/json" };
+
+    withLoopbackOriginRemoved(
+      headers,
+      "http://localhost:11434/v1/chat/completions"
+    );
+
+    expect(headers).toEqual({ "Content-Type": "application/json" });
   });
 });

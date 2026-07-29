@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { TYPE_PROVIDER } from "@/types";
 import curl2Json from "@bany/curl-to-json";
+import { withLoopbackOriginRemoved } from "./provider-auth";
 
 export interface STTParams {
   provider: TYPE_PROVIDER | undefined;
@@ -213,6 +214,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       body = JSON.stringify(deepVariableReplacer(dataObj, allVariables));
     }
 
+    finalHeaders = withLoopbackOriginRemoved(finalHeaders, url);
     const fetchFunction = url?.startsWith("https") ? fetch : tauriFetch;
 
     // Send request

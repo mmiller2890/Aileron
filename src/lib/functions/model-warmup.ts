@@ -5,6 +5,7 @@ import {
   deepVariableReplacer,
   restoreUrlPlaceholders,
 } from "./common.function";
+import { withLoopbackOriginRemoved } from "./provider-auth";
 
 /**
  * How long to ask Ollama to keep the model resident after a touch.
@@ -119,7 +120,10 @@ export async function warmUpModel(
     const fetchFunction = target.url.startsWith("https") ? fetch : tauriFetch;
     const response = await fetchFunction(target.url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: withLoopbackOriginRemoved(
+        { "Content-Type": "application/json" },
+        target.url
+      ),
       // No prompt: this is a pure preload/keep-alive touch, so it loads the
       // weights and returns without generating any tokens.
       body: JSON.stringify({

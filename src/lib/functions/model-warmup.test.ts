@@ -197,6 +197,7 @@ describe("warmUpModel", () => {
       model: "qwen3.5:2b-mlx",
       stream: false,
     });
+    expect(request.headers).toMatchObject({ Origin: "" });
     expect(consumeBody).toHaveBeenCalledOnce();
   });
 });

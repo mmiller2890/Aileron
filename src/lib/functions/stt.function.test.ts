@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TYPE_PROVIDER } from "@/types";
 
-const { invokeMock } = vi.hoisted(() => ({
+const { invokeMock, tauriFetchMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
+  tauriFetchMock: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -10,7 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@tauri-apps/plugin-http", () => ({
-  fetch: vi.fn(),
+  fetch: tauriFetchMock,
 }));
 
 vi.mock("./common.function", async (importOriginal) => {
@@ -45,6 +46,7 @@ const params = {
 
 beforeEach(() => {
   invokeMock.mockReset();
+  tauriFetchMock.mockReset();
 });
 
 describe("local Fluidaudio utterance fallback", () => {
@@ -78,5 +80,35 @@ describe("local Fluidaudio utterance fallback", () => {
       )
     ).toBe(true);
     expect(isUtteranceCacheMiss(new Error("model cache failed"))).toBe(false);
+  });
+});
+
+describe("local HTTP transcription", () => {
+  it("removes the packaged webview origin from loopback STT requests", async () => {
+    tauriFetchMock.mockResolvedValueOnce({
+      ok: true,
+      text: vi.fn().mockResolvedValue(JSON.stringify({ text: "hello" })),
+    });
+    const httpProvider = {
+      id: "local-whisper",
+      curl: `curl -X POST http://127.0.0.1:8000/v1/audio/transcriptions -H "Content-Type: audio/wav" --data-binary "{{AUDIO}}"`,
+      responseContentPath: "text",
+      streaming: false,
+    } as TYPE_PROVIDER;
+
+    await expect(
+      fetchSTT({
+        provider: httpProvider,
+        selectedProvider: {
+          provider: "local-whisper",
+          variables: {},
+        },
+        audio: new Blob(["wav"], { type: "audio/wav" }),
+      })
+    ).resolves.toBe("hello");
+
+    expect(tauriFetchMock.mock.calls[0][1].headers).toMatchObject({
+      Origin: "",
+    });
   });
 });

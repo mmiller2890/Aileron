@@ -20,6 +20,15 @@ export function isApiKeyOptional(
   return isLoopbackUrl(resolvedUrl);
 }
 
+export function withLoopbackOriginRemoved(
+  headers: Record<string, string>,
+  resolvedUrl: string
+): Record<string, string> {
+  return isLoopbackUrl(resolvedUrl)
+    ? { ...headers, Origin: "" }
+    : { ...headers };
+}
+
 export function omitEmptyApiKeyHeaders(
   resolvedHeaders: Record<string, string>,
   templateHeaders: Record<string, unknown>,

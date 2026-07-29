@@ -20,12 +20,32 @@ approves pushing or publishing it.
 
 ## Scope
 
-The release process will not change source code, configuration, dependencies, UI, or runtime behavior. The unrelated untracked `artdeco-example.html` file will remain untouched and will not be included in the release commit, tag, or artifacts.
+The initial packaged-application smoke test exposed a release-only HTTP
+compatibility defect: Tauri's HTTP plugin injects the packaged webview origin
+(`http://tauri.localhost`) into local Ollama requests, and Ollama rejects that
+origin with `403 Forbidden`. Direct requests to the same local endpoint succeed,
+and development-mode origins do not reproduce the failure.
+
+The approved correction is limited to:
+
+- enabling the Tauri HTTP plugin's `unsafe-headers` feature;
+- explicitly removing `Origin` only for verified loopback URLs
+  (`localhost`, IPv4 loopback, and `::1`);
+- applying that policy consistently to AI, STT, and model-warmup requests; and
+- adding regression tests that prove remote and malformed URLs retain the
+  default header behavior.
+
+No UI, provider configuration, prompt, capture behavior, or non-loopback
+network behavior will change. The correction will be committed separately so
+it can be reverted independently. The unrelated untracked
+`artdeco-example.html` file will remain untouched and will not be included in
+the release commit, tag, or artifacts.
 
 ## Verification
 
-Run the required gates against the final release-candidate source state. That
-exact commit will be tagged after the packaged-application smoke test:
+Run the required gates against the corrected final release-candidate source
+state. That exact commit will be tagged after the packaged-application smoke
+test:
 
 1. `git diff --check`
 2. `npx tsc --noEmit`
@@ -36,7 +56,9 @@ exact commit will be tagged after the packaged-application smoke test:
 7. `npm run tauri build`
 
 The automated verification will not launch Aileron or compete with the
-development instance on port 1420.
+development instance on port 1420. The complete gate matrix and release build
+must be repeated after the loopback-origin correction; results from the
+superseded artifact do not qualify the corrected candidate.
 
 ## Release-Artifact Smoke Test
 
@@ -99,6 +121,7 @@ Gatekeeper quarantine and fresh macOS permission prompts should be expected.
   required permissions are granted, and one complete question-and-answer cycle
   succeeds without duplicates.
 - Artifact checksums are recorded in the handoff.
-- No source or behavior changes are introduced.
+- The only source/runtime change is the reviewed loopback-origin correction
+  described above.
 - `artdeco-example.html` remains untouched and untracked.
 - Nothing is pushed or published externally.

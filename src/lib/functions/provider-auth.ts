@@ -24,9 +24,14 @@ export function withLoopbackOriginRemoved(
   headers: Record<string, string>,
   resolvedUrl: string
 ): Record<string, string> {
-  return isLoopbackUrl(resolvedUrl)
-    ? { ...headers, Origin: "" }
-    : { ...headers };
+  if (!isLoopbackUrl(resolvedUrl)) {
+    return { ...headers };
+  }
+
+  const headersWithoutOrigin = Object.fromEntries(
+    Object.entries(headers).filter(([name]) => name.toLowerCase() !== "origin")
+  );
+  return { ...headersWithoutOrigin, Origin: "" };
 }
 
 export function omitEmptyApiKeyHeaders(

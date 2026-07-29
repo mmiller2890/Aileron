@@ -77,6 +77,31 @@ describe("withLoopbackOriginRemoved", () => {
     });
   });
 
+  test.each(["origin", "oRiGiN"])(
+    "replaces an existing %s header with one empty canonical Origin",
+    (headerName) => {
+      const headers = {
+        [headerName]: "http://tauri.localhost",
+        "X-Provider": "local",
+      };
+
+      const result = withLoopbackOriginRemoved(
+        headers,
+        "http://localhost:11434/v1/chat/completions"
+      );
+
+      expect(result).toEqual({
+        "X-Provider": "local",
+        Origin: "",
+      });
+      expect(new Headers(result).get("origin")).toBe("");
+      expect(headers).toEqual({
+        [headerName]: "http://tauri.localhost",
+        "X-Provider": "local",
+      });
+    }
+  );
+
   test.each([
     "https://api.openai.com/v1/chat/completions",
     "http://192.168.1.50:11434/v1/chat/completions",

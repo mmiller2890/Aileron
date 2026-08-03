@@ -170,3 +170,31 @@ describe("reasoning_effort injection", () => {
     expect(sent[0].body.reasoning_effort).toBe("none");
   });
 });
+
+describe("https transport selection", () => {
+  it("routes https provider URLs through the global fetch, not tauriFetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "hi" } }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await drain(
+        mk("custom", "https://api.openai.com/v1/chat/completions", OPENAI_BODY)
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(sent).toHaveLength(0);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("https://api.openai.com/v1/chat/completions");
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(JSON.parse(init.body).messages[0].content).toBe("hello");
+  });
+});

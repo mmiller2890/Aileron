@@ -6,18 +6,17 @@ mod window;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, WebviewWindow};
-use tokio::task::JoinHandle;
 mod speaker;
 mod stt;
 use capture::CaptureState;
-use speaker::VadConfig;
+use speaker::{TaskSlot, VadConfig};
 
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
 use tauri_nspanel::{cocoa::appkit::NSWindowCollectionBehavior, panel_delegate, WebviewWindowExt};
 
 pub struct AudioState {
-    stream_task: Arc<Mutex<Option<JoinHandle<Option<std::path::PathBuf>>>>>,
+    stream_task: TaskSlot<Option<std::path::PathBuf>>,
     vad_config: Arc<Mutex<VadConfig>>,
     is_capturing: Arc<Mutex<bool>>,
     stop_flag: Arc<AtomicBool>,
@@ -26,7 +25,7 @@ pub struct AudioState {
 impl Default for AudioState {
     fn default() -> Self {
         Self {
-            stream_task: Arc::new(Mutex::new(None)),
+            stream_task: TaskSlot::new(),
             vad_config: Arc::new(Mutex::new(VadConfig::default())),
             is_capturing: Arc::new(Mutex::new(false)),
             stop_flag: Arc::new(AtomicBool::new(false)),
@@ -111,6 +110,11 @@ pub fn run() {
             stt::stt_get_status,
         ])
         .setup(|app| {
+            // Crash recovery: drop session WAVs abandoned before diarization.
+            speaker::sweep_stale_session_wavs(
+                &std::env::temp_dir(),
+                std::time::Duration::from_secs(24 * 3600),
+            );
             // Setup main window positioning
             window::setup_main_window(app).expect("Failed to setup main window");
             #[cfg(target_os = "macos")]

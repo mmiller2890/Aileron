@@ -37,7 +37,7 @@ export const CustomCursor = () => {
     const handleWindowBlur = () => {
       isVisibleRef.current = false;
       if (cursorRef.current) {
-        cursorRef.current.style.display = "0";
+        cursorRef.current.style.opacity = "0";
       }
     };
 

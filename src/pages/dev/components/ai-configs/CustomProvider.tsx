@@ -1,5 +1,15 @@
 import { UseSettingsReturn } from "@/types";
-import { Card, Button, Header } from "@/components";
+import {
+  Card,
+  Button,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Header,
+} from "@/components";
 import { EditIcon, TrashIcon } from "lucide-react";
 import { CreateEditProvider } from "./CreateEditProvider";
 import { useCustomAiProviders } from "@/hooks";
@@ -89,27 +99,30 @@ export const CustomProviders = ({ allAiProviders }: UseSettingsReturn) => {
       <CreateEditProvider customProviderHook={customProviderHook} />
 
       {/* Delete Confirmation Dialog */}
-      {deleteConfirm && (
-        <div className="fixed inset-0 bg-background/70 flex items-center justify-center z-50">
-          <div className="bg-background border rounded-lg p-6 max-w-md mx-4">
-            <h3 className="text-lg font-semibold mb-2">
-              Delete Custom Provider
-            </h3>
-            <p className="text-sm text-muted-foreground mb-4">
+      <Dialog
+        open={!!deleteConfirm}
+        onOpenChange={(open) => {
+          if (!open) cancelDelete();
+        }}
+      >
+        <DialogContent showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Delete Custom Provider</DialogTitle>
+            <DialogDescription>
               Are you sure you want to delete this custom provider? This action
               cannot be undone.
-            </p>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={cancelDelete}>
-                Cancel
-              </Button>
-              <Button variant="destructive" onClick={confirmDelete}>
-                Delete
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={cancelDelete}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmDelete}>
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

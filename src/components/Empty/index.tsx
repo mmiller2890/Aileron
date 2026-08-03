@@ -27,7 +27,7 @@ export const Empty = ({
     <EmptyComponent>
       <EmptyHeader>
         <EmptyMedia variant="icon">
-          <Icon icon={icon} />
+          <Icon />
         </EmptyMedia>
         <EmptyTitle>{title}</EmptyTitle>
         <EmptyDescription className="-mt-2">{description}</EmptyDescription>

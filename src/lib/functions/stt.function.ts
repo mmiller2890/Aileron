@@ -5,6 +5,8 @@ import {
   blobToBase64,
   wavBase64ToF32Samples,
   resolveCurlUrl,
+  providerEndpointLabel,
+  redactProviderError,
 } from "./common.function";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { invoke } from "@tauri-apps/api/core";
@@ -44,6 +46,26 @@ export interface STTParams {
 }
 
 export const UTTERANCE_CACHE_MISS_PREFIX = "UTTERANCE_CACHE_MISS:";
+
+const AUDIO_PLACEHOLDER = "{{AUDIO}}";
+
+/**
+ * Find the form field that carries the audio upload. The field name is
+ * provider-defined ("file", "media", "data_file", ...) and must not be
+ * assumed: curl2Json parses `-F` entries either as array entries
+ * ("media={{AUDIO}}") or, for a single field, as a bare string.
+ */
+function findAudioFieldKey(formData: Record<string, unknown>): string | null {
+  for (const [key, val] of Object.entries(formData)) {
+    if (typeof val !== "string" || !val.includes(AUDIO_PLACEHOLDER)) continue;
+    if (!isNaN(parseInt(key, 10))) {
+      const [formKey] = val.split("=");
+      return formKey;
+    }
+    return key.toLowerCase();
+  }
+  return null;
+}
 
 export function isUtteranceCacheMiss(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -158,12 +180,21 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       const freshBlob = new Blob([await audio.arrayBuffer()], {
         type: audio.type,
       });
-      form.append("file", freshBlob, "audio.wav");
+      // curl2Json parses a single `-F "key=value"` into a bare string; wrap
+      // it so the loop below always sees entry pairs.
+      const normalizedForm =
+        typeof formData === "string" ? [formData] : formData;
+      // The audio field is whatever the provider template says it is
+      // ("file", "media", "data_file", ...): attach the blob there instead of
+      // hard-coding "file", which silently dropped the upload for providers
+      // that name their field differently.
+      const audioFieldKey = findAudioFieldKey(normalizedForm) ?? "file";
+      form.append(audioFieldKey, freshBlob, "audio.wav");
       const headerKeys = Object.keys(headers).map((k) =>
         k.toUpperCase().replace(/[-_]/g, "")
       );
 
-      for (const [key, val] of Object.entries(formData)) {
+      for (const [key, val] of Object.entries(normalizedForm)) {
         if (typeof val !== "string") {
           if (
             !val ||
@@ -180,7 +211,12 @@ export async function fetchSTT(params: STTParams): Promise<string> {
           const [formKey, ...formValueParts] = val.split("=");
           const formValue = formValueParts.join("=");
 
-          if (formKey.toLowerCase() === "file") continue; // Already handled by form.append('file', audio)
+          // The audio field is already attached as a blob above.
+          if (
+            val.includes(AUDIO_PLACEHOLDER) ||
+            formKey.toLowerCase() === "file"
+          )
+            continue;
 
           if (
             !formValue ||
@@ -190,7 +226,9 @@ export async function fetchSTT(params: STTParams): Promise<string> {
 
           form.append(formKey, formValue);
         } else {
-          if (key.toLowerCase() === "file") continue; // Already handled by form.append('file', audio)
+          // The audio field is already attached as a blob above.
+          if (val.includes(AUDIO_PLACEHOLDER) || key.toLowerCase() === "file")
+            continue;
           if (
             !val ||
             headerKeys.includes(key.toUpperCase()) ||
@@ -233,7 +271,21 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       ) {
         throw new Error("Transcription cancelled");
       }
-      throw new Error(`Network error: ${e instanceof Error ? e.message : e}`);
+      // Redact secret values (API keys appear in transport errors when a
+      // gateway echoes the request) and point at the likely cause, the same
+      // way fetchAIResponse does.
+      const detail = redactProviderError(describeError(e), allVariables);
+      const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(
+        url
+      );
+      const endpoint = providerEndpointLabel(url);
+      throw new Error(
+        `Could not reach ${endpoint}${detail ? ` — ${detail}` : ""}.${
+          isLocal
+            ? " Check that the local server is running and serving this port."
+            : " Check the provider URL and your connection."
+        }`
+      );
     }
 
     if (!response.ok) {
@@ -248,7 +300,9 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       } catch {
         errMsg = errText || response.statusText;
       }
-      throw new Error(`HTTP ${response.status}: ${errMsg}`);
+      throw new Error(
+        `HTTP ${response.status}: ${redactProviderError(errMsg, allVariables)}`
+      );
     }
 
     const responseText = await response.text();

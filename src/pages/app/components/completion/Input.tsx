@@ -53,7 +53,7 @@ export const Input = ({
               placeholder="Ask me anything..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
+              onKeyDown={handleKeyPress}
               onPaste={handlePaste}
               disabled={isLoading || isHidden}
               className={`${

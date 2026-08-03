@@ -11,6 +11,7 @@ describe("isApiKeyOptional", () => {
     "http://LOCALHOST:1234/v1/chat/completions",
     "http://127.0.0.1:11434/v1/chat/completions",
     "http://127.42.8.9:8080/v1/chat/completions",
+    "http://127.255.255.254:8080/v1/chat/completions",
     "http://[::1]:11434/v1/chat/completions",
   ])("allows an empty key for loopback URL %s", (url) => {
     expect(isApiKeyOptional("custom-local", url)).toBe(true);
@@ -29,6 +30,8 @@ describe("isApiKeyOptional", () => {
     "https://api.openai.com/v1/chat/completions",
     "http://localhost.example.com/v1/chat",
     "http://127.example.com/v1/chat",
+    "http://127.1.2.999:11434/v1/chat/completions",
+    "http://127.999.0.1:11434/v1/chat/completions",
     "not a valid URL",
   ])("requires a key for non-loopback URL %s", (url) => {
     expect(isApiKeyOptional("custom-remote", url)).toBe(false);
@@ -66,6 +69,7 @@ describe("omitEmptyApiKeyHeaders", () => {
 describe("withLoopbackOriginRemoved", () => {
   test.each([
     "http://localhost:11434/v1/chat/completions",
+    "http://127.0.0.1:8000/v1/audio/transcriptions",
     "http://127.42.8.9:8000/v1/audio/transcriptions",
     "http://[::1]:11434/api/generate",
   ])("removes the packaged webview origin for loopback URL %s", (url) => {
@@ -105,6 +109,7 @@ describe("withLoopbackOriginRemoved", () => {
   test.each([
     "https://api.openai.com/v1/chat/completions",
     "http://192.168.1.50:11434/v1/chat/completions",
+    "http://127.1.2.999:11434/v1/chat/completions",
     "not a valid URL",
   ])("preserves headers for non-loopback URL %s", (url) => {
     expect(

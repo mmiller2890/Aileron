@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   appendWithinLimit,
+  collectImagesBase64,
   selectImageFilesWithinLimit,
 } from "./attachments";
 
@@ -35,6 +36,28 @@ describe("selectImageFilesWithinLimit", () => {
   test("returns no files when capacity is exhausted", () => {
     expect(selectImageFilesWithinLimit([image("a")], 6)).toEqual([]);
     expect(selectImageFilesWithinLimit([image("a")], 7)).toEqual([]);
+  });
+});
+
+describe("collectImagesBase64", () => {
+  test("collects only image base64 from attached files", () => {
+    expect(
+      collectImagesBase64([
+        { name: "a.png", type: "image/png", base64: "img-a" },
+        { name: "notes.txt", type: "text/plain", base64: "note" },
+        { name: "b.jpg", type: "image/jpeg", base64: "img-b" },
+      ])
+    ).toEqual(["img-a", "img-b"]);
+  });
+
+  test("includes images passed explicitly (screenshot auto-submit)", () => {
+    expect(collectImagesBase64([], ["shot-1"])).toEqual(["shot-1"]);
+    expect(
+      collectImagesBase64(
+        [{ name: "a.png", type: "image/png", base64: "img-a" }],
+        ["shot-1"]
+      )
+    ).toEqual(["img-a", "shot-1"]);
   });
 });
 

@@ -32,6 +32,24 @@ export function providerSecretKey(baseKey: string, providerId: string): string {
   return `${baseKey}:${encodeURIComponent(providerId)}`;
 }
 
+/**
+ * Decide whether startup must switch away from local-fluidaudio.
+ *
+ * Only a user who actually *saved* local-fluidaudio should be moved to groq —
+ * on every launch, an unconditional fallback clobbered whatever provider was
+ * stored (e.g. openai-whisper). The saved id is read from storage, not from
+ * React state, so the decision does not depend on render timing.
+ */
+export function shouldFallbackSttProvider(
+  savedProviderId: string,
+  platform: "macos" | "other",
+  isFluidaudioSupported: boolean
+): boolean {
+  if (savedProviderId !== "local-fluidaudio") return false;
+  if (platform !== "macos") return true;
+  return !isFluidaudioSupported;
+}
+
 export async function readScopedProviderSecret(
   baseKey: string,
   provider: string,

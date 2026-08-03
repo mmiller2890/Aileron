@@ -18,6 +18,9 @@ dist-ssr
 .mlx-asr-venv
 .nemotron-venv
 *-venv
+__pycache__/
+Aileron/
+artdeco-example.html
 
 # Editor directories and files
 .vscode/*

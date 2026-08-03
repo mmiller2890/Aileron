@@ -19,6 +19,7 @@ import { listen } from "@tauri-apps/api/event";
 import { createAsyncListenerScope } from "@/lib/async-listener-scope";
 import {
   appendWithinLimit,
+  collectImagesBase64,
   selectImageFilesWithinLimit,
 } from "@/lib/attachments";
 
@@ -141,7 +142,7 @@ export const useChatCompletion = (
   }, []);
 
   const submit = useCallback(
-    async (speechText?: string) => {
+    async (speechText?: string, extraImagesBase64?: string[]) => {
       const input = speechText || state.input;
 
       if (!input.trim()) {
@@ -173,15 +174,14 @@ export const useChatCompletion = (
         // Prepare message history for the AI
         const messageHistory = buildAIHistory(messages?.messages || []);
 
-        // Handle image attachments
-        const imagesBase64: string[] = [];
-        if (state.attachedFiles.length > 0) {
-          state.attachedFiles.forEach((file) => {
-            if (file.type.startsWith("image/")) {
-              imagesBase64.push(file.base64);
-            }
-          });
-        }
+        // Handle image attachments. `extraImagesBase64` carries images handed
+        // over explicitly (the screenshot auto-submit path): the closure's
+        // `state.attachedFiles` predates the setState that added the
+        // screenshot, so relying on state alone silently dropped it.
+        const imagesBase64 = collectImagesBase64(
+          state.attachedFiles,
+          extraImagesBase64
+        );
 
         // Check if AI provider is configured
         if (!selectedAIProvider.provider) {
@@ -459,24 +459,11 @@ export const useChatCompletion = (
 
       try {
         if (prompt) {
-          // Auto mode: Submit directly to AI with screenshot
-          const attachedFile: AttachedFile = {
-            id: Date.now().toString(),
-            name: `screenshot_${Date.now()}.png`,
-            type: "image/png",
-            base64: base64,
-            size: base64.length,
-          };
-
-          // Store files temporarily and submit
-          setState((prev) => ({
-            ...prev,
-            attachedFiles: [...prev.attachedFiles, attachedFile],
-            input: prompt,
-          }));
-
-          // Submit with the prompt and screenshot
-          setTimeout(() => submit(prompt), 100);
+          // Auto mode: submit the screenshot with the prompt, passing the
+          // image explicitly so the request carries it regardless of React
+          // state timing (the setTimeout race previously submitted with an
+          // empty imagesBase64).
+          await submit(prompt, [base64]);
         } else {
           // Manual mode: Add to attached files
           const attachedFile: AttachedFile = {

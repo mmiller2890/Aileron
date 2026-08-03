@@ -196,7 +196,7 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
     #[cfg(target_os = "windows")]
     {
         let state = app.state::<WindowVisibility>();
-        let mut is_hidden = state.is_hidden.lock().unwrap();
+        let mut is_hidden = state.is_hidden.lock().unwrap_or_else(|e| e.into_inner());
         *is_hidden = !*is_hidden;
 
         if let Err(e) = window.emit("toggle-window-visibility", *is_hidden) {
@@ -255,7 +255,7 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
                 eprintln!("Failed to emit toggle-window-visibility: {}", e);
             }
             // Emit event to focus text input
-            window.emit("focus-text-input", json!({})).unwrap();
+            let _ = window.emit("focus-text-input", json!({}));
         }
         Err(e) => {
             eprintln!("Failed to check window visibility: {}", e);
@@ -270,7 +270,7 @@ fn overlay_effectively_visible(app: &AppHandle) -> bool {
     #[cfg(target_os = "windows")]
     {
         let state = app.state::<WindowVisibility>();
-        let is_hidden = state.is_hidden.lock().unwrap();
+        let is_hidden = state.is_hidden.lock().unwrap_or_else(|e| e.into_inner());
         return !*is_hidden;
     }
     #[cfg(not(target_os = "windows"))]

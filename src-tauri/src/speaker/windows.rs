@@ -121,6 +121,11 @@ impl SpeakerInput {
         Ok(Self { device_id })
     }
 
+    // The rate is only known once the capture loop opens the device.
+    pub fn sample_rate(&self) -> Option<u32> {
+        None
+    }
+
     // Starts the audio stream
     pub fn stream(self) -> SpeakerStream {
         let sample_queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -239,7 +244,9 @@ impl SpeakerStream {
 
                 loop {
                     {
-                        let state = waker_state.lock().unwrap();
+                        let state = waker_state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
                         if state.shutdown {
                             break;
                         }
@@ -275,7 +282,9 @@ impl SpeakerStream {
                     if !samples.is_empty() {
                         // Consistent buffer overflow handling
                         let dropped = {
-                            let mut queue = sample_queue.lock().unwrap();
+                            let mut queue = sample_queue
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
                             let max_buffer_size = 131072; // 128KB buffer (matching macOS)
 
                             queue.extend(samples.iter());
@@ -298,7 +307,9 @@ impl SpeakerStream {
 
                         // Wake up consumer
                         {
-                            let mut state = waker_state.lock().unwrap();
+                            let mut state = waker_state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
                             if !state.has_data {
                                 state.has_data = true;
                                 if let Some(waker) = state.waker.take() {
@@ -324,7 +335,10 @@ impl SpeakerStream {
 impl Drop for SpeakerStream {
     fn drop(&mut self) {
         {
-            let mut state = self.waker_state.lock().unwrap();
+            let mut state = self
+                .waker_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.shutdown = true;
         }
 
@@ -346,21 +360,30 @@ impl Stream for SpeakerStream {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         {
-            let state = self.waker_state.lock().unwrap();
+            let state = self
+                .waker_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if state.shutdown {
                 return Poll::Ready(None);
             }
         }
 
         {
-            let mut queue = self.sample_queue.lock().unwrap();
+            let mut queue = self
+                .sample_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(sample) = queue.pop_front() {
                 return Poll::Ready(Some(sample));
             }
         }
 
         {
-            let mut state = self.waker_state.lock().unwrap();
+            let mut state = self
+                .waker_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if state.shutdown {
                 return Poll::Ready(None);
             }
@@ -370,7 +393,10 @@ impl Stream for SpeakerStream {
         }
 
         {
-            let mut queue = self.sample_queue.lock().unwrap();
+            let mut queue = self
+                .sample_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             match queue.pop_front() {
                 Some(sample) => Poll::Ready(Some(sample)),
                 None => Poll::Pending,

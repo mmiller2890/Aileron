@@ -34,9 +34,11 @@ export const Sidebar = ({ onCollapse }: { onCollapse?: () => void }) => {
       />
 
       {/* Logo */}
-      <div
+      <button
+        type="button"
         onClick={() => navigate("/dashboard")}
-        className="flex cursor-pointer flex-col items-center gap-2.5 px-4 pb-2 pt-9"
+        aria-label="Go to dashboard"
+        className="flex w-full cursor-pointer flex-col items-center gap-2.5 px-4 pb-2 pt-9"
       >
         <AileronMark size={48} />
         <div className="flex flex-col items-center">
@@ -54,7 +56,7 @@ export const Sidebar = ({ onCollapse }: { onCollapse?: () => void }) => {
             {isLoading ? "loading" : `v${version}`}
           </span>
         </div>
-      </div>
+      </button>
 
       <ChevronRule className="px-6 py-2" />
 

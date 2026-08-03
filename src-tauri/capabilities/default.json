@@ -16,7 +16,7 @@
     "global-shortcut:allow-is-registered",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
-    "shell:allow-open",
+    "shell:default",
     "core:window:allow-start-dragging",
     "sql:default",
     "sql:allow-execute",
@@ -26,20 +26,8 @@
     {
       "identifier": "http:default",
       "allow": [
-        { "url": "http://**" },
-        { "url": "https://**" },
-        { "url": "http://localhost:8000/*" },
-        { "url": "http://localhost:8000/v1/*" },
-        { "url": "http://localhost:8001/*" },
-        { "url": "http://localhost:8001/v1/*" },
-        { "url": "http://localhost:8080/inference" },
-        { "url": "http://localhost:8080/*" },
-        { "url": "http://localhost:11434/*" },
-        { "url": "http://localhost:1234/*" },
-        { "url": "http://127.0.0.1:8000/*" },
-        { "url": "http://127.0.0.1:8080/*" },
-        { "url": "http://127.0.0.1:11434/*" },
-        { "url": "http://127.0.0.1:1234/*" }
+        { "url": "http://localhost:*/*" },
+        { "url": "http://127.0.0.1:*/*" }
       ]
     }
   ]

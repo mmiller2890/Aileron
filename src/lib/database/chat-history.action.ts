@@ -526,14 +526,16 @@ export async function migrateLocalStorageToSQLite(): Promise<{
       }
     }
 
-    // Mark migration as complete even if some failed
-    safeLocalStorage.setItem(migrationKey, "true");
-
-    // Clear localStorage chat history after migration attempt
-    safeLocalStorage.removeItem(LEGACY_CHAT_HISTORY_KEY);
+    // Only declare the migration complete when every conversation landed: a
+    // partial failure must keep the legacy data and the marker unset so a
+    // later launch can retry the failed conversations.
+    if (errorCount === 0) {
+      safeLocalStorage.setItem(migrationKey, "true");
+      safeLocalStorage.removeItem(LEGACY_CHAT_HISTORY_KEY);
+    }
 
     return {
-      success: migratedCount > 0 || errorCount === 0,
+      success: errorCount === 0,
       migratedCount,
       error:
         errorCount > 0

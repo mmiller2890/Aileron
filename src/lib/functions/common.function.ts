@@ -135,12 +135,6 @@ export function processUserMessageTemplate(
   const escapeForJson = (value: string) =>
     JSON.stringify(value ?? "").slice(1, -1);
 
-  const templateStr = JSON.stringify(template).replace(
-    /\{\{TEXT\}\}/g,
-    escapeForJson(userMessage)
-  );
-  const result = JSON.parse(templateStr);
-
   const imageReplacer = (node: any): any => {
     if (Array.isArray(node)) {
       const imageTemplateIndex = node.findIndex((item) =>
@@ -178,7 +172,17 @@ export function processUserMessageTemplate(
     return node;
   };
 
-  return imageReplacer(result);
+  // Match image template nodes BEFORE the user text is substituted: a message
+  // containing the literal text "{{IMAGE}}" would otherwise be misdetected as
+  // the image payload node — dropped when no images are attached, or replaced
+  // by base64-injected copies when they are.
+  const withImages = imageReplacer(template);
+
+  const templateStr = JSON.stringify(withImages).replace(
+    /\{\{TEXT\}\}/g,
+    escapeForJson(userMessage)
+  );
+  return JSON.parse(templateStr);
 }
 
 /**

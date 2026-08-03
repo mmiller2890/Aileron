@@ -185,9 +185,9 @@ impl SpeakerInput {
             Some(ref uid) if !uid.is_empty() && uid != "default" => {
                 match find_output_device_by_uid(uid) {
                     Some(device) => device,
-                    None => {
-                        ca::System::default_output_device().expect("No default output device found")
-                    }
+                    None => ca::System::default_output_device().map_err(|e| {
+                        anyhow::anyhow!("No default output device found: {}", e)
+                    })?,
                 }
             }
             _ => ca::System::default_output_device()?,
@@ -285,10 +285,20 @@ impl SpeakerInput {
         Ok(started_device)
     }
 
-    pub fn stream(self) -> SpeakerStream {
-        let asbd = self.tap.asbd().unwrap();
+    /// Sample rate of the tap's format. Reading it does not start the
+    /// aggregate-device tap; `stream()` is what starts the device.
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.tap.asbd().ok().map(|asbd| asbd.sample_rate as u32)
+    }
 
-        let format = av::AudioFormat::with_asbd(&asbd).unwrap();
+    pub fn stream(self) -> Result<SpeakerStream> {
+        let asbd = self
+            .tap
+            .asbd()
+            .map_err(|e| anyhow::anyhow!("Failed to read tap format: {}", e))?;
+
+        let format = av::AudioFormat::with_asbd(&asbd)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create audio format from tap format"))?;
 
         let buffer_size = 1024 * 128;
         let rb = HeapRb::<f32>::new(buffer_size);
@@ -313,16 +323,16 @@ impl SpeakerInput {
             channel_count: channel_count.max(1),
         });
 
-        let device = self.start_device(&mut ctx).unwrap();
+        let device = self.start_device(&mut ctx)?;
 
-        SpeakerStream {
+        Ok(SpeakerStream {
             consumer,
             _device: device,
             _ctx: ctx,
             _tap: self.tap,
             waker_state,
             current_sample_rate,
-        }
+        })
     }
 }
 
@@ -353,7 +363,8 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
         if consecutive > 50 {
             eprintln!("Critical: Audio buffer overflow - capture stopping");
             ctx.should_terminate.store(true, Ordering::Release);
-            return;
+            // No early return here: fall through to the wake section so a
+            // consumer parked in poll_next is woken and can return None.
         }
     } else {
         // Success - reset consecutive drops counter
@@ -362,7 +373,10 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
 
     // Wake up consumer if we have new data
     let should_wake = {
-        let mut waker_state = ctx.waker_state.lock().unwrap();
+        let mut waker_state = ctx
+            .waker_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if !waker_state.has_data {
             waker_state.has_data = true;
             waker_state.waker.take()
@@ -395,7 +409,10 @@ impl Stream for SpeakerStream {
         }
 
         {
-            let mut state = self.waker_state.lock().unwrap();
+            let mut state = self
+                .waker_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.has_data = false;
             state.waker = Some(cx.waker().clone());
         }
@@ -407,5 +424,59 @@ impl Stream for SpeakerStream {
 impl Drop for SpeakerStream {
     fn drop(&mut self) {
         self._ctx.should_terminate.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A consumer parked in `poll_next` has registered its waker with
+    /// `has_data = false`. Sustained buffer overflow makes the producer set
+    /// `should_terminate`; that path must still wake the parked consumer, or
+    /// `poll_next` never re-runs and the stop path burns its 5s timeout.
+    #[test]
+    fn terminate_overflow_wakes_the_parked_consumer() {
+        let rb = HeapRb::<f32>::new(4);
+        let (producer, _consumer) = rb.split();
+        let waker_state = Arc::new(Mutex::new(WakerState {
+            waker: None,
+            has_data: false,
+        }));
+        let mut ctx = Box::new(Ctx {
+            format: av::AudioFormat::standard_with_sample_rate_and_channels(48_000.0, 1)
+                .expect("failed to create test audio format"),
+            producer,
+            waker_state: waker_state.clone(),
+            current_sample_rate: Arc::new(AtomicU32::new(48_000)),
+            consecutive_drops: Arc::new(AtomicU32::new(0)),
+            should_terminate: Arc::new(AtomicBool::new(false)),
+            channel_count: 1,
+        });
+
+        let noop = std::task::Waker::noop();
+        for _ in 0..60 {
+            // Re-park the consumer exactly as poll_next does before each
+            // producer callback: waker registered, has_data reset.
+            {
+                let mut state = waker_state.lock().unwrap();
+                state.has_data = false;
+                state.waker = Some(noop.clone());
+            }
+
+            process_audio_data(&mut ctx, &[0.0f32; 8]);
+
+            if ctx.should_terminate.load(Ordering::Acquire) {
+                // The terminate path must still wake the parked consumer so
+                // poll_next re-runs and returns None.
+                let state = waker_state.lock().unwrap();
+                assert!(
+                    state.waker.is_none(),
+                    "parked consumer was not woken when capture terminated"
+                );
+                return;
+            }
+        }
+        panic!("capture never terminated after sustained buffer overflow");
     }
 }

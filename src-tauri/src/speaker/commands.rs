@@ -157,6 +157,37 @@ fn default_chunk_interval() -> u64 {
     1000
 }
 
+impl VadConfig {
+    /// Bounds that keep the capture loop safe. `hop_size` feeds
+    /// `Vec::with_capacity` / `VecDeque::with_capacity` in the capture task,
+    /// where an unbounded value overflows capacity and panics the spawned
+    /// task (which skips its slot cleanup and wedges capture).
+    pub fn validate(&self) -> Result<(), String> {
+        if !(256..=8192).contains(&self.hop_size) {
+            return Err("Invalid hop_size: must be 256-8192".to_string());
+        }
+        if self.pre_speech_chunks > 600 {
+            return Err("Invalid pre_speech_chunks: must be <= 600".to_string());
+        }
+        if self.silence_chunks > 600 {
+            return Err("Invalid silence_chunks: must be <= 600".to_string());
+        }
+        if self.chunk_interval_ms < 100 {
+            return Err("Invalid chunk_interval_ms: must be >= 100".to_string());
+        }
+        if self.sensitivity_rms < 0.0 || self.sensitivity_rms > 1.0 {
+            return Err("Invalid sensitivity_rms: must be 0.0-1.0".to_string());
+        }
+        if self.noise_gate_threshold <= 0.0 {
+            return Err("Invalid noise_gate_threshold: must be > 0.0".to_string());
+        }
+        if self.max_recording_duration_secs == 0 || self.max_recording_duration_secs > 3600 {
+            return Err("Invalid max_recording_duration_secs: must be 1-3600".to_string());
+        }
+        Ok(())
+    }
+}
+
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
@@ -175,6 +206,73 @@ impl Default for VadConfig {
     }
 }
 
+/// Mutex-protected slot for the currently running capture task.
+///
+/// `claim` verifies the slot is empty and stores the handle in the same lock
+/// acquisition, so two concurrent starts cannot both pass the emptiness check
+/// and double-spawn (the TOCTOU that allowed duplicate capture tasks and
+/// duplicate speech-detected events). `release_if_owned` lets a finishing
+/// task clear the slot only while it still holds its own handle, so a stale
+/// task can never clobber a newer capture's entry.
+pub struct TaskSlot<T> {
+    inner: std::sync::Mutex<Option<tokio::task::JoinHandle<T>>>,
+}
+
+impl<T> TaskSlot<T> {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Claim the slot for `task`, failing if a task is already registered.
+    /// A task that already finished is not stored: it can never be observed
+    /// as "running" by a later start.
+    pub fn claim(
+        &self,
+        task: tokio::task::JoinHandle<T>,
+        already_running: &str,
+    ) -> Result<(), String> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+        if guard.is_some() {
+            return Err(already_running.to_string());
+        }
+        if !task.is_finished() {
+            *guard = Some(task);
+        }
+        Ok(())
+    }
+
+    /// Clear the slot, but only if it still holds the task with id `my_id`.
+    /// Called by a finishing task; a stale task can never clobber a newer
+    /// capture's entry.
+    pub fn release_if_owned(&self, my_id: tokio::task::Id) {
+        if let Ok(mut guard) = self.inner.lock() {
+            if guard.as_ref().map(|t| t.id()) == Some(my_id) {
+                *guard = None;
+            }
+        }
+    }
+
+    /// Take the registered task out of the slot (stop path).
+    pub fn take(&self) -> Result<Option<tokio::task::JoinHandle<T>>, String> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
+        Ok(guard.take())
+    }
+}
+
+impl<T> Default for TaskSlot<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[tauri::command]
 pub async fn start_system_audio_capture(
     app: AppHandle,
@@ -184,19 +282,8 @@ pub async fn start_system_audio_capture(
 ) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
 
-    {
-        let guard = state
-            .stream_task
-            .lock()
-            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
-
-        if guard.is_some() {
-            warn!("Capture already running");
-            return Err("Capture already running".to_string());
-        }
-    }
-
     if let Some(mut config) = vad_config {
+        config.validate()?;
         let stream_enabled = streaming.unwrap_or(false);
         if stream_enabled {
             config.emit_chunks = true;
@@ -225,7 +312,10 @@ pub async fn start_system_audio_capture(
         format!("Failed to access system audio: {}", e)
     })?;
 
-    let stream = input.stream();
+    let stream = input.stream().map_err(|e| {
+        error!("Failed to start audio stream: {}", e);
+        format!("Failed to access system audio: {}", e)
+    })?;
     let sr = stream.sample_rate();
 
     if !(8000..=96000).contains(&sr) {
@@ -245,13 +335,6 @@ pub async fn start_system_audio_capture(
     state.stop_flag.store(false, Ordering::Release);
     let stop_flag = state.stop_flag.clone();
 
-    *state
-        .is_capturing
-        .lock()
-        .map_err(|e| format!("Failed to set capturing state: {}", e))? = true;
-
-    let _ = app_clone.emit("capture-started", sr);
-
     let state_clone = app.state::<crate::AudioState>();
     let task = tokio::spawn(async move {
         let session_path = if vad_config.enabled {
@@ -269,20 +352,30 @@ pub async fn start_system_audio_capture(
             None
         };
 
+        // Release the task slot, but only while it still holds this task:
+        // a newer capture may have claimed the slot since (never clobber a
+        // live task's entry).
         let state = app_clone.state::<crate::AudioState>();
-        {
-            if let Ok(mut guard) = state.stream_task.lock() {
-                *guard = None;
-            };
-        }
+        state.stream_task.release_if_owned(tokio::task::id());
 
         session_path
     });
 
+    // Claim the slot in the same lock acquisition that verifies it is empty,
+    // so concurrent starts cannot both pass the check and double-spawn (the
+    // TOCTOU that produced duplicate capture tasks and duplicate
+    // speech-detected events).
+    if let Err(e) = state_clone.stream_task.claim(task, "Capture already running") {
+        warn!("{}", e);
+        return Err(e);
+    }
+
     *state_clone
-        .stream_task
+        .is_capturing
         .lock()
-        .map_err(|e| format!("Failed to store task: {}", e))? = Some(task);
+        .map_err(|e| format!("Failed to set capturing state: {}", e))? = true;
+
+    let _ = app.emit("capture-started", sr);
 
     Ok(())
 }
@@ -824,7 +917,16 @@ fn write_f32_samples_to_wav(
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut writer = WavWriter::create(path, spec).map_err(|e| e.to_string())?;
+    // Session WAVs live in the world-readable temp dir; create them
+    // owner-only so other local users cannot read captured audio.
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path).map_err(|e| e.to_string())?;
+    let mut writer = WavWriter::new(file, spec).map_err(|e| e.to_string())?;
     for &s in samples {
         let clamped = s.clamp(-1.0, 1.0);
         writer
@@ -833,6 +935,38 @@ fn write_f32_samples_to_wav(
     }
     writer.finalize().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Remove `assistant-session-*.wav` files older than `older_than` from `dir`.
+/// Startup crash recovery: sessions abandoned before diarization would
+/// otherwise accumulate in the temp dir forever. Returns the number removed.
+pub fn sweep_stale_session_wavs(dir: &std::path::Path, older_than: Duration) -> usize {
+    let now = std::time::SystemTime::now();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("assistant-session-") && name.ends_with(".wav")) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let stale = now
+            .duration_since(modified)
+            .map(|age| age > older_than)
+            .unwrap_or(false);
+        if stale && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 // Convert samples to raw little-endian f32 bytes, base64-encoded (no WAV header).
@@ -877,13 +1011,7 @@ pub async fn stop_system_audio_capture(
 
     // Take the task and await it so the capture function can finish writing
     // its session WAV before we return to the frontend.
-    let task = {
-        let mut guard = state
-            .stream_task
-            .lock()
-            .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
-        guard.take()
-    };
+    let task = state.stream_task.take()?;
 
     let session_path = if let Some(task) = task {
         await_capture_shutdown(task, Duration::from_secs(5)).await
@@ -905,9 +1033,14 @@ pub async fn stop_system_audio_capture(
 /// Manual stop for continuous recording
 #[tauri::command]
 pub async fn manual_stop_continuous(app: AppHandle) -> Result<(), String> {
+    // Signal the shared stop flag directly: the continuous-capture loop
+    // checks it on every sample. Relying on the event alone raced the
+    // listener's registration inside the spawned task — a stop issued before
+    // the task registered its listener was silently missed. The event is
+    // still emitted for the task's listener and any frontend listeners.
+    let state = app.state::<crate::AudioState>();
+    state.stop_flag.store(true, Ordering::Release);
     let _ = app.emit("manual-stop-continuous", ());
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
     Ok(())
 }
@@ -980,19 +1113,7 @@ pub async fn get_vad_config(app: AppHandle) -> Result<VadConfig, String> {
 
 #[tauri::command]
 pub async fn update_vad_config(app: AppHandle, config: VadConfig) -> Result<(), String> {
-    // Validate config
-    if config.sensitivity_rms < 0.0 || config.sensitivity_rms > 1.0 {
-        return Err("Invalid sensitivity_rms: must be 0.0-1.0".to_string());
-    }
-    if config.hop_size == 0 {
-        return Err("Invalid hop_size: must be > 0".to_string());
-    }
-    if config.noise_gate_threshold <= 0.0 {
-        return Err("Invalid noise_gate_threshold: must be > 0.0".to_string());
-    }
-    if config.max_recording_duration_secs == 0 || config.max_recording_duration_secs > 3600 {
-        return Err("Invalid max_recording_duration_secs: must be 1-3600".to_string());
-    }
+    config.validate()?;
 
     let state = app.state::<crate::AudioState>();
     *state
@@ -1020,10 +1141,18 @@ pub fn get_audio_sample_rate(_app: AppHandle) -> Result<u32, String> {
         format!("Failed to access system audio: {}", e)
     })?;
 
-    let stream = input.stream();
-    let sr = stream.sample_rate();
+    // macOS exposes the tap's format rate without starting the aggregate
+    // device; the other platforms only learn the rate once the capture loop
+    // runs, so they fall back to starting the stream.
+    if let Some(sr) = input.sample_rate() {
+        return Ok(sr);
+    }
 
-    Ok(sr)
+    let stream = input.stream().map_err(|e| {
+        error!("Failed to start audio stream: {}", e);
+        format!("Failed to access system audio: {}", e)
+    })?;
+    Ok(stream.sample_rate())
 }
 
 #[tauri::command]
@@ -1141,6 +1270,152 @@ mod tests {
 
         assert_eq!(result, None);
     }
+
+    #[tokio::test]
+    async fn second_claim_rejected_while_a_task_is_registered() {
+        let slot = TaskSlot::<()>::new();
+        let first = tokio::spawn(std::future::pending::<()>());
+        slot.claim(first, "Capture already running").unwrap();
+
+        let second = tokio::spawn(async {});
+        assert_eq!(
+            slot.claim(second, "Capture already running"),
+            Err("Capture already running".to_string())
+        );
+        // The winner's entry is untouched by the rejected claim.
+        assert!(slot.take().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn owner_cleanup_releases_the_slot() {
+        let slot = TaskSlot::<()>::new();
+        let task = tokio::spawn(async {});
+        let id = task.id();
+        slot.claim(task, "busy").unwrap();
+
+        slot.release_if_owned(id);
+
+        assert!(slot.take().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_task_cleanup_does_not_clobber_the_newer_captures_slot() {
+        let slot = TaskSlot::<()>::new();
+        let first = tokio::spawn(std::future::pending::<()>());
+        let stale_id = first.id();
+        slot.claim(first, "busy").unwrap();
+        slot.take().unwrap(); // first capture stopped
+
+        let second = tokio::spawn(std::future::pending::<()>());
+        slot.claim(second, "busy").unwrap();
+
+        // The first task's exit cleanup runs late (after the slot was
+        // reclaimed): it must not clear the newer task's entry.
+        slot.release_if_owned(stale_id);
+
+        assert!(slot.take().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn claim_skips_a_task_that_finished_before_the_claim() {
+        let slot = TaskSlot::<()>::new();
+        // A capture whose stream ends before the claim must not leave a
+        // finished task in the slot ("Capture already running" forever).
+        let task = tokio::spawn(async {});
+        tokio::task::yield_now().await; // let the spawned task run to completion
+        slot.claim(task, "busy").unwrap();
+
+        assert!(slot.take().unwrap().is_none());
+    }
+
+    #[test]
+    fn vad_config_validate_accepts_the_defaults() {
+        assert!(VadConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn vad_config_validate_rejects_unbounded_hop_size() {
+        // hop_size feeds Vec/VecDeque::with_capacity in the capture task: an
+        // unbounded value overflows capacity and panics the spawned task.
+        let mut config = VadConfig::default();
+        config.hop_size = 1_000_000;
+        assert!(config.validate().is_err());
+
+        config.hop_size = 128; // below the 256 floor
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn vad_config_validate_rejects_unbounded_pre_speech_and_silence_chunks() {
+        let mut config = VadConfig::default();
+        config.pre_speech_chunks = 100_000;
+        assert!(config.validate().is_err());
+
+        let mut config = VadConfig::default();
+        config.silence_chunks = 100_000;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn vad_config_validate_rejects_fast_chunk_interval() {
+        let mut config = VadConfig::default();
+        config.chunk_interval_ms = 1;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn sweep_stale_session_wavs_removes_only_stale_session_files() {
+        let dir = std::env::temp_dir().join(format!("aileron-sweep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let stale = dir.join("assistant-session-stale.wav");
+        std::fs::write(&stale, b"wav").unwrap();
+        let stale_time = std::time::SystemTime::now() - Duration::from_secs(25 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stale_time))
+            .unwrap();
+
+        let fresh = dir.join("assistant-session-fresh.wav");
+        std::fs::write(&fresh, b"wav").unwrap();
+
+        let unrelated = dir.join("unrelated.wav");
+        std::fs::write(&unrelated, b"wav").unwrap();
+
+        let removed = sweep_stale_session_wavs(&dir, Duration::from_secs(24 * 3600));
+
+        assert_eq!(removed, 1);
+        assert!(!stale.exists());
+        assert!(fresh.exists());
+        assert!(unrelated.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_wav_is_written_with_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "aileron-perms-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let samples = vec![0.1f32, -0.2, 0.3];
+
+        write_f32_samples_to_wav(16_000, &samples, &path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "session WAV must not be readable by group or others (got mode {mode:o})"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 // ---- Mic dictation (native path for the mic button; macOS v1) ----
@@ -1149,7 +1424,7 @@ mod tests {
 
 #[derive(Default)]
 pub struct MicDictationState {
-    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: TaskSlot<()>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -1159,15 +1434,6 @@ pub async fn start_mic_dictation(
     device_id: Option<String>,
 ) -> Result<(), String> {
     let state = app.state::<MicDictationState>();
-    {
-        let guard = state
-            .task
-            .lock()
-            .map_err(|e| format!("Failed to acquire dictation lock: {e}"))?;
-        if guard.is_some() {
-            return Err("Dictation already running".to_string());
-        }
-    }
 
     // Fail fast if Silero isn't available: dictation quality depends on it.
     if get_silero_vad_probability(&app, &[0.0f32; 512]).is_none() {
@@ -1200,12 +1466,13 @@ pub async fn start_mic_dictation(
         run_mic_dictation(app_clone.clone(), rx, sr, vad_config, stop_flag).await;
         drop(stream_guard);
         let _ = app_clone.emit("dictation-stopped", ());
+        let state = app_clone.state::<MicDictationState>();
+        state.task.release_if_owned(tokio::task::id());
     });
 
-    *state
-        .task
-        .lock()
-        .map_err(|e| format!("Failed to store dictation task: {e}"))? = Some(task);
+    // Same atomic claim as the system-audio slot: the check and the store
+    // share one lock acquisition, so concurrent starts cannot double-spawn.
+    state.task.claim(task, "Dictation already running")?;
     Ok(())
 }
 
@@ -1215,11 +1482,7 @@ pub async fn stop_mic_dictation(app: AppHandle) -> Result<(), String> {
     state
         .stop_flag
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let task = state
-        .task
-        .lock()
-        .map_err(|e| format!("Failed to acquire dictation lock: {e}"))?
-        .take();
+    let task = state.task.take()?;
     if let Some(task) = task {
         let _ = tokio::time::timeout(tokio::time::Duration::from_secs(3), task).await;
     }

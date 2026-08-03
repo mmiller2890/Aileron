@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::thread;
+use std::time::Duration;
 use tracing::error;
 use tracing::warn;
 use libpulse_binding as pulse;
@@ -236,6 +237,11 @@ impl SpeakerInput {
         Ok(Self { source_name })
     }
 
+    // The rate is only known once the capture loop opens the device.
+    pub fn sample_rate(&self) -> Option<u32> {
+        None
+    }
+
     pub fn stream(self) -> SpeakerStream {
         let sample_queue = Arc::new(Mutex::new(VecDeque::new()));
         let waker_state = Arc::new(Mutex::new(WakerState {
@@ -260,7 +266,7 @@ impl SpeakerInput {
             }
         }));
 
-        let (sample_rate, init_success) = match init_rx.recv() {
+        let (sample_rate, init_success) = match init_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(sr)) => (sr, true),
             Ok(Err(e)) => {
                 eprintln!("Audio initialization failed: {}", e);
@@ -274,7 +280,9 @@ impl SpeakerInput {
 
         if !init_success {
             {
-                let mut state = waker_state.lock().unwrap();
+                let mut state = waker_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 state.shutdown = true;
                 if let Some(waker) = state.waker.take() {
                     drop(state);
@@ -365,7 +373,11 @@ impl SpeakerStream {
                 let mut buffer = vec![0u8; 4096];
 
                 loop {
-                    if waker_state.lock().unwrap().shutdown {
+                    if waker_state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .shutdown
+                    {
                         break;
                     }
 
@@ -382,7 +394,9 @@ impl SpeakerStream {
                             if !samples.is_empty() {
                                 // Consistent buffer overflow handling
                                 let dropped = {
-                                    let mut queue = sample_queue.lock().unwrap();
+                                    let mut queue = sample_queue
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
                                     let max_buffer_size = 131072; // 128KB buffer (matching macOS/Windows)
 
                                     queue.extend(samples.iter());
@@ -403,7 +417,9 @@ impl SpeakerStream {
 
                                 // Wake up consumer
                                 {
-                                    let mut state = waker_state.lock().unwrap();
+                                    let mut state = waker_state
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
                                     if !state.has_data {
                                         state.has_data = true;
                                         if let Some(waker) = state.waker.take() {
@@ -437,7 +453,10 @@ fn get_default_monitor_source() -> Option<String> {
 impl Drop for SpeakerStream {
     fn drop(&mut self) {
         {
-            let mut state = self.waker_state.lock().unwrap();
+            let mut state = self
+                .waker_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.shutdown = true;
             if let Some(waker) = state.waker.take() {
                 waker.wake();
@@ -456,12 +475,18 @@ impl Stream for SpeakerStream {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let mut queue = self.sample_queue.lock().unwrap();
+        let mut queue = self
+            .sample_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(sample) = queue.pop_front() {
             return Poll::Ready(Some(sample));
         }
 
-        let mut state = self.waker_state.lock().unwrap();
+        let mut state = self
+            .waker_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if state.shutdown {
             return Poll::Ready(None);
         }

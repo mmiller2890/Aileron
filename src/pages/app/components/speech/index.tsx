@@ -375,7 +375,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
                             <div
                               className={cn(
                                 "h-full rounded-full transition-[width] duration-100",
-                                noAudioDetected ? "bg-amber-500" : "bg-green-500"
+                                noAudioDetected ? "bg-warn" : "bg-ok"
                               )}
                               style={{
                                 width: `${Math.min(
@@ -387,7 +387,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
                           </div>
                         </div>
                         {noAudioDetected && (
-                          <p className="text-[10px] text-amber-600 dark:text-amber-500 leading-snug">
+                          <p className="text-[10px] text-warn leading-snug">
                             No system audio detected. Make sure something is
                             playing, and that Aileron has permission in{" "}
                             <span className="font-medium">

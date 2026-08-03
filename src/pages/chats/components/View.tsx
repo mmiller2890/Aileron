@@ -86,7 +86,11 @@ const View = () => {
       isMainTitle={false}
       allowBackButton={true}
       title={messages?.title || ""}
-      description={`${messages?.messages.length} messages in this conversation`}
+      description={
+        messages
+          ? `${messages.messages.length} messages in this conversation`
+          : "Loading conversation..."
+      }
       rightSlot={
         <div className="flex flex-row items-center gap-2">
           <Button
@@ -141,9 +145,9 @@ const View = () => {
         </div>
       }
     >
-      {messages?.messages.length === 0 ? (
+      {messages === null || messages.messages.length === 0 ? (
         <Empty
-          isLoading={false}
+          isLoading={messages === null}
           icon={MessageCircleIcon}
           title="No messages found"
           description="Start a new message to get started"

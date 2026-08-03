@@ -24,6 +24,7 @@ import {
   providerSecretKey,
   readScopedProviderSecret,
   serializeProviderSelection,
+  shouldFallbackSttProvider,
 } from "@/lib/provider-sync";
 
 // Provider variable names are stored/compared uppercase.
@@ -545,22 +546,36 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         console.debug("Failed to track app start:", error);
       }
 
-      // Platform gating: local-fluidaudio requires macOS Apple Silicon.
-      if (isMacOS()) {
+      // Platform gating: local-fluidaudio requires macOS Apple Silicon. Only
+      // switch away when the user's SAVED provider is local-fluidaudio — an
+      // unconditional fallback clobbered whatever was stored (e.g.
+      // openai-whisper) on every launch. The saved id is read from storage,
+      // not from the first-render closure, which never saw the loaded value.
+      const savedSttProvider = storedProviderId(
+        STORAGE_KEYS.SELECTED_STT_PROVIDER
+      );
+      const sttPlatform = isMacOS() ? "macos" : "other";
+      if (sttPlatform === "macos") {
         try {
           const status = await invoke<{
             is_supported: boolean;
           }>("stt_get_status");
-          if (!status.is_supported) {
+          if (
+            shouldFallbackSttProvider(
+              savedSttProvider,
+              sttPlatform,
+              status.is_supported
+            )
+          ) {
             onSetSelectedSttProvider({ provider: "groq", variables: {} });
           }
         } catch (error) {
           console.debug("Failed to check STT status:", error);
         }
-      } else {
-        if (selectedSttProvider.provider === "local-fluidaudio") {
-          onSetSelectedSttProvider({ provider: "groq", variables: {} });
-        }
+      } else if (
+        shouldFallbackSttProvider(savedSttProvider, sttPlatform, false)
+      ) {
+        onSetSelectedSttProvider({ provider: "groq", variables: {} });
       }
     };
     // Load data

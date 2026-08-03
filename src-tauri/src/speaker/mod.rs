@@ -116,16 +116,31 @@ impl SpeakerInput {
         ))
     }
 
-    // Starts the audio stream.
+    /// Sample rate without starting the stream, when the platform can know it
+    /// in advance (macOS reads the tap format; other platforms only learn the
+    /// rate once the capture loop runs, so they report None).
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    pub fn stream(self) -> SpeakerStream {
-        let inner = self.inner.stream();
-        SpeakerStream { inner }
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.inner.sample_rate()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    pub fn stream(self) -> SpeakerStream {
-        unimplemented!("SpeakerInput::stream is not supported on this platform")
+    pub fn sample_rate(&self) -> Option<u32> {
+        None
+    }
+
+    // Starts the audio stream.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    pub fn stream(self) -> Result<SpeakerStream> {
+        let inner = self.inner.stream()?;
+        Ok(SpeakerStream { inner })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    pub fn stream(self) -> Result<SpeakerStream> {
+        Err(anyhow::anyhow!(
+            "SpeakerInput::stream is not supported on this platform"
+        ))
     }
 }
 

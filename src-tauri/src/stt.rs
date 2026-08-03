@@ -546,7 +546,7 @@ pub async fn stt_init_vad(
     threshold: f32,
 ) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
-    return Ok(());
+    return Err(not_supported());
 
     #[cfg(target_os = "macos")]
     {
@@ -564,7 +564,7 @@ pub async fn stt_init_diarization(
     threshold: f64,
 ) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
-    return Ok(());
+    return Err(not_supported());
 
     #[cfg(target_os = "macos")]
     {

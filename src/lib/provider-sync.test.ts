@@ -36,6 +36,7 @@ const {
   removeProviderAndSecret,
   createStartupProviderSecretReader,
   syncProviderMetadataChange,
+  shouldFallbackSttProvider,
 } = await import("./provider-sync");
 
 beforeEach(() => {
@@ -370,5 +371,34 @@ describe("provider secret persistence", () => {
     await expect(writer.enqueue("bad")).rejects.toThrow("failed");
     await expect(writer.enqueue("good")).resolves.toBeUndefined();
     expect(started).toEqual(["bad", "good"]);
+  });
+});
+
+describe("shouldFallbackSttProvider", () => {
+  it("falls back to groq only when the saved provider is local-fluidaudio and unsupported", () => {
+    expect(shouldFallbackSttProvider("local-fluidaudio", "macos", false)).toBe(
+      true
+    );
+    expect(shouldFallbackSttProvider("local-fluidaudio", "macos", true)).toBe(
+      false
+    );
+    expect(shouldFallbackSttProvider("openai-whisper", "macos", false)).toBe(
+      false
+    );
+    expect(shouldFallbackSttProvider("groq", "macos", false)).toBe(false);
+  });
+
+  it("falls back off-macOS when the saved provider is local-fluidaudio", () => {
+    expect(shouldFallbackSttProvider("local-fluidaudio", "other", false)).toBe(
+      true
+    );
+    expect(shouldFallbackSttProvider("openai-whisper", "other", false)).toBe(
+      false
+    );
+    expect(shouldFallbackSttProvider("", "other", false)).toBe(false);
+  });
+
+  it("never falls back when nothing is saved", () => {
+    expect(shouldFallbackSttProvider("", "macos", false)).toBe(false);
   });
 });

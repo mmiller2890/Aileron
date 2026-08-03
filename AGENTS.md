@@ -18,6 +18,7 @@ Assistant is a local-only fork of an open-source Pluely project — a Tauri 2 + 
 ### Install
 ```bash
 npm install
+npm run setup        # Preflight: checks Node 18+, Rust, Swift 6+/Xcode 16 (macOS), Ollama. SKIP_ENV_CHECK=1 to bypass.
 ```
 
 ### Development
@@ -32,12 +33,23 @@ npm run build          # Frontend production build
 npm run tauri build    # Full app bundle
 ```
 
+### Testing
+```bash
+npm test               # Run vitest once (config: vitest.config.ts; tests: src/**/*.test.ts)
+npm run test:watch     # Watch mode
+```
+
 ### Typecheck & Lint
 ```bash
 npx tsc --noEmit       # TypeScript typecheck (must pass before committing)
 cargo check --manifest-path src-tauri/Cargo.toml  # Rust check
 ```
 No linter is configured. Run `npx tsc --noEmit` and `npm run build` to verify changes compile.
+
+### Prerequisites
+- **macOS:** Xcode 16 + Swift 6+ required (fluidaudio-rs builds a Swift package during the Rust build).
+- Optional: Ollama for local AI. Any cloud/curl AI provider works without it.
+- `npm run setup` (auto-run before `npm run tauri ...` via the `pretauri` hook) verifies these.
 
 ## Project Structure
 ```
@@ -67,9 +79,8 @@ src-tauri/
 - Provider config is stored in localStorage and managed via `src/contexts/app.context.tsx`.
 
 ### Cloud Features (Removed)
-- `shouldUseLocalAPI()` in `src/lib/functions/local.api.ts` always returns `false`.
 - `hasActiveLicense` in context always returns `true` (all features unlocked).
-- `localApiEnabled` always returns `false`.
+- `localApiEnabled` defaults to `false` (a `useState` in `app.context.tsx`); it stays inert in this fork but is still read by completion/STT gating, so don't assume it's a hardcoded constant.
 - Analytics (`src/lib/analytics.ts`) are no-ops.
 - Auto-updater is disabled (empty endpoint in `tauri.conf.json`).
 - These stubs are kept for compile compatibility — do not re-enable them.

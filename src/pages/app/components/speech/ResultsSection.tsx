@@ -11,8 +11,6 @@ type Props = {
   conversation: ChatConversation;
   conversationMode: boolean;
   setConversationMode: (mode: boolean) => void;
-  partialTranscription?: string;
-  isStreaming?: boolean;
   isLabelingSpeakers?: boolean;
   currentSpeaker?: string | null;
 };
@@ -24,22 +22,19 @@ export const ResultsSection = ({
   conversation,
   conversationMode,
   setConversationMode,
-  partialTranscription = "",
-  isStreaming = false,
   isLabelingSpeakers = false,
   currentSpeaker = null,
 }: Props) => {
   const hasResponse = lastAIResponse || isAIProcessing;
   const hasHistory = conversation.messages.length > 2;
 
-  if (!hasResponse && !lastTranscription && !partialTranscription) {
+  if (!hasResponse && !lastTranscription) {
     return null;
   }
 
   const modKey = isMacOS() ? "⌘" : "Ctrl";
 
-  // Determine which transcription text to show: final takes precedence over partial
-  const transcriptionText = lastTranscription || (isStreaming ? partialTranscription : "");
+  const transcriptionText = lastTranscription;
 
   return (
     <div className="rounded-lg border border-border bg-card p-3 space-y-3">
@@ -82,10 +77,7 @@ export const ResultsSection = ({
                 </span>
               )}
               <span
-                className={cn(
-                  "text-muted-foreground",
-                  isStreaming && !lastTranscription && "italic opacity-60"
-                )}
+                className="text-muted-foreground"
               >
                 {transcriptionText}
               </span>
@@ -164,7 +156,7 @@ export const ResultsSection = ({
                   </span>
                 )}
               </div>
-              <p className={cn("text-sm", isStreaming && !lastTranscription && "italic opacity-60")}>
+              <p className="text-sm">
                 {transcriptionText}
               </p>
             </div>

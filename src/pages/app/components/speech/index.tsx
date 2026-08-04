@@ -39,8 +39,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
     isAIProcessing,
     lastTranscription,
     lastAIResponse,
-    partialTranscription,
-    isStreaming,
     error,
     setupRequired,
     startCapture,
@@ -411,8 +409,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       onStartRecording={startContinuousRecording}
                       onStopAndSend={manualStopAndSend}
                       onIgnore={ignoreContinuousRecording}
-                      partialTranscription={partialTranscription}
-                      isStreaming={isStreaming}
                     />
 
                     {/* AI Response */}
@@ -423,8 +419,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       conversation={conversation}
                       conversationMode={conversationMode}
                       setConversationMode={setConversationMode}
-                      partialTranscription={partialTranscription}
-                      isStreaming={isStreaming}
                       isLabelingSpeakers={isLabelingSpeakers}
                       currentSpeaker={currentSpeaker}
                     />

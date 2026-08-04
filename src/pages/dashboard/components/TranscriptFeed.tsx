@@ -13,12 +13,10 @@ const formatClock = (ts: number): string =>
 export const TranscriptFeed = ({
   conversation,
   live = false,
-  partialTranscription = "",
   liveAnswerDraft = null,
 }: {
   conversation: ChatConversation | null;
   live?: boolean;
-  partialTranscription?: string;
   liveAnswerDraft?: string | null;
 }) => {
   // Live conversation state is newest-first; DB reads are chronological.
@@ -51,13 +49,11 @@ export const TranscriptFeed = ({
     live,
     turns.length,
     lastContent,
-    partialTranscription,
     liveAnswerDraft,
   ]);
 
   const empty =
     turns.length === 0 &&
-    !partialTranscription &&
     liveAnswerDraft === null;
 
   return (
@@ -96,21 +92,6 @@ export const TranscriptFeed = ({
               )}
             </div>
           ))}
-          {live && partialTranscription && (
-            <div className="flex gap-3">
-              <span className="min-w-[40px] pt-0.5 font-mono text-[11px] text-meta">
-                …
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="mb-1 font-mono text-[11px] text-meta">
-                  hearing
-                </div>
-                <div className="text-sm italic leading-relaxed text-muted-foreground">
-                  {partialTranscription}
-                </div>
-              </div>
-            </div>
-          )}
           {live && liveAnswerDraft !== null && (
             <div className="flex gap-3">
               <span className="min-w-[40px] pt-0.5 font-mono text-[11px] text-meta">

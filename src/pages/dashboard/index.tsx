@@ -108,7 +108,6 @@ const Dashboard = () => {
           <TranscriptFeed
             conversation={displayed}
             live={isLive}
-            partialTranscription={snapshot?.partialTranscription ?? ""}
             liveAnswerDraft={liveAnswerDraft}
           />
           <button

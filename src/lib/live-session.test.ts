@@ -22,8 +22,6 @@ const snapshot = (
   error: "",
   setupRequired: false,
   isSttInitializing: false,
-  partialTranscription: "",
-  isStreaming: false,
   lastAIResponse: "",
   conversation: emptyConversation,
   sessionStartedAt: null,

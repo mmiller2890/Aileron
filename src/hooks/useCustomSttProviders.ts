@@ -22,7 +22,6 @@ export function useCustomSttProviders() {
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [formData, setFormData] = useState<TYPE_PROVIDER>({
     id: "",
-    streaming: false,
     responseContentPath: "",
     isCustom: true,
     curl: "",
@@ -117,7 +116,6 @@ export function useCustomSttProviders() {
         // Update existing provider
         const success = updateCustomSttProvider(editingProvider, {
           curl: formData.curl,
-          streaming: false, // Streaming is not supported for STT providers. it will be fixed in the future.
           responseContentPath: formData.responseContentPath,
         });
 
@@ -126,7 +124,6 @@ export function useCustomSttProviders() {
           setShowForm(false);
           setFormData({
             id: "",
-            streaming: false,
             responseContentPath: "",
             isCustom: true,
             curl: "",
@@ -137,7 +134,6 @@ export function useCustomSttProviders() {
         // Create new provider
         const newProvider = {
           curl: formData.curl,
-          streaming: false, // Streaming is not supported for STT providers. it will be fixed in the future.
           responseContentPath: formData.responseContentPath,
         };
 
@@ -146,7 +142,6 @@ export function useCustomSttProviders() {
           setShowForm(false);
           setFormData({
             id: "",
-            streaming: false,
             responseContentPath: "",
             isCustom: true,
             curl: "",

@@ -4,7 +4,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
     name: "Local FluidAudio (macOS Apple Silicon, CoreML)",
     curl: "",
     responseContentPath: "text",
-    streaming: false,
     platform: "macos-apple-silicon",
   },
   {
@@ -14,7 +13,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F "file={{AUDIO}}" \\
       -F "model={{MODEL}}"`,
     responseContentPath: "text",
-    streaming: false,
     platform: "windows-linux",
   },
   {
@@ -25,7 +23,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F "file={{AUDIO}}" \\
       -F "model={{MODEL}}"`,
     responseContentPath: "text",
-    streaming: false,
   },
   {
     id: "groq",
@@ -38,7 +35,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F response_format=text \\
       -F language=en`,
     responseContentPath: "text",
-    streaming: false,
   },
   {
     id: "elevenlabs-stt",
@@ -48,7 +44,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F "file={{AUDIO}}" \\
       -F "model_id={{MODEL}}"`,
     responseContentPath: "text",
-    streaming: false,
   },
   {
     id: "google-stt",
@@ -68,7 +63,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
         }
       }'`,
     responseContentPath: "results[0].alternatives[0].transcript",
-    streaming: false,
   },
   {
     id: "deepgram-stt",
@@ -78,7 +72,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -H "Content-Type: audio/wav" \\
       --data-binary {{AUDIO}}`,
     responseContentPath: "results.channels[0].alternatives[0].transcript",
-    streaming: false,
   },
   {
     id: "azure-stt",
@@ -88,7 +81,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -H "Content-Type: audio/wav" \\
       --data-binary {{AUDIO}}`,
     responseContentPath: "DisplayText",
-    streaming: false,
   },
   {
     id: "speechmatics-stt",
@@ -98,7 +90,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F "data_file={{AUDIO}}" \\
       -F 'config={"type": "transcription", "transcription_config": {"language": "en"}}'`,
     responseContentPath: "job.id",
-    streaming: false,
   },
   {
     id: "rev-ai-stt",
@@ -108,7 +99,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F "media={{AUDIO}}" \\
       -F "options={{OPTIONS}}"`,
     responseContentPath: "id",
-    streaming: false,
   },
   {
     id: "ibm-watson-stt",
@@ -118,6 +108,5 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -H "Content-Type: audio/wav" \\
       --data-binary {{AUDIO}}`,
     responseContentPath: "results[0].alternatives[0].transcript",
-    streaming: false,
   },
 ];

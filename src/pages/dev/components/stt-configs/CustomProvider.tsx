@@ -49,12 +49,6 @@ export const CustomProviders = ({ allSttProviders }: UseSettingsReturn) => {
                               provider?.responseContentPath || "Not set"
                             }`}
                           </p>
-                          <p className="text-xs text-muted-foreground">
-                            {" • "}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            Streaming: {provider?.streaming ? "Yes" : "No"}
-                          </p>
                         </div>
                       </div>
                       <div className="flex gap-1">

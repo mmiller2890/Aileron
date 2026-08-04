@@ -21,6 +21,7 @@ dist-ssr
 __pycache__/
 Aileron/
 artdeco-example.html
+docs/superpowers/plans/2026-07-28-release-candidate.md
 
 # Editor directories and files
 .vscode/*

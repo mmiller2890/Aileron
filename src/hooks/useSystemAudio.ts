@@ -163,15 +163,11 @@ export function useSystemAudio() {
   const summarySeqRef = useRef(0);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
-  const capturedSampleRateRef = useRef<number>(16000);
   const utteranceTimestampsRef = useRef<Array<{ start: number; end: number }>>([]);
   const recentSpeechEventsRef = useRef(new RecentSpeechEventFingerprints());
   const captureSessionWorkRef = useRef(createCaptureSessionWork());
   const captureGenerationRef = useRef(0);
   const captureStoppingRef = useRef(false);
-  const isCaptureGenerationCurrentRef = useRef<(generation: number) => boolean>(
-    () => false
-  );
 
   const capturingRef = useRef(capturing);
   const selectedSttProviderRef = useRef(selectedSttProvider);
@@ -179,14 +175,14 @@ export function useSystemAudio() {
   const conversationMessagesRef = useRef(conversation.messages);
   const vadConfigRef = useRef(vadConfig);
   const labelMessagesWithSpeakersRef = useRef(labelMessagesWithSpeakers);
-  // `processWithAI` is invoked from the `speech-detected` listener and the
-  // streaming socket, both registered once with empty/stable deps. They capture
-  // their closure on the first render — when `selectedAIProvider` is still the
-  // initial empty value (the context hydrates it from localStorage afterwards),
-  // which made system-audio capture fail with "No AI provider selected" even
-  // after a provider was chosen. Mirror the latest callback into a ref, like
-  // the other listener-visible values above, so those call sites always read
-  // the current provider. Assigned after `processWithAI` is defined below.
+  // `processWithAI` is invoked from the `speech-detected` listener, registered
+  // once with empty/stable deps. It captures its closure on the first render —
+  // when `selectedAIProvider` is still the initial empty value (the context
+  // hydrates it from localStorage afterwards), which made system-audio capture
+  // fail with "No AI provider selected" even after a provider was chosen.
+  // Mirror the latest callback into a ref, like the other listener-visible
+  // values above, so that call site always reads the current provider.
+  // Assigned after `processWithAI` is defined below.
   const processWithAIRef = useRef<
     (
       transcription: string,
@@ -201,8 +197,6 @@ export function useSystemAudio() {
   conversationMessagesRef.current = conversation.messages;
   vadConfigRef.current = vadConfig;
   labelMessagesWithSpeakersRef.current = labelMessagesWithSpeakers;
-  isCaptureGenerationCurrentRef.current = (generation) =>
-    captureSessionWorkRef.current.isCurrent(generation);
 
   useEffect(() => {
     const scope = createAsyncListenerScope();
@@ -210,8 +204,7 @@ export function useSystemAudio() {
       scope.add(
         listen(
           "capture-started",
-          scope.guard((event) => {
-            capturedSampleRateRef.current = event.payload as number;
+          scope.guard(() => {
             recentSpeechEventsRef.current.clear();
           })
         )
@@ -1364,7 +1357,7 @@ export function useSystemAudio() {
   // Typed prompts from the dashboard's embedded bar join the SESSION
   // conversation (not useCompletion's separate popover state), so the answer
   // streams back into the snapshot and renders in the dashboard feed. Mirrors
-  // the streaming-transcript path, minus the question gate — a typed question
+  // the batch speech-detected path, minus the question gate — a typed question
   // is always answered.
   const submitTypedPromptRef = useRef<(text: string) => void>(() => {});
   submitTypedPromptRef.current = (text: string) => {

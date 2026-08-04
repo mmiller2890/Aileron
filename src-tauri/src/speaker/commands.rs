@@ -195,9 +195,13 @@ impl Default for VadConfig {
             hop_size: 1024,
             sensitivity_rms: 0.006, // Tuned for system audio which is quieter than mic speech
             peak_threshold: 0.020,  // Lower threshold to catch quiet video/call audio
-            silence_chunks: 60,     // ~1.3s of silence before stopping (fewer false cuts)
+            // Tunables are sample-rate-dependent, tuned for 48 kHz:
+            // hop_size 1024 = 21.3 ms/hop. At 96 kHz these halve in wall
+            // time (silence 100 -> 1.07 s); at 44.1 kHz they scale ~linearly.
+            silence_chunks: 100,    // ~2.1s of silence before stopping (tolerates thinking pauses)
             min_speech_chunks: 12,  // ~0.26s - matches the mic path's minSpeechFrames
-            pre_speech_chunks: 12,  // ~0.27s - enough to catch word start
+            pre_speech_chunks: 30,  // ~0.64s - covers 2+ Silero refresh periods (256ms each) so
+                                    // the word onset survives until VAD triggers
             noise_gate_threshold: 0.0015, // Gentler gate for compressed system audio
             max_recording_duration_secs: 180, // 3 minutes default
             emit_chunks: false,
@@ -1361,6 +1365,26 @@ mod tests {
         let mut config = VadConfig::default();
         config.chunk_interval_ms = 1;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn default_pre_speech_buffer_covers_two_silero_refresh_periods() {
+        // The pre-speech buffer must span at least two Silero refresh periods
+        // (4096 samples @ 16 kHz = 256 ms each). Silero only reports a
+        // probability after a full chunk, so a buffer exactly one refresh wide
+        // ages the word onset out before VAD triggers — the capture then starts
+        // mid-word. At 48 kHz: silero_device_chunk = 48000 * 4096 / 16000 =
+        // 12,288 samples = 12 hops; 2 periods = 24 hops.
+        let config = VadConfig::default();
+        let sr: usize = 48_000;
+        let silero_device_chunk = (sr * SILERO_CHUNK_SAMPLES) / SILERO_SAMPLE_RATE;
+        let pre_speech_samples = config.pre_speech_chunks * config.hop_size;
+        assert!(
+            pre_speech_samples >= 2 * silero_device_chunk,
+            "pre_speech buffer {} samples must cover 2 Silero periods ({} samples)",
+            pre_speech_samples,
+            2 * silero_device_chunk
+        );
     }
 
     #[test]

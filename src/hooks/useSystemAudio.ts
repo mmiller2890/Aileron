@@ -7,6 +7,7 @@ import {
   fetchSTT,
   fetchAIResponse,
   isLikelyQuestion,
+  isBackchannel,
   buildAIHistory,
   buildSummaryTranscript,
 } from "@/lib/functions";
@@ -345,6 +346,14 @@ export function useSystemAudio() {
                 }
 
                 if (transcription.trim()) {
+                  // Pure backchannels ("Yeah.", "Mm-hmm.") carry no content —
+                  // keep them out of the transcript, the overlay, and the
+                  // question gate. VAD timing can't separate a 400ms "Yeah"
+                  // from a 400ms "Why?"; only content can.
+                  if (isBackchannel(transcription)) {
+                    return;
+                  }
+
                   setLastTranscription(transcription);
                   setError("");
 

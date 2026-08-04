@@ -23,7 +23,6 @@ import {
 } from "@/lib";
 import { ChatConversation, Message } from "@/types/completion";
 import { useSpeakerLabels } from "./system-audio/useSpeakerLabels";
-import { useSttStreamSocket } from "./system-audio/useSttStreamSocket";
 import { useVadConfig, type VadConfig } from "./system-audio/useVadConfig";
 import { useLiveStatePublisher } from "./system-audio/useLiveStatePublisher";
 import {
@@ -205,27 +204,6 @@ export function useSystemAudio() {
   isCaptureGenerationCurrentRef.current = (generation) =>
     captureSessionWorkRef.current.isCurrent(generation);
 
-  // Handles a streaming provider's final transcript. Ref-backed because the
-  // socket handlers are created once per socket; assigned below once the
-  // transcript/answer helpers are defined.
-  const onFinalTranscriptRef = useRef<(text: string) => void>(() => {});
-  const {
-    isStreaming,
-    partialTranscription,
-    openStreamingSocket,
-    closeStreamingSocket,
-    sendAudioChunk,
-    streamingFinalizedRef,
-    batchProcessedForCurrentUtteranceRef,
-  } = useSttStreamSocket({
-    selectedSttProviderRef,
-    allSttProvidersRef,
-    capturedSampleRateRef,
-    onFinalTranscriptRef,
-    captureGenerationRef,
-    isCaptureGenerationCurrentRef,
-  });
-
   useEffect(() => {
     const scope = createAsyncListenerScope();
     void Promise.all([
@@ -253,7 +231,6 @@ export function useSystemAudio() {
           scope.guard(() => {
             setRecordingProgress(0);
             setIsRecordingInContinuousMode(true);
-            openStreamingSocket();
           })
         )
       ),
@@ -263,7 +240,6 @@ export function useSystemAudio() {
           scope.guard(() => {
             setRecordingProgress(0);
             setIsRecordingInContinuousMode(false);
-            closeStreamingSocket();
           })
         )
       ),
@@ -295,27 +271,6 @@ export function useSystemAudio() {
     void Promise.all([
       scope.add(
         listen(
-          "speech-start",
-          scope.guard(() => {
-            if (
-              selectedSttProviderRef.current.provider === "local-fluidaudio"
-            ) {
-              return;
-            }
-            openStreamingSocket();
-          })
-        )
-      ),
-      scope.add(
-        listen(
-          "speech-chunk",
-          scope.guard((event) => {
-            sendAudioChunk(event.payload as string);
-          })
-        )
-      ),
-      scope.add(
-        listen(
           "speech-detected",
           scope.guard(async (event) => {
             const generation = captureGenerationRef.current;
@@ -335,15 +290,6 @@ export function useSystemAudio() {
               if (!recentSpeechEventsRef.current.claim(payload)) {
                 return;
               }
-
-              if (streamingFinalizedRef.current) {
-                streamingFinalizedRef.current = false;
-                closeStreamingSocket();
-                return;
-              }
-
-              closeStreamingSocket();
-              batchProcessedForCurrentUtteranceRef.current = true;
 
               if (payload.start_time !== 0 || payload.end_time !== 0) {
                 utteranceTimestampsRef.current.push({
@@ -477,11 +423,8 @@ export function useSystemAudio() {
 
     return () => {
       scope.dispose();
-      closeStreamingSocket();
-      streamingFinalizedRef.current = false;
-      batchProcessedForCurrentUtteranceRef.current = false;
     };
-  }, [openStreamingSocket, closeStreamingSocket]);
+  }, []);
 
   const handleQuickActionClick = async (action: string) => {
     setError("");
@@ -757,38 +700,6 @@ export function useSystemAudio() {
   // Keep the ref pointing at the freshest `processWithAI` so the once-registered
   // listener/socket call sites never run against a stale `selectedAIProvider`.
   processWithAIRef.current = processWithAI;
-
-  // Streaming provider produced a final transcript for the current utterance.
-  // Mirrors the batch path: record it, then answer if it looks like a question
-  // (unless the batch path already handled this utterance).
-  onFinalTranscriptRef.current = (text: string) => {
-    const generation = captureGenerationRef.current;
-    if (
-      !capturingRef.current ||
-      !captureSessionWorkRef.current.isCurrent(generation)
-    ) {
-      return;
-    }
-    setLastTranscription(text);
-    if (!batchProcessedForCurrentUtteranceRef.current && text.trim()) {
-      const messageId = appendUtteranceMessage(text);
-      lastUtteranceRef.current = { text, messageId };
-
-      if (isLikelyQuestion(text) && !captureStoppingRef.current) {
-        const effectiveSystemPrompt = getEffectiveSystemPrompt();
-        const previousMessages = buildAIHistory(
-          conversationMessagesRef.current,
-          messageId
-        );
-        processWithAIRef.current(
-          text,
-          effectiveSystemPrompt,
-          previousMessages,
-          messageId
-        );
-      }
-    }
-  };
 
   // Answer the most recent captured utterance on demand (global shortcut),
   // regardless of whether the question gate skipped it. Reads everything
@@ -1125,8 +1036,6 @@ export function useSystemAudio() {
         abortControllerRef.current = null;
       }
 
-      closeStreamingSocket();
-
       const sessionPath = await invoke<string | null>(
         "stop_system_audio_capture"
       );
@@ -1190,12 +1099,7 @@ export function useSystemAudio() {
       setNoAudioDetected(false);
       setLastTranscription("");
       setLastAIResponse("");
-      closeStreamingSocket();
       setError("");
-      // Leave the popover open if a summary is being generated/shown (the
-      // popover-open effect keeps it up); otherwise it closes normally.
-      streamingFinalizedRef.current = false;
-      batchProcessedForCurrentUtteranceRef.current = false;
     } catch (err) {
       captureStoppingRef.current = false;
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1250,7 +1154,6 @@ export function useSystemAudio() {
       setupRequired ||
       isAIProcessing ||
       !!lastAIResponse ||
-      isStreaming ||
       isSummarizing ||
       !!sessionSummary ||
       !!error;
@@ -1261,7 +1164,6 @@ export function useSystemAudio() {
     setupRequired,
     isAIProcessing,
     lastAIResponse,
-    isStreaming,
     isSummarizing,
     sessionSummary,
     error,
@@ -1415,8 +1317,6 @@ export function useSystemAudio() {
       error,
       setupRequired,
       isSttInitializing,
-      partialTranscription,
-      isStreaming,
       lastAIResponse,
       conversation:
         conversation.messages.length > LIVE_SNAPSHOT_MAX_MESSAGES
@@ -1445,8 +1345,6 @@ export function useSystemAudio() {
       error,
       setupRequired,
       isSttInitializing,
-      partialTranscription,
-      isStreaming,
       lastAIResponse,
       conversation,
       sessionStartedAt,
@@ -1551,8 +1449,6 @@ export function useSystemAudio() {
     isAIProcessing,
     lastTranscription,
     lastAIResponse,
-    partialTranscription,
-    isStreaming,
     error,
     setupRequired,
     isSttInitializing,

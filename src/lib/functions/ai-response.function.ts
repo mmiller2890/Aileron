@@ -20,12 +20,7 @@ import {
   withLoopbackOriginRemoved,
 } from "./provider-auth";
 
-export type PromptChannel = "chat" | "spoken";
-
-function buildEnhancedSystemPrompt(
-  baseSystemPrompt?: string,
-  channel: PromptChannel = "chat"
-): string {
+function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
   const responseSettings = getResponseSettings();
   const prompts: string[] = [];
 
@@ -33,20 +28,11 @@ function buildEnhancedSystemPrompt(
     prompts.push(baseSystemPrompt);
   }
 
-  // Spoken answers get read aloud. The length directive measures output in
-  // paragraphs and sentences, and the markdown block asks for tables, code
-  // fences and mermaid diagrams. Both are written-channel instructions, and
-  // both land AFTER the caller's prompt — where they outrank whatever spoken
-  // register it asked for.
-  const isSpoken = channel === "spoken";
-
-  if (!isSpoken) {
-    const lengthOption = RESPONSE_LENGTHS.find(
-      (l) => l.id === responseSettings.responseLength
-    );
-    if (lengthOption?.prompt?.trim()) {
-      prompts.push(lengthOption.prompt);
-    }
+  const lengthOption = RESPONSE_LENGTHS.find(
+    (l) => l.id === responseSettings.responseLength
+  );
+  if (lengthOption?.prompt?.trim()) {
+    prompts.push(lengthOption.prompt);
   }
 
   const languageOption = LANGUAGES.find(
@@ -56,13 +42,10 @@ function buildEnhancedSystemPrompt(
     prompts.push(languageOption.prompt);
   }
 
-  if (!isSpoken) {
-    prompts.push(MARKDOWN_FORMATTING_INSTRUCTIONS);
-  }
+  // Add markdown formatting instructions
+  prompts.push(MARKDOWN_FORMATTING_INSTRUCTIONS);
 
-  // Blank line between blocks. Every block ends in a period, so a single
-  // space ran them into one paragraph and blurred the boundaries.
-  return prompts.join("\n\n");
+  return prompts.join(" ");
 }
 
 export async function* fetchAIResponse(params: {
@@ -72,7 +55,6 @@ export async function* fetchAIResponse(params: {
     variables: Record<string, string>;
   };
   systemPrompt?: string;
-  channel?: PromptChannel;
   history?: Message[];
   userMessage: string;
   imagesBase64?: string[];
@@ -83,7 +65,6 @@ export async function* fetchAIResponse(params: {
       provider,
       selectedProvider,
       systemPrompt,
-      channel = "chat",
       history = [],
       userMessage,
       imagesBase64 = [],
@@ -95,7 +76,7 @@ export async function* fetchAIResponse(params: {
       return;
     }
 
-    const enhancedSystemPrompt = buildEnhancedSystemPrompt(systemPrompt, channel);
+    const enhancedSystemPrompt = buildEnhancedSystemPrompt(systemPrompt);
 
     if (!provider) {
       throw new Error(`Provider not provided`);

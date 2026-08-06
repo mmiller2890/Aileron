@@ -599,7 +599,6 @@ export function useSystemAudio() {
               userMessage: transcription,
               imagesBase64: [],
               signal,
-              channel: "spoken",
             })) {
               if (!isCurrent()) {
                 batcher.cancel();

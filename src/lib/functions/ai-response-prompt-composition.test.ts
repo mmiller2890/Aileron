@@ -53,6 +53,7 @@ const sseResponse = (chunks: string[]): Response => {
 
 /** Drive one request and return the composed system prompt from its body. */
 const composedPrompt = async (channel?: "chat" | "spoken"): Promise<string> => {
+  tauriFetchMock.mockReset();
   tauriFetchMock.mockResolvedValueOnce(
     sseResponse([
       'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',

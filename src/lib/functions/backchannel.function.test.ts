@@ -47,4 +47,54 @@ describe("isBackchannel", () => {
     expect(isBackchannel("YEAH.")).toBe(true);
     expect(isBackchannel("Mm-Hmm.")).toBe(true);
   });
+
+  // Every string below was captured from a live screening call. A
+  // single-token match let all of them through and they flooded the
+  // transcript, which is what the sequence match exists to stop.
+  describe("compound backchannels from real capture", () => {
+    it("drops repeated tokens", () => {
+      expect(isBackchannel("I see, I see, I see.")).toBe(true);
+      expect(isBackchannel("Yeah, yeah.")).toBe(true);
+    });
+
+    it("drops comma- and period-joined token runs", () => {
+      expect(isBackchannel("I see, okay.")).toBe(true);
+      expect(isBackchannel("Okay. Awesome.")).toBe(true);
+      expect(isBackchannel("Yeah, okay, sure.")).toBe(true);
+    });
+
+    it("drops an 'oh'-prefixed reaction", () => {
+      expect(isBackchannel("Oh no.")).toBe(true);
+      expect(isBackchannel("Oh wow.")).toBe(true);
+    });
+
+    it("keeps compounds where any piece carries content", () => {
+      expect(isBackchannel("Yeah, I saw that.")).toBe(false);
+      expect(isBackchannel("Oh that's good. Okay.")).toBe(false);
+      expect(isBackchannel("But that's awesome.")).toBe(false);
+      expect(isBackchannel("Okay. Tell me about your day to day.")).toBe(false);
+    });
+
+    it("keeps a long run that is not entirely backchannel", () => {
+      expect(
+        isBackchannel("Big difference, I bet too, a bit of a different city.")
+      ).toBe(false);
+    });
+  });
+
+  // Documents a deliberate trade-off rather than an accident. This function
+  // only ever sees system audio (the far end of the call), where a bare "No."
+  // is a reaction. Revisit if mic capture joins the same pipeline.
+  it("treats a bare no as backchannel while scoped to system audio", () => {
+    expect(isBackchannel("No.")).toBe(true);
+    expect(isBackchannel("Nope.")).toBe(true);
+    expect(isBackchannel("No, not at all")).toBe(false);
+  });
+
+  it("never drops a question, whatever words it uses", () => {
+    expect(isBackchannel("Okay?")).toBe(false);
+    expect(isBackchannel("Yeah?")).toBe(false);
+    expect(isBackchannel("Right?")).toBe(false);
+    expect(isBackchannel("I see, okay?")).toBe(false);
+  });
 });

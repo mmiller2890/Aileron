@@ -22,6 +22,10 @@ import {
 } from "lucide-react";
 import { VadConfig } from "@/hooks/useSystemAudio";
 import {
+  DEFAULT_VAD_CONFIG,
+  vadDurationSeconds,
+} from "@/hooks/system-audio/useVadConfig";
+import {
   PROMPT_TEMPLATES,
   getPromptTemplateById,
 } from "@/lib/platform-instructions";
@@ -55,6 +59,7 @@ interface SettingsPanelProps {
   // VAD Config
   vadConfig: VadConfig;
   onUpdateVadConfig: (config: VadConfig) => void;
+  captureSampleRate: number;
   // Context settings
   useSystemPrompt: boolean;
   setUseSystemPrompt: (value: boolean) => void;
@@ -65,6 +70,7 @@ interface SettingsPanelProps {
 export const SettingsPanel = ({
   vadConfig,
   onUpdateVadConfig,
+  captureSampleRate,
   useSystemPrompt,
   setUseSystemPrompt,
   contextContent,
@@ -108,18 +114,7 @@ export const SettingsPanel = ({
   };
 
   const handleResetDefaults = () => {
-    const defaultConfig: VadConfig = {
-      enabled: vadConfig.enabled, // Keep current mode
-      hop_size: 1024,
-      sensitivity_rms: 0.012,
-      peak_threshold: 0.035,
-      silence_chunks: 45,
-      min_speech_chunks: 7,
-      pre_speech_chunks: 12,
-      noise_gate_threshold: 0.003,
-      max_recording_duration_secs: 180,
-    };
-    onUpdateVadConfig(defaultConfig);
+    onUpdateVadConfig({ ...DEFAULT_VAD_CONFIG, enabled: vadConfig.enabled });
   };
 
   return (
@@ -321,9 +316,9 @@ export const SettingsPanel = ({
                       <Label className="text-xs font-medium flex items-center justify-between">
                         <span>Silence Duration</span>
                         <span className="text-muted-foreground font-normal">
-                          {(
-                            (vadConfig.silence_chunks * vadConfig.hop_size) /
-                            44100
+                          {vadDurationSeconds(
+                            vadConfig,
+                            captureSampleRate
                           ).toFixed(1)}
                           s
                         </span>
@@ -372,6 +367,26 @@ export const SettingsPanel = ({
                   <p className="text-[10px] text-muted-foreground">
                     Filters background noise
                   </p>
+                </div>
+
+                <div className="flex items-start justify-between gap-3 rounded-md border border-border/50 p-2.5">
+                  <div className="space-y-1">
+                    <Label className="text-xs font-medium">
+                      Compare raw preprocessing
+                    </Label>
+                    <p className="text-[10px] text-muted-foreground">
+                      Applies to the next capture and roughly doubles local transcription time. It never adds another transcript row.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={vadConfig.compare_preprocessing}
+                    onCheckedChange={(checked) =>
+                      onUpdateVadConfig({
+                        ...vadConfig,
+                        compare_preprocessing: checked,
+                      })
+                    }
+                  />
                 </div>
 
                 {/* Reset button */}

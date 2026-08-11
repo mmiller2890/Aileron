@@ -57,10 +57,62 @@ afterEach(() => {
 });
 
 describe("local Fluidaudio utterance fallback", () => {
+  it("passes the selected model to sample transcription", async () => {
+    invokeMock.mockResolvedValueOnce({ text: "english transcript" });
+
+    await expect(
+      fetchSTT({
+        ...params,
+        selectedProvider: {
+          provider: "local-fluidaudio",
+          variables: { MODEL: "v2" },
+        },
+        utteranceId: undefined,
+        samples: new Float32Array([0.25, -0.25]),
+      }),
+    ).resolves.toBe("english transcript");
+
+    expect(invokeMock).toHaveBeenCalledWith("stt_transcribe_speech", {
+      samples: [0.25, -0.25],
+      modelVersion: "v2",
+    });
+  });
+
+  it("returns only primary text and logs one comparison diagnostic", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    invokeMock.mockResolvedValueOnce({
+      text: "primary transcript",
+      diagnostics: {
+        source_path: "utterance-cache",
+        preprocessing: "processed",
+      },
+      comparison: {
+        text: "raw transcript",
+        diagnostics: {
+          source_path: "utterance-cache",
+          preprocessing: "raw",
+        },
+      },
+    });
+
+    await expect(fetchSTT(params)).resolves.toBe("primary transcript");
+
+    expect(invokeMock).toHaveBeenCalledOnce();
+    expect(debug).toHaveBeenCalledOnce();
+    expect(debug.mock.calls[0][1]).toMatchObject({
+      diagnostics: { source_path: "utterance-cache" },
+      comparison: {
+        text: "raw transcript",
+        diagnostics: { preprocessing: "raw" },
+      },
+    });
+    debug.mockRestore();
+  });
+
   it("decodes the WAV only for a typed cache miss", async () => {
     invokeMock
       .mockRejectedValueOnce(
-        "UTTERANCE_CACHE_MISS: Utterance utterance-1 is no longer cached"
+        "UTTERANCE_CACHE_MISS: Utterance utterance-1 is no longer cached",
       )
       .mockResolvedValueOnce({ text: "fallback transcript" });
 
@@ -75,7 +127,7 @@ describe("local Fluidaudio utterance fallback", () => {
     invokeMock.mockRejectedValueOnce("FluidAudio inference failed");
 
     await expect(fetchSTT(params)).rejects.toThrow(
-      "FluidAudio inference failed"
+      "FluidAudio inference failed",
     );
     expect(invokeMock).toHaveBeenCalledOnce();
   });
@@ -83,8 +135,8 @@ describe("local Fluidaudio utterance fallback", () => {
   it("recognizes only the stable cache-miss prefix", () => {
     expect(
       isUtteranceCacheMiss(
-        new Error("UTTERANCE_CACHE_MISS: expired utterance")
-      )
+        new Error("UTTERANCE_CACHE_MISS: expired utterance"),
+      ),
     ).toBe(true);
     expect(isUtteranceCacheMiss(new Error("model cache failed"))).toBe(false);
   });
@@ -111,7 +163,7 @@ describe("local HTTP transcription", () => {
           variables: {},
         },
         audio: new Blob(["wav"], { type: "audio/wav" }),
-      })
+      }),
     ).resolves.toBe("hello");
 
     expect(tauriFetchMock.mock.calls[0][1].headers).toMatchObject({
@@ -154,7 +206,7 @@ describe("form-upload STT providers attach audio under the template's field", ()
           variables: { MODEL: "openai/whisper-large-v3-turbo" },
         },
         audio,
-      })
+      }),
     ).resolves.toBe("hello");
 
     expect(tauriFetchMock).toHaveBeenCalledOnce();
@@ -162,7 +214,7 @@ describe("form-upload STT providers attach audio under the template's field", ()
     expect(form.get("file")).toBeInstanceOf(Blob);
     expect(form.get("model")).toBe("openai/whisper-large-v3-turbo");
     expect(formValues(tauriFetchMock.mock.calls[0][1])).not.toContain(
-      "{{AUDIO}}"
+      "{{AUDIO}}",
     );
   });
 
@@ -189,7 +241,7 @@ describe("form-upload STT providers attach audio under the template's field", ()
           variables: { API_KEY: "secret", OPTIONS: '{"language":"en"}' },
         },
         audio,
-      })
+      }),
     ).resolves.toBe("job-123");
 
     expect(globalFetchMock).toHaveBeenCalledOnce();
@@ -198,16 +250,16 @@ describe("form-upload STT providers attach audio under the template's field", ()
     expect(form.has("file")).toBe(false);
     expect(form.get("options")).toBe('{"language":"en"}');
     expect(formValues(globalFetchMock.mock.calls[0][1])).not.toContain(
-      "{{AUDIO}}"
+      "{{AUDIO}}",
     );
   });
 
   it("speechmatics style: attaches the blob under data_file", async () => {
     globalFetchMock.mockResolvedValueOnce({
       ok: true,
-      text: vi.fn().mockResolvedValue(
-        JSON.stringify({ job: { id: "job-456" } })
-      ),
+      text: vi
+        .fn()
+        .mockResolvedValue(JSON.stringify({ job: { id: "job-456" } })),
     });
     const provider = {
       id: "speechmatics-stt",
@@ -227,7 +279,7 @@ describe("form-upload STT providers attach audio under the template's field", ()
           variables: { API_KEY: "secret" },
         },
         audio,
-      })
+      }),
     ).resolves.toBe("job-456");
 
     expect(globalFetchMock).toHaveBeenCalledOnce();
@@ -235,7 +287,7 @@ describe("form-upload STT providers attach audio under the template's field", ()
     expect(form.get("data_file")).toBeInstanceOf(Blob);
     expect(form.has("file")).toBe(false);
     expect(formValues(globalFetchMock.mock.calls[0][1])).not.toContain(
-      "{{AUDIO}}"
+      "{{AUDIO}}",
     );
   });
 });
@@ -247,7 +299,7 @@ describe("STT error paths redact secrets and point at the local server", () => {
     promise.then(
       () => new Error("expected the request to fail"),
       (reason: unknown) =>
-        reason instanceof Error ? reason : new Error(String(reason))
+        reason instanceof Error ? reason : new Error(String(reason)),
     );
 
   it("redacts API keys from provider error responses", async () => {
@@ -258,7 +310,7 @@ describe("STT error paths redact secrets and point at the local server", () => {
       text: vi
         .fn()
         .mockResolvedValue(
-          JSON.stringify({ error: "Invalid api key sk-live-1234567890abc" })
+          JSON.stringify({ error: "Invalid api key sk-live-1234567890abc" }),
         ),
     });
     const provider = {
@@ -278,7 +330,7 @@ describe("STT error paths redact secrets and point at the local server", () => {
           variables: { API_KEY: "sk-live-1234567890abc" },
         },
         audio,
-      })
+      }),
     );
 
     expect(err.message).toContain("HTTP 401");
@@ -288,7 +340,7 @@ describe("STT error paths redact secrets and point at the local server", () => {
 
   it("redacts API keys and adds a local-server hint when the transport fails", async () => {
     tauriFetchMock.mockRejectedValueOnce(
-      new Error("connect ECONNREFUSED 127.0.0.1:8000 sk-live-1234567890abc")
+      new Error("connect ECONNREFUSED 127.0.0.1:8000 sk-live-1234567890abc"),
     );
     const provider = {
       id: "local-whisper",
@@ -307,14 +359,14 @@ describe("STT error paths redact secrets and point at the local server", () => {
           variables: { API_KEY: "sk-live-1234567890abc" },
         },
         audio,
-      })
+      }),
     );
 
     expect(err.message).toMatch(/Could not reach http:\/\/localhost:8000/);
     expect(err.message).toContain("[REDACTED]");
     expect(err.message).not.toContain("sk-live-1234567890abc");
     expect(err.message).toContain(
-      "Check that the local server is running and serving this port."
+      "Check that the local server is running and serving this port.",
     );
   });
 });
@@ -343,7 +395,7 @@ describe("https STT provider URLs use the global fetch", () => {
           variables: { API_KEY: "secret", OPTIONS: '{"language":"en"}' },
         },
         audio: new Blob(["wav"], { type: "audio/wav" }),
-      })
+      }),
     ).resolves.toBe("job-789");
 
     expect(globalFetchMock).toHaveBeenCalledOnce();

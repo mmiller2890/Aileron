@@ -62,13 +62,7 @@ cidre = "0.11.3"
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
-# crates.io 0.14.1 predates the TDT decoder-state fix (upstream PR #15). In that
-# release the Swift bridge persists `asrDecoderState` across calls, so each
-# transcription is primed with the previous utterance's end-of-sentence state and
-# repeated results collapse to "." / empty. Pin to upstream main, which resets the
-# decoder state on every one-shot call. Revert to a version once a release that
-# contains the fix is published.
-fluidaudio-rs = { git = "https://github.com/FluidInference/fluidaudio-rs", rev = "2d1083314104c812944b5150866d1e334db8eed7" }
+fluidaudio-rs = { path = "vendor/fluidaudio-rs" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.19.0"

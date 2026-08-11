@@ -47,6 +47,7 @@ import {
   getSessionAudioStopAction,
 } from "@/lib/capture-session-work";
 import { completedStreamValue } from "@/lib/completed-stream";
+import { normalizeFluidAudioModel } from "@/lib/fluidaudio-model";
 
 export type { VadConfig };
 
@@ -85,6 +86,7 @@ export function useSystemAudio() {
   // driven by backend events during VAD capture — they surface the silent-tap
   // failure that otherwise looks identical to normal listening.
   const [audioLevel, setAudioLevel] = useState<number>(0);
+  const [captureSampleRate, setCaptureSampleRate] = useState<number>(48_000);
   const [noAudioDetected, setNoAudioDetected] = useState<boolean>(false);
   // Post-session summary generated after a capture ends (survives the stop
   // cleanup; cleared on the next start or when dismissed).
@@ -133,8 +135,12 @@ export function useSystemAudio() {
     getEffectiveSystemPrompt,
     resetUseSystemPrompt,
   } = useContextSettings(systemPrompt);
-  const { isSupported, asrReady, isInitializing: isSttInitializing, init: initStt } =
-    useSttStatus();
+  const {
+    isSupported,
+    asrReady,
+    isInitializing: isSttInitializing,
+    init: initStt,
+  } = useSttStatus();
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeAiBatcherRef = useRef<ReturnType<
     typeof createTokenBatcher
@@ -145,7 +151,7 @@ export function useSystemAudio() {
   // Most recent captured utterance, answered or not — the target of the
   // answer-last-utterance shortcut.
   const lastUtteranceRef = useRef<{ text: string; messageId: string } | null>(
-    null
+    null,
   );
   // Read by the once-registered shortcut listener; assigned below after
   // answerLastUtterance is defined (same stale-closure guard as
@@ -154,6 +160,9 @@ export function useSystemAudio() {
   // Ref-backed so stopCapture (empty deps) always calls the freshest version,
   // which reads the current AI provider.
   const generateSummaryRef = useRef<() => void>(() => {});
+  // Lets the capture-ended-unexpectedly listener (registered once, on mount)
+  // run the real teardown instead of duplicating it.
+  const stopCaptureRef = useRef<() => Promise<void>>(async () => {});
   // The summary streams independently of processWithAI, so it needs its own
   // abort + sequence guard; without them a summary from a previous stop keeps
   // streaming into the panel after the next capture begins.
@@ -164,11 +173,14 @@ export function useSystemAudio() {
   const summarySeqRef = useRef(0);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
-  const utteranceTimestampsRef = useRef<Array<{ start: number; end: number }>>([]);
+  const utteranceTimestampsRef = useRef<Array<{ start: number; end: number }>>(
+    [],
+  );
   const recentSpeechEventsRef = useRef(new RecentSpeechEventFingerprints());
   const captureSessionWorkRef = useRef(createCaptureSessionWork());
   const captureGenerationRef = useRef(0);
   const captureStoppingRef = useRef(false);
+  const captureModelLeaseRef = useRef(false);
 
   const capturingRef = useRef(capturing);
   const selectedSttProviderRef = useRef(selectedSttProvider);
@@ -189,7 +201,7 @@ export function useSystemAudio() {
       transcription: string,
       prompt: string,
       previousMessages: Message[],
-      existingUserMessageId?: string
+      existingUserMessageId?: string,
     ) => Promise<void>
   >(async () => {});
   capturingRef.current = capturing;
@@ -205,10 +217,32 @@ export function useSystemAudio() {
       scope.add(
         listen(
           "capture-started",
-          scope.guard(() => {
+          scope.guard((event) => {
             recentSpeechEventsRef.current.clear();
-          })
-        )
+            const sampleRate = Number(event.payload);
+            if (Number.isFinite(sampleRate) && sampleRate > 0) {
+              setCaptureSampleRate(sampleRate);
+            }
+          }),
+        ),
+      ),
+      scope.add(
+        listen(
+          "capture-ended-unexpectedly",
+          scope.guard(() => {
+            // The native capture task exited on its own (device disconnect,
+            // sleep/wake, stream failure). Run the normal teardown so the UI
+            // does not stay stuck on "listening", then explain why.
+            if (!capturingRef.current || captureStoppingRef.current) {
+              return;
+            }
+            void stopCaptureRef.current().then(() => {
+              setError(
+                "Audio capture stopped unexpectedly — check your output device, then start again.",
+              );
+            });
+          }),
+        ),
       ),
       scope.add(
         listen(
@@ -216,8 +250,8 @@ export function useSystemAudio() {
           scope.guard((event) => {
             const seconds = event.payload as number;
             setRecordingProgress(seconds);
-          })
-        )
+          }),
+        ),
       ),
       scope.add(
         listen(
@@ -225,8 +259,8 @@ export function useSystemAudio() {
           scope.guard(() => {
             setRecordingProgress(0);
             setIsRecordingInContinuousMode(true);
-          })
-        )
+          }),
+        ),
       ),
       scope.add(
         listen(
@@ -234,8 +268,8 @@ export function useSystemAudio() {
           scope.guard(() => {
             setRecordingProgress(0);
             setIsRecordingInContinuousMode(false);
-          })
-        )
+          }),
+        ),
       ),
       scope.add(
         listen(
@@ -247,10 +281,15 @@ export function useSystemAudio() {
             setIsProcessing(false);
             setIsAIProcessing(false);
             setIsRecordingInContinuousMode(false);
-          })
-        )
+          }),
+        ),
       ),
-      scope.add(listen("speech-discarded", scope.guard(() => {}))),
+      scope.add(
+        listen(
+          "speech-discarded",
+          scope.guard(() => {}),
+        ),
+      ),
     ]).catch((err) => {
       console.error("Failed to setup continuous recording listeners:", err);
     });
@@ -270,9 +309,7 @@ export function useSystemAudio() {
             const generation = captureGenerationRef.current;
             try {
               if (!capturingRef.current) return;
-              if (
-                !captureSessionWorkRef.current.isCurrent(generation)
-              ) {
+              if (!captureSessionWorkRef.current.isCurrent(generation)) {
                 return;
               }
 
@@ -313,7 +350,7 @@ export function useSystemAudio() {
               }
 
               const providerConfig = currentProviders.find(
-                (p) => p.id === currentSelected.provider
+                (p) => p.id === currentSelected.provider,
               );
 
               if (!providerConfig) {
@@ -337,11 +374,9 @@ export function useSystemAudio() {
                     audio: audioBlob,
                     utteranceId: payload.utterance_id ?? undefined,
                     signal: sttAbortController.signal,
-                  })
+                  }),
                 );
-                if (
-                  !captureSessionWorkRef.current.isCurrent(generation)
-                ) {
+                if (!captureSessionWorkRef.current.isCurrent(generation)) {
                   return;
                 }
 
@@ -351,6 +386,12 @@ export function useSystemAudio() {
                   // question gate. VAD timing can't separate a 400ms "Yeah"
                   // from a 400ms "Why?"; only content can.
                   if (isBackchannel(transcription)) {
+                    if (import.meta.env.DEV) {
+                      console.debug(
+                        "Dropped backchannel transcription:",
+                        transcription,
+                      );
+                    }
                     return;
                   }
 
@@ -374,27 +415,25 @@ export function useSystemAudio() {
 
                     const previousMessages = buildAIHistory(
                       conversationMessagesRef.current,
-                      messageId
+                      messageId,
                     );
 
                     void processWithAIRef.current(
                       transcription,
                       effectiveSystemPrompt,
                       previousMessages,
-                      messageId
+                      messageId,
                     );
                   }
                 } else {
                   // Non-speech segments (music, ambience) legitimately transcribe
                   // to nothing — skip them quietly instead of surfacing an error.
                   console.warn(
-                    "Skipping empty transcription for non-speech segment"
+                    "Skipping empty transcription for non-speech segment",
                   );
                 }
               } catch (sttError: any) {
-                if (
-                  !captureSessionWorkRef.current.isCurrent(generation)
-                ) {
+                if (!captureSessionWorkRef.current.isCurrent(generation)) {
                   return;
                 }
                 console.error("STT Error:", sttError);
@@ -416,8 +455,8 @@ export function useSystemAudio() {
                 setIsProcessing(false);
               }
             }
-          })
-        )
+          }),
+        ),
       ),
     ]).catch(() => {
       setError("Failed to setup speech listener");
@@ -480,7 +519,7 @@ export function useSystemAudio() {
           : null;
 
       const providerConfig = allSttProviders.find(
-        (p) => p.id === selectedSttProvider.provider
+        (p) => p.id === selectedSttProvider.provider,
       );
 
       // The record button always means a manual take, regardless of which
@@ -517,7 +556,6 @@ export function useSystemAudio() {
     }
   }, [isContinuousMode, isRecordingInContinuousMode]);
 
-
   // Record a captured utterance in the transcript immediately, whether or not
   // it earns an automatic answer. Returns the message id so the answer path
   // can attach the assistant reply without duplicating the user entry.
@@ -536,7 +574,7 @@ export function useSystemAudio() {
       }));
       return id;
     },
-    []
+    [],
   );
 
   const processWithAI = useCallback(
@@ -544,7 +582,7 @@ export function useSystemAudio() {
       transcription: string,
       prompt: string,
       previousMessages: Message[],
-      existingUserMessageId?: string
+      existingUserMessageId?: string,
     ) => {
       activeAiBatcherRef.current?.cancel();
       activeAiBatcherRef.current = null;
@@ -576,7 +614,7 @@ export function useSystemAudio() {
         }
 
         const provider = allAiProviders.find(
-          (p) => p.id === selectedAIProvider.provider
+          (p) => p.id === selectedAIProvider.provider,
         );
         if (!provider) {
           setError("AI provider config not found.");
@@ -587,7 +625,7 @@ export function useSystemAudio() {
           const batcher = createTokenBatcher(
             (batched) => setLastAIResponse((prev) => prev + batched),
             undefined,
-            isCurrent
+            isCurrent,
           );
           activeAiBatcherRef.current = batcher;
           try {
@@ -628,7 +666,7 @@ export function useSystemAudio() {
 
         const responseToPersist = completedStreamValue(
           fullResponse,
-          streamCompleted
+          streamCompleted,
         );
         if (responseToPersist && isCurrent()) {
           const timestamp = Date.now();
@@ -640,7 +678,7 @@ export function useSystemAudio() {
             ? getSpeakerForUtterance(
                 latestUtterance.start,
                 latestUtterance.end,
-                speakerSegments
+                speakerSegments,
               )
             : null;
           setConversation((prev) => {
@@ -696,7 +734,7 @@ export function useSystemAudio() {
       conversation.messages,
       speakerSegments,
       getSpeakerForUtterance,
-    ]
+    ],
   );
 
   // Keep the ref pointing at the freshest `processWithAI` so the once-registered
@@ -714,13 +752,13 @@ export function useSystemAudio() {
     const effectiveSystemPrompt = getEffectiveSystemPrompt();
     const previousMessages = buildAIHistory(
       conversationMessagesRef.current,
-      last.messageId
+      last.messageId,
     );
     await processWithAIRef.current(
       last.text,
       effectiveSystemPrompt,
       previousMessages,
-      last.messageId
+      last.messageId,
     );
   }, []);
   answerLastRef.current = answerLastUtterance;
@@ -741,7 +779,7 @@ export function useSystemAudio() {
     }
     if (!selectedAIProvider.provider) return;
     const provider = allAiProviders.find(
-      (p) => p.id === selectedAIProvider.provider
+      (p) => p.id === selectedAIProvider.provider,
     );
     if (!provider) return;
 
@@ -767,7 +805,7 @@ export function useSystemAudio() {
       const batcher = createTokenBatcher(
         (batched) => setSessionSummary((prev) => prev + batched),
         undefined,
-        isCurrent
+        isCurrent,
       );
       activeSummaryBatcherRef.current = batcher;
       try {
@@ -821,9 +859,8 @@ export function useSystemAudio() {
   }, []);
 
   useEffect(() => {
-    return globalShortcuts.registerCustomShortcutCallback(
-      "answer_last",
-      () => answerLastRef.current()
+    return globalShortcuts.registerCustomShortcutCallback("answer_last", () =>
+      answerLastRef.current(),
     );
   }, [globalShortcuts.registerCustomShortcutCallback]);
 
@@ -837,16 +874,16 @@ export function useSystemAudio() {
           "audio-level",
           scope.guard((event) => {
             setAudioLevel((event.payload as number) ?? 0);
-          })
-        )
+          }),
+        ),
       ),
       scope.add(
         listen(
           "audio-silent",
           scope.guard(() => {
             setNoAudioDetected(true);
-          })
-        )
+          }),
+        ),
       ),
     ]).catch((err) => {
       console.warn("Failed to listen for audio level events:", err);
@@ -872,7 +909,7 @@ export function useSystemAudio() {
             try {
               await invoke("stop_system_audio_capture");
               const providerConfig = allSttProvidersRef.current.find(
-                (p) => p.id === selectedSttProviderRef.current.provider
+                (p) => p.id === selectedSttProviderRef.current.provider,
               );
               await invoke<string>("start_system_audio_capture", {
                 vadConfig: vadConfigRef.current,
@@ -884,8 +921,8 @@ export function useSystemAudio() {
               console.error("Failed to reconnect after device change:", err);
               setError(`Audio device changed and reconnecting failed: ${err}`);
             }
-          })
-        )
+          }),
+        ),
       )
       .catch((err) => {
         console.warn("Failed to listen for audio-device-changed:", err);
@@ -896,29 +933,46 @@ export function useSystemAudio() {
   }, []);
 
   const startCapture = useCallback(async () => {
+    if (captureModelLeaseRef.current) return;
+    captureModelLeaseRef.current = true;
+    let started = false;
     try {
       setError("");
 
       if (selectedSttProvider.provider === "local-fluidaudio") {
         if (!isSupported) {
           onSetSelectedSttProvider({ provider: "groq", variables: {} });
-          setError("Local STT requires macOS Apple Silicon — switched to cloud STT");
+          setError(
+            "Local STT requires macOS Apple Silicon — switched to cloud STT",
+          );
           return;
         }
 
-        const status = await invoke<{ asr_ready: boolean }>("stt_get_status");
+        const requestedModel = normalizeFluidAudioModel(
+          selectedSttProvider.variables.MODEL,
+        );
+        const status = await invoke<{
+          asr_ready: boolean;
+          model_version: "v2" | "v3" | null;
+        }>("stt_get_status");
 
-        if (!status.asr_ready && !isSttInitializing) {
-          await initStt();
+        if (!status.asr_ready || status.model_version !== requestedModel) {
+          await initStt(requestedModel);
         }
 
         const statusAfter = await invoke<{
           asr_ready: boolean;
+          model_version: "v2" | "v3" | null;
           vad_ready: boolean;
           diarization_ready: boolean;
         }>("stt_get_status");
-        if (!statusAfter.asr_ready) {
-          setError("Failed to initialize local speech model. Please try again.");
+        if (
+          !statusAfter.asr_ready ||
+          statusAfter.model_version !== requestedModel
+        ) {
+          setError(
+            `Failed to initialize FluidAudio ${requestedModel}. Please try again.`,
+          );
           return;
         }
 
@@ -931,7 +985,7 @@ export function useSystemAudio() {
           } catch (err) {
             console.warn(
               "Silero VAD init failed, falling back to threshold VAD:",
-              err
+              err,
             );
           }
         }
@@ -959,7 +1013,7 @@ export function useSystemAudio() {
           : null;
 
       const providerConfig = allSttProviders.find(
-        (p) => p.id === selectedSttProvider.provider
+        (p) => p.id === selectedSttProvider.provider,
       );
 
       captureStoppingRef.current = false;
@@ -977,6 +1031,7 @@ export function useSystemAudio() {
             });
           },
           commitStarted: () => {
+            started = true;
             const conversationId = generateConversationId("sysaudio");
             setConversation({
               id: conversationId,
@@ -1014,6 +1069,10 @@ export function useSystemAudio() {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
       setIsPopoverOpen(true);
+    } finally {
+      if (!started) {
+        captureModelLeaseRef.current = false;
+      }
     }
   }, [
     vadConfig,
@@ -1039,13 +1098,13 @@ export function useSystemAudio() {
       }
 
       const sessionPath = await invoke<string | null>(
-        "stop_system_audio_capture"
+        "stop_system_audio_capture",
       );
 
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       const sttDrained = await captureSessionWorkRef.current.drain(
         generation,
-        10_000
+        10_000,
       );
       captureSessionWorkRef.current.invalidate(generation);
       capturingRef.current = false;
@@ -1054,7 +1113,7 @@ export function useSystemAudio() {
       const sessionAudioStopAction = getSessionAudioStopAction(
         selectedSttProviderRef.current.provider,
         sessionPath,
-        sttDrained
+        sttDrained,
       );
       if (sessionPath) {
         if (sessionAudioStopAction === "diarize") {
@@ -1070,7 +1129,7 @@ export function useSystemAudio() {
             setSpeakerSegments(segments);
             labelMessagesWithSpeakersRef.current(
               segments,
-              utteranceTimestampsRef.current
+              utteranceTimestampsRef.current,
             );
           } catch (err) {
             console.warn("Diarization failed:", err);
@@ -1107,8 +1166,15 @@ export function useSystemAudio() {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(`Failed to stop capture: ${errorMessage}`);
       console.error("Stop capture error:", err);
+    } finally {
+      // Release the start guard here, not on the success path: a stop that
+      // throws would otherwise leave the lease held and make startCapture a
+      // silent no-op for the rest of the session.
+      captureModelLeaseRef.current = false;
     }
   }, []);
+
+  stopCaptureRef.current = stopCapture;
 
   const manualStopAndSend = useCallback(async () => {
     try {
@@ -1290,7 +1356,7 @@ export function useSystemAudio() {
               ? selectedAudioDevices.output.id
               : null;
           const providerConfig = allSttProvidersRef.current.find(
-            (p) => p.id === selectedSttProviderRef.current.provider
+            (p) => p.id === selectedSttProviderRef.current.provider,
           );
           await invoke<string>("start_system_audio_capture", {
             vadConfig: vadConfig,
@@ -1326,7 +1392,7 @@ export function useSystemAudio() {
               ...conversation,
               messages: conversation.messages.slice(
                 0,
-                LIVE_SNAPSHOT_MAX_MESSAGES
+                LIVE_SNAPSHOT_MAX_MESSAGES,
               ),
             }
           : conversation,
@@ -1356,7 +1422,7 @@ export function useSystemAudio() {
       isSummarizing,
       audioLevel,
       noAudioDetected,
-    ]
+    ],
   );
   useLiveStatePublisher(liveSnapshot);
 
@@ -1375,21 +1441,19 @@ export function useSystemAudio() {
     const effectiveSystemPrompt = getEffectiveSystemPrompt();
     const previousMessages = buildAIHistory(
       conversationMessagesRef.current,
-      messageId
+      messageId,
     );
     void processWithAIRef.current(
       text,
       effectiveSystemPrompt,
       previousMessages,
-      messageId
+      messageId,
     );
   };
 
   const liveCommandHandlersRef = useRef<
     Record<Exclude<LiveSessionCommandAction, "submit">, () => void>
-  >(
-    {} as Record<Exclude<LiveSessionCommandAction, "submit">, () => void>
-  );
+  >({} as Record<Exclude<LiveSessionCommandAction, "submit">, () => void>);
   liveCommandHandlersRef.current = {
     "start-capture": () => void startCapture(),
     "stop-capture": () => void stopCapture(),
@@ -1423,8 +1487,8 @@ export function useSystemAudio() {
             if (handler) {
               handler();
             }
-          })
-        )
+          }),
+        ),
       )
       .catch((error) => {
         console.error("Failed to listen for live session commands:", error);
@@ -1484,6 +1548,7 @@ export function useSystemAudio() {
     recordingProgress,
     sessionStartedAt,
     audioLevel,
+    captureSampleRate,
     noAudioDetected,
     sessionSummary,
     isSummarizing,

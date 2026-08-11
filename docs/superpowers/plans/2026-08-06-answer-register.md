@@ -1,6 +1,14 @@
 # Answer Register Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: Reverted — historical reference only. Do not execute this plan.**
+> The implementation and prompt rewrite in `94a4985`, `e760cd9`, `dfff0a9`,
+> and `ea4e4b4` were reverted by `e367f72`, `a7ecc60`, `18da62f`, and
+> `d9e710f`. The changes singled out one issue, expanded beyond the intended
+> scope, and produced worse transcriptions in testing.
+
+> **Historical execution note:** The workflow below was written for the
+> reverted implementation. It is retained for context only and must not be
+> executed.
 
 **Goal:** Make live drafted answers read as spoken speech rather than written credential summaries, by stopping chat-oriented instruction blocks from overriding the spoken prompt and by rewriting the prompt itself.
 

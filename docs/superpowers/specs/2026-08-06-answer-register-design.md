@@ -1,9 +1,14 @@
 # Answer Register — Design
 
 **Date:** 2026-08-06
-**Status:** Approved design (revised after review; all code claims traced to source)
+**Status:** Reverted — historical reference only; do not implement
 **Branch:** dev
 **Goal:** Make live drafted answers read as spoken speech from a person with real opinions, rather than written credential summaries. Triggered by a real screening call where the interviewer responded to a drafted answer with "You can be honest, it's okay."
+
+The implementation and prompt rewrite in `94a4985`, `e760cd9`, `dfff0a9`,
+and `ea4e4b4` were reverted by `e367f72`, `a7ecc60`, `18da62f`, and
+`d9e710f`. The changes singled out one issue, expanded beyond the intended
+scope, and produced worse transcriptions in testing.
 
 ## Background
 

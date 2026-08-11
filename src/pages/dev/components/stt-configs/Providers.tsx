@@ -3,6 +3,7 @@ import { UseSettingsReturn } from "@/types";
 import curl2Json, { ResultJSON } from "@bany/curl-to-json";
 import { KeyIcon, TrashIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { normalizeFluidAudioModel } from "@/lib/fluidaudio-model";
 
 export const Providers = ({
   allSttProviders,
@@ -78,6 +79,33 @@ export const Providers = ({
             });
           }}
         />
+        {selectedSttProvider?.provider === "local-fluidaudio" && (
+          <div className="space-y-2">
+            <Header
+              title="FluidAudio model"
+              description="v2 is English-only with the highest recall; v3 supports multilingual transcription."
+            />
+            <Selection
+              selected={normalizeFluidAudioModel(
+                selectedSttProvider.variables?.MODEL
+              )}
+              options={[
+                { label: "English v2 (highest recall)", value: "v2" },
+                { label: "Multilingual v3", value: "v3" },
+              ]}
+              placeholder="Choose a FluidAudio model"
+              onChange={(value) =>
+                onSetSelectedSttProvider({
+                  ...selectedSttProvider,
+                  variables: {
+                    ...selectedSttProvider.variables,
+                    MODEL: normalizeFluidAudioModel(value),
+                  },
+                })
+              }
+            />
+          </div>
+        )}
       </div>
       {localSelectedProvider ? (
         <Header

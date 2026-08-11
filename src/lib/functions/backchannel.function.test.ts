@@ -43,6 +43,15 @@ describe("isBackchannel", () => {
     expect(isBackchannel("   ")).toBe(false);
   });
 
+  it("drops punctuation-only ASR output", () => {
+    expect(isBackchannel("...")).toBe(true);
+    expect(isBackchannel("!!!")).toBe(true);
+    expect(isBackchannel("…")).toBe(true);
+    expect(isBackchannel("—")).toBe(true);
+    expect(isBackchannel("?")).toBe(true);
+    expect(isBackchannel(".".repeat(81))).toBe(true);
+  });
+
   it("matches case-insensitively", () => {
     expect(isBackchannel("YEAH.")).toBe(true);
     expect(isBackchannel("Mm-Hmm.")).toBe(true);
@@ -91,7 +100,7 @@ describe("isBackchannel", () => {
     expect(isBackchannel("No, not at all")).toBe(false);
   });
 
-  it("never drops a question, whatever words it uses", () => {
+  it("never drops a question-marked utterance", () => {
     expect(isBackchannel("Okay?")).toBe(false);
     expect(isBackchannel("Yeah?")).toBe(false);
     expect(isBackchannel("Right?")).toBe(false);

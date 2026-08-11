@@ -23,6 +23,7 @@
 // One backchannel token, with an optional "oh" intensifier ("Oh no.").
 const BACKCHANNEL_TOKEN =
   /^(?:oh\s+)?(?:yeah|yes|yep|yup|mm+[-\s]?hm+|mmm+|hmm+|okay|ok|sure|right|uh[-\s]?huh|oh|wow|ha|no|nope|cool|awesome|got it|i see|makes sense)$/i;
+const WORD_CHARACTER_PATTERN = /[\p{L}\p{N}]/u;
 
 // Longest plausible run of pure backchannel. Past this it is almost certainly
 // content, and not worth splitting.
@@ -30,11 +31,19 @@ const MAX_BACKCHANNEL_LENGTH = 80;
 
 export function isBackchannel(text: string): boolean {
   const trimmed = text.trim();
-  if (!trimmed || trimmed.length > MAX_BACKCHANNEL_LENGTH) {
+  if (!trimmed) {
     return false;
   }
 
-  // A question is never a backchannel, whatever words it uses.
+  if (!WORD_CHARACTER_PATTERN.test(trimmed)) {
+    return true;
+  }
+
+  if (trimmed.length > MAX_BACKCHANNEL_LENGTH) {
+    return false;
+  }
+
+  // A question-marked utterance is never a backchannel.
   if (trimmed.includes("?")) {
     return false;
   }
@@ -43,10 +52,6 @@ export function isBackchannel(text: string): boolean {
     .split(/[.,!;]+/)
     .map((piece) => piece.trim())
     .filter(Boolean);
-
-  if (pieces.length === 0) {
-    return false;
-  }
 
   return pieces.every((piece) => BACKCHANNEL_TOKEN.test(piece));
 }

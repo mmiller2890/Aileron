@@ -14,6 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { TYPE_PROVIDER } from "@/types";
 import curl2Json from "@bany/curl-to-json";
 import { withLoopbackOriginRemoved } from "./provider-auth";
+import { normalizeFluidAudioModel } from "@/lib/fluidaudio-model";
 
 export interface STTParams {
   provider: TYPE_PROVIDER | undefined;
@@ -46,6 +47,26 @@ export interface STTParams {
 }
 
 export const UTTERANCE_CACHE_MISS_PREFIX = "UTTERANCE_CACHE_MISS:";
+
+interface LocalTranscriptionResult {
+  text: string;
+  raw_text?: string;
+  normalized_text?: string;
+  diagnostics?: Record<string, unknown>;
+  comparison?: Record<string, unknown> | null;
+}
+
+function consumeLocalTranscription(result: LocalTranscriptionResult): string {
+  if (import.meta.env.DEV && result.diagnostics) {
+    console.debug("FluidAudio transcription diagnostics", {
+      raw_text: result.raw_text,
+      normalized_text: result.normalized_text,
+      diagnostics: result.diagnostics,
+      comparison: result.comparison,
+    });
+  }
+  return result.text.trim();
+}
 
 const AUDIO_PLACEHOLDER = "{{AUDIO}}";
 
@@ -104,11 +125,11 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       // place. Nothing is decoded and nothing crosses IPC but the id.
       if (utteranceId) {
         try {
-          const result = await invoke<{ text: string }>(
+          const result = await invoke<LocalTranscriptionResult>(
             "stt_transcribe_utterance",
             { utteranceId }
           );
-          return result.text.trim();
+          return consumeLocalTranscription(result);
         } catch (error) {
           if (!isUtteranceCacheMiss(error)) {
             throw error;
@@ -127,10 +148,13 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       const f32 =
         samples ?? (await wavBase64ToF32Samples(await blobToBase64(audioBlob())));
       if (f32.length === 0) throw new Error("Audio file is empty");
-      const result = await invoke<{ text: string }>("stt_transcribe_speech", {
+      const result = await invoke<LocalTranscriptionResult>("stt_transcribe_speech", {
         samples: Array.from(f32),
+        modelVersion: normalizeFluidAudioModel(
+          selectedProvider.variables.MODEL,
+        ),
       });
-      return result.text.trim();
+      return consumeLocalTranscription(result);
     }
 
     const audio = audioBlob();

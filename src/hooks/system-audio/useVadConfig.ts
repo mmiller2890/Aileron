@@ -14,9 +14,10 @@ export interface VadConfig {
   max_recording_duration_secs: number;
   emit_chunks?: boolean;
   chunk_interval_ms?: number;
+  compare_preprocessing: boolean;
 }
 
-const DEFAULT_VAD_CONFIG: VadConfig = {
+export const DEFAULT_VAD_CONFIG: VadConfig = {
   enabled: true,
   hop_size: 1024,
   sensitivity_rms: 0.006,
@@ -32,7 +33,15 @@ const DEFAULT_VAD_CONFIG: VadConfig = {
   max_recording_duration_secs: 180,
   emit_chunks: false,
   chunk_interval_ms: 1000,
+  compare_preprocessing: false,
 };
+
+export function vadDurationSeconds(
+  config: Pick<VadConfig, "silence_chunks" | "hop_size">,
+  sampleRate: number
+): number {
+  return (config.silence_chunks * config.hop_size) / sampleRate;
+}
 
 // Bumped when default tunables change so stale saved configs (with the old
 // values) are ignored instead of silently overriding the tuned defaults.
@@ -46,7 +55,7 @@ export function useVadConfig() {
     if (savedVadConfig) {
       try {
         const parsed = JSON.parse(savedVadConfig);
-        setVadConfig(parsed);
+        setVadConfig({ ...DEFAULT_VAD_CONFIG, ...parsed });
       } catch (error) {
         console.error("Failed to load VAD config:", error);
       }

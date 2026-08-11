@@ -72,6 +72,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     isLabelingSpeakers,
     currentSpeaker,
     audioLevel,
+    captureSampleRate,
     noAudioDetected,
     sessionSummary,
     isSummarizing,
@@ -462,6 +463,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
                     <SettingsPanel
                       vadConfig={vadConfig}
                       onUpdateVadConfig={updateVadConfiguration}
+                      captureSampleRate={captureSampleRate}
                       useSystemPrompt={useSystemPrompt}
                       setUseSystemPrompt={setUseSystemPrompt}
                       contextContent={contextContent}

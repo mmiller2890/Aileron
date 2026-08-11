@@ -1,4 +1,5 @@
 // Assistant AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
+use crate::speaker::preprocessing::{prepare_utterance, PreparedUtterance};
 use crate::speaker::{AudioDevice, SpeakerInput};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -19,29 +20,9 @@ use tracing::{error, warn};
 const SILERO_CHUNK_SAMPLES: usize = 4096;
 const SILERO_SAMPLE_RATE: usize = 16_000;
 
-/// Linear resampler for the VAD path. The capture tap runs at the device rate
-/// (typically 48 kHz); Silero expects 16 kHz. Feeding device-rate audio in
-/// directly pitch-shifts it 3x and makes the speech probabilities garbage.
-fn resample_linear(input: &[f32], from_rate: usize, to_rate: usize) -> Vec<f32> {
-    if from_rate == to_rate || input.is_empty() {
-        return input.to_vec();
-    }
-    let out_len = (input.len() * to_rate / from_rate).max(1);
-    let step = (input.len() - 1) as f32 / (out_len - 1).max(1) as f32;
-    (0..out_len)
-        .map(|i| {
-            let pos = i as f32 * step;
-            let idx = pos as usize;
-            let frac = pos - idx as f32;
-            let a = input[idx];
-            let b = input[(idx + 1).min(input.len() - 1)];
-            a + (b - a) * frac
-        })
-        .collect()
-}
-
-fn samples_for_local_asr(samples: &[f32], sample_rate: u32) -> Vec<f32> {
-    resample_linear(samples, sample_rate as usize, SILERO_SAMPLE_RATE)
+#[cfg(target_os = "macos")]
+fn samples_for_local_asr(samples: &[f32], sample_rate: u32) -> Result<Vec<f32>, String> {
+    fluidaudio_rs::resample_samples(samples, sample_rate as f64).map_err(|error| error.to_string())
 }
 
 /// Hysteresis thresholds mirroring the microphone path (@ricky0123/vad-react
@@ -69,12 +50,23 @@ fn silero_is_speech(in_speech: bool, prob: f32) -> bool {
     }
 }
 
-/// Raw Silero speech probability for a 16 kHz chunk (max across frames), or
+/// Raw Silero speech probability for a 16 kHz chunk, or
 /// None when Silero is unavailable and the threshold fallback should be used.
-fn get_silero_vad_probability(
-    app: &AppHandle,
-    samples: &[f32],
-) -> Option<f32> {
+fn get_silero_vad_probability(app: &AppHandle, samples: &[f32]) -> Option<f32> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(stt_state) = app.try_state::<crate::stt::SttState>() {
+            if let Ok(probability) = stt_state.vad_process_streaming_samples(samples) {
+                return Some(probability);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, samples);
+    None
+}
+
+fn get_silero_vad_probability_batch(app: &AppHandle, samples: &[f32]) -> Option<f32> {
     #[cfg(target_os = "macos")]
     {
         if let Some(stt_state) = app.try_state::<crate::stt::SttState>() {
@@ -82,8 +74,8 @@ fn get_silero_vad_probability(
                 return Some(
                     frames
                         .iter()
-                        .map(|f| f.probability)
-                        .fold(0.0f32, f32::max),
+                        .map(|frame| frame.probability)
+                        .fold(0.0, f32::max),
                 );
             }
         }
@@ -91,6 +83,24 @@ fn get_silero_vad_probability(
     #[cfg(not(target_os = "macos"))]
     let _ = (app, samples);
     None
+}
+
+trait CaptureVadReset {
+    fn reset_capture_vad(&self) -> Result<(), String>;
+}
+
+#[cfg(target_os = "macos")]
+impl CaptureVadReset for crate::stt::SttState {
+    fn reset_capture_vad(&self) -> Result<(), String> {
+        self.reset_vad_stream()
+    }
+}
+
+fn reset_vad_for_capture(reset: Option<&dyn CaptureVadReset>) -> Result<(), String> {
+    match reset {
+        Some(reset) => reset.reset_capture_vad(),
+        None => Ok(()),
+    }
 }
 
 /// Cache an utterance's samples and announce it to the frontend.
@@ -103,10 +113,13 @@ fn emit_speech_detected(
     app: &AppHandle,
     sr: u32,
     samples: &[f32],
+    noise_gate_threshold: f32,
+    compare_preprocessing: bool,
     start_time: f32,
     end_time: f32,
 ) {
-    if samples.is_empty() {
+    let PreparedUtterance { raw, processed } = prepare_utterance(samples, noise_gate_threshold);
+    if processed.is_empty() {
         let _ = app.emit(
             "audio-encoding-error",
             "Captured audio was empty after normalization",
@@ -114,15 +127,46 @@ fn emit_speech_detected(
         return;
     }
 
-    let Ok(b64) = samples_to_wav_b64(sr, samples) else {
+    let Ok(b64) = samples_to_wav_b64(sr, &processed) else {
         error!("Failed to encode speech to WAV");
         let _ = app.emit("audio-encoding-error", "Failed to encode speech");
         return;
     };
 
-    let utterance_id = app
-        .state::<crate::stt::UtteranceStore>()
-        .put(samples_for_local_asr(samples, sr));
+    #[cfg(target_os = "macos")]
+    let utterance_id = match samples_for_local_asr(&processed, sr) {
+        Ok(primary_samples) => {
+            let comparison_samples = if compare_preprocessing {
+                match samples_for_local_asr(&raw, sr) {
+                    Ok(samples) => Some(samples),
+                    Err(error) => {
+                        let _ = app.emit(
+                            "stt-error",
+                            format!("Failed to resample comparison audio: {error}"),
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            app.state::<crate::stt::UtteranceStore>().put_capture(
+                primary_samples,
+                comparison_samples,
+                sr,
+                raw.len() as f64 / sr as f64,
+            )
+        }
+        Err(error) => {
+            let _ = app.emit(
+                "audio-encoding-error",
+                format!("Failed to resample captured speech: {error}"),
+            );
+            None
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let utterance_id: Option<String> = None;
 
     let _ = app.emit(
         "speech-detected",
@@ -149,6 +193,8 @@ pub struct VadConfig {
     pub max_recording_duration_secs: u64,
     #[serde(default)]
     pub emit_chunks: bool,
+    #[serde(default)]
+    pub compare_preprocessing: bool,
     #[serde(default = "default_chunk_interval")]
     pub chunk_interval_ms: u64,
 }
@@ -198,13 +244,14 @@ impl Default for VadConfig {
             // Tunables are sample-rate-dependent, tuned for 48 kHz:
             // hop_size 1024 = 21.3 ms/hop. At 96 kHz these halve in wall
             // time (silence 100 -> 1.07 s); at 44.1 kHz they scale ~linearly.
-            silence_chunks: 100,    // ~2.1s of silence before stopping (tolerates thinking pauses)
-            min_speech_chunks: 12,  // ~0.26s - matches the mic path's minSpeechFrames
-            pre_speech_chunks: 30,  // ~0.64s - covers 2+ Silero refresh periods (256ms each) so
-                                    // the word onset survives until VAD triggers
+            silence_chunks: 100, // ~2.1s of silence before stopping (tolerates thinking pauses)
+            min_speech_chunks: 12, // ~0.26s - matches the mic path's minSpeechFrames
+            pre_speech_chunks: 30, // ~0.64s - covers 2+ Silero refresh periods (256ms each) so
+            // the word onset survives until VAD triggers
             noise_gate_threshold: 0.0015, // Gentler gate for compressed system audio
             max_recording_duration_secs: 180, // 3 minutes default
             emit_chunks: false,
+            compare_preprocessing: false,
             chunk_interval_ms: 1000,
         }
     }
@@ -212,42 +259,46 @@ impl Default for VadConfig {
 
 /// Mutex-protected slot for the currently running capture task.
 ///
-/// `claim` verifies the slot is empty and stores the handle in the same lock
-/// acquisition, so two concurrent starts cannot both pass the emptiness check
-/// and double-spawn (the TOCTOU that allowed duplicate capture tasks and
-/// duplicate speech-detected events). `release_if_owned` lets a finishing
-/// task clear the slot only while it still holds its own handle, so a stale
-/// task can never clobber a newer capture's entry.
+/// A reservation is acquired before setup and spawning, so concurrent starts
+/// cannot create detached duplicate capture tasks. `release_if_owned` lets a
+/// finishing task clear the slot only while it still holds its own handle.
+enum TaskSlotState<T> {
+    Vacant,
+    Reserved,
+    Running(tokio::task::JoinHandle<T>),
+}
+
 pub struct TaskSlot<T> {
-    inner: std::sync::Mutex<Option<tokio::task::JoinHandle<T>>>,
+    inner: std::sync::Mutex<TaskSlotState<T>>,
+}
+
+pub struct TaskReservation<'a, T> {
+    slot: &'a TaskSlot<T>,
+    active: bool,
 }
 
 impl<T> TaskSlot<T> {
     pub fn new() -> Self {
         Self {
-            inner: std::sync::Mutex::new(None),
+            inner: std::sync::Mutex::new(TaskSlotState::Vacant),
         }
     }
 
-    /// Claim the slot for `task`, failing if a task is already registered.
-    /// A task that already finished is not stored: it can never be observed
-    /// as "running" by a later start.
-    pub fn claim(
-        &self,
-        task: tokio::task::JoinHandle<T>,
-        already_running: &str,
-    ) -> Result<(), String> {
+    pub fn reserve(&self, already_running: &str) -> Result<TaskReservation<'_, T>, String> {
         let mut guard = self
             .inner
             .lock()
             .map_err(|e| format!("Failed to acquire lock: {}", e))?;
-        if guard.is_some() {
-            return Err(already_running.to_string());
+        match &*guard {
+            TaskSlotState::Vacant => {
+                *guard = TaskSlotState::Reserved;
+                Ok(TaskReservation {
+                    slot: self,
+                    active: true,
+                })
+            }
+            TaskSlotState::Reserved | TaskSlotState::Running(_) => Err(already_running.to_string()),
         }
-        if !task.is_finished() {
-            *guard = Some(task);
-        }
-        Ok(())
     }
 
     /// Clear the slot, but only if it still holds the task with id `my_id`.
@@ -255,8 +306,8 @@ impl<T> TaskSlot<T> {
     /// capture's entry.
     pub fn release_if_owned(&self, my_id: tokio::task::Id) {
         if let Ok(mut guard) = self.inner.lock() {
-            if guard.as_ref().map(|t| t.id()) == Some(my_id) {
-                *guard = None;
+            if matches!(&*guard, TaskSlotState::Running(task) if task.id() == my_id) {
+                *guard = TaskSlotState::Vacant;
             }
         }
     }
@@ -267,7 +318,45 @@ impl<T> TaskSlot<T> {
             .inner
             .lock()
             .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
-        Ok(guard.take())
+        match std::mem::replace(&mut *guard, TaskSlotState::Vacant) {
+            TaskSlotState::Running(task) => Ok(Some(task)),
+            TaskSlotState::Vacant | TaskSlotState::Reserved => Ok(None),
+        }
+    }
+}
+
+impl<T> TaskReservation<'_, T> {
+    pub fn install(mut self, task: tokio::task::JoinHandle<T>) -> Result<(), String> {
+        let mut guard = match self.slot.inner.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                task.abort();
+                return Err(format!("Failed to acquire lock: {}", error));
+            }
+        };
+        if !matches!(&*guard, TaskSlotState::Reserved) {
+            task.abort();
+            return Err("Task slot reservation was lost".to_string());
+        }
+        *guard = if task.is_finished() {
+            TaskSlotState::Vacant
+        } else {
+            TaskSlotState::Running(task)
+        };
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl<T> Drop for TaskReservation<'_, T> {
+    fn drop(&mut self) {
+        if self.active {
+            if let Ok(mut guard) = self.slot.inner.lock() {
+                if matches!(&*guard, TaskSlotState::Reserved) {
+                    *guard = TaskSlotState::Vacant;
+                }
+            }
+        }
     }
 }
 
@@ -285,6 +374,7 @@ pub async fn start_system_audio_capture(
     streaming: Option<bool>,
 ) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
+    let reservation = state.stream_task.reserve("Capture already running")?;
 
     if let Some(mut config) = vad_config {
         config.validate()?;
@@ -336,10 +426,21 @@ pub async fn start_system_audio_capture(
         .lock()
         .map_err(|e| format!("Failed to read VAD config: {}", e))?
         .clone();
+
+    #[cfg(target_os = "macos")]
+    {
+        let stt_state = app.try_state::<crate::stt::SttState>();
+        reset_vad_for_capture(
+            stt_state
+                .as_deref()
+                .map(|state| state as &dyn CaptureVadReset),
+        )?;
+    }
+
     state.stop_flag.store(false, Ordering::Release);
     let stop_flag = state.stop_flag.clone();
+    let stop_requested = state.stop_flag.clone();
 
-    let state_clone = app.state::<crate::AudioState>();
     let task = tokio::spawn(async move {
         let session_path = if vad_config.enabled {
             run_vad_capture(
@@ -362,19 +463,30 @@ pub async fn start_system_audio_capture(
         let state = app_clone.state::<crate::AudioState>();
         state.stream_task.release_if_owned(tokio::task::id());
 
+        // A stream that ends without a stop request (device disconnect,
+        // sleep/wake, stream failure) has nothing left to tell the frontend
+        // it is over: `capture-stopped` is only emitted by
+        // `stop_system_audio_capture`, which nobody called. Without this the
+        // UI stays on "listening" forever.
+        if !stop_requested.load(Ordering::Acquire) {
+            if let Ok(mut is_capturing) = state.is_capturing.lock() {
+                *is_capturing = false;
+            }
+            if let Ok(mut orphaned) = state.orphaned_session_path.lock() {
+                *orphaned = session_path.clone();
+            }
+            let _ = app_clone.emit("capture-ended-unexpectedly", ());
+        }
+
         session_path
     });
 
-    // Claim the slot in the same lock acquisition that verifies it is empty,
-    // so concurrent starts cannot both pass the check and double-spawn (the
-    // TOCTOU that produced duplicate capture tasks and duplicate
-    // speech-detected events).
-    if let Err(e) = state_clone.stream_task.claim(task, "Capture already running") {
+    if let Err(e) = reservation.install(task) {
         warn!("{}", e);
         return Err(e);
     }
 
-    *state_clone
+    *state
         .is_capturing
         .lock()
         .map_err(|e| format!("Failed to set capturing state: {}", e))? = true;
@@ -498,10 +610,8 @@ async fn run_vad_capture(
                 silent_warned = true;
             }
 
-            let mono = apply_noise_gate(&raw_mono, config.noise_gate_threshold);
-
-            if session_audio.len() + mono.len() <= max_session_samples {
-                session_audio.extend_from_slice(&mono);
+            if session_audio.len() + raw_mono.len() <= max_session_samples {
+                session_audio.extend_from_slice(&raw_mono);
             }
 
             // Silero VAD processes 256 ms chunks of 16 kHz audio. The tap runs
@@ -509,15 +619,20 @@ async fn run_vad_capture(
             // and resample down to Silero's expected 4096 @ 16 kHz.
             #[cfg(target_os = "macos")]
             {
-                let silero_device_chunk =
-                    (sr as usize * SILERO_CHUNK_SAMPLES) / SILERO_SAMPLE_RATE;
+                let silero_device_chunk = (sr as usize * SILERO_CHUNK_SAMPLES) / SILERO_SAMPLE_RATE;
                 vad_accumulator.extend_from_slice(&raw_mono);
                 if vad_accumulator.len() >= silero_device_chunk {
-                    let chunk: Vec<f32> =
-                        vad_accumulator.drain(..silero_device_chunk).collect();
-                    let chunk_16k =
-                        resample_linear(&chunk, sr as usize, SILERO_SAMPLE_RATE);
-                    pending_silero_prob = get_silero_vad_probability(&app, &chunk_16k);
+                    let chunk: Vec<f32> = vad_accumulator.drain(..silero_device_chunk).collect();
+                    pending_silero_prob = match samples_for_local_asr(&chunk, sr) {
+                        Ok(chunk_16k) => get_silero_vad_probability(&app, &chunk_16k),
+                        Err(error) => {
+                            let _ = app.emit(
+                                "stt-error",
+                                format!("Failed to resample VAD audio: {error}"),
+                            );
+                            None
+                        }
+                    };
                     vad_hops_until_refresh = silero_device_chunk / config.hop_size;
                 }
                 if vad_hops_until_refresh > 0 {
@@ -530,7 +645,7 @@ async fn run_vad_capture(
                 Some(prob) => silero_is_speech(in_speech, prob),
                 None => {
                     // Fallback to threshold VAD
-                    let (rms, peak) = calculate_audio_metrics(&mono);
+                    let (rms, peak) = calculate_audio_metrics(&raw_mono);
                     rms > config.sensitivity_rms || peak > config.peak_threshold
                 }
             };
@@ -552,7 +667,7 @@ async fn run_vad_capture(
                 }
 
                 speech_chunks += 1;
-                speech_buffer.extend_from_slice(&mono);
+                speech_buffer.extend_from_slice(&raw_mono);
                 silence_chunks = 0; // Reset silence counter on any speech
 
                 if config.emit_chunks {
@@ -560,12 +675,10 @@ async fn run_vad_capture(
                     if let Some(t) = last_chunk_time {
                         if t.elapsed() >= chunk_interval && speech_buffer.len() > last_emitted_len {
                             let new_samples = &speech_buffer[last_emitted_len..];
-                            let cleaned = apply_noise_gate(
-                                new_samples,
-                                config.noise_gate_threshold,
-                            );
-                            let normalized = normalize_audio_level(&cleaned, 0.1);
-                            if let Ok(b64) = samples_to_raw_f32_b64(&normalized) {
+                            let processed =
+                                prepare_utterance(new_samples, config.noise_gate_threshold)
+                                    .processed;
+                            if let Ok(b64) = samples_to_raw_f32_b64(&processed) {
                                 let _ = app.emit("speech-chunk", b64);
                             }
                             last_emitted_len = speech_buffer.len();
@@ -577,11 +690,12 @@ async fn run_vad_capture(
                 // Safety cap: force emit if exceeds 30s
                 if speech_buffer.len() > max_samples {
                     let utterance_end_time = session_start.elapsed().as_secs_f32();
-                    let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
                     emit_speech_detected(
                         &app,
                         sr,
-                        &normalized_buffer,
+                        &speech_buffer,
+                        config.noise_gate_threshold,
+                        config.compare_preprocessing,
                         utterance_start_time,
                         utterance_end_time,
                     );
@@ -597,7 +711,7 @@ async fn run_vad_capture(
                     silence_chunks += 1;
 
                     // Continue collecting during silence (important for natural speech)
-                    speech_buffer.extend_from_slice(&mono);
+                    speech_buffer.extend_from_slice(&raw_mono);
 
                     // Check if silence duration exceeds threshold
                     if silence_chunks >= config.silence_chunks {
@@ -613,11 +727,12 @@ async fn run_vad_capture(
                             }
 
                             let utterance_end_time = session_start.elapsed().as_secs_f32();
-                            let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
                             emit_speech_detected(
                                 &app,
                                 sr,
-                                &normalized_buffer,
+                                &speech_buffer,
+                                config.noise_gate_threshold,
+                                config.compare_preprocessing,
                                 utterance_start_time,
                                 utterance_end_time,
                             );
@@ -638,7 +753,7 @@ async fn run_vad_capture(
                     }
                 } else {
                     // Not in speech yet - maintain rolling pre-speech buffer
-                    pre_speech.extend(mono.into_iter());
+                    pre_speech.extend(raw_mono.into_iter());
 
                     // Trim excess (maintain fixed size)
                     while pre_speech.len() > config.pre_speech_chunks * config.hop_size {
@@ -657,11 +772,12 @@ async fn run_vad_capture(
     // Emit any remaining audio when the stream ends.
     if in_speech && !speech_buffer.is_empty() {
         let utterance_end_time = session_start.elapsed().as_secs_f32();
-        let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
         emit_speech_detected(
             &app,
             sr,
-            &normalized_buffer,
+            &speech_buffer,
+            config.noise_gate_threshold,
+            config.compare_preprocessing,
             utterance_start_time,
             utterance_end_time,
         );
@@ -755,9 +871,12 @@ async fn run_continuous_capture(
                             && audio_buffer.len() > last_emitted_len
                         {
                             let new_samples = &audio_buffer[last_emitted_len..];
-                            let cleaned = apply_noise_gate(new_samples, config.noise_gate_threshold);
-                            let normalized = normalize_audio_level(&cleaned, 0.1);
-                            if let Ok(b64) = samples_to_raw_f32_b64(&normalized) {
+                            let processed = prepare_utterance(
+                                new_samples,
+                                config.noise_gate_threshold,
+                            )
+                            .processed;
+                            if let Ok(b64) = samples_to_raw_f32_b64(&processed) {
                                 let _ = app.emit("speech-chunk", b64);
                             }
                             last_emitted_len = audio_buffer.len();
@@ -792,11 +911,15 @@ async fn run_continuous_capture(
     if !audio_buffer.is_empty() {
         // let duration = start_time.elapsed().as_secs_f32();
 
-        // Apply noise gate
-        let cleaned_audio = apply_noise_gate(&audio_buffer, config.noise_gate_threshold);
-        let cleaned_audio = normalize_audio_level(&cleaned_audio, 0.1);
-
-        emit_speech_detected(&app, sr, &cleaned_audio, 0.0, 0.0);
+        emit_speech_detected(
+            &app,
+            sr,
+            &audio_buffer,
+            config.noise_gate_threshold,
+            config.compare_preprocessing,
+            0.0,
+            0.0,
+        );
     } else {
         warn!("No audio captured in continuous mode");
         let _ = app.emit("audio-encoding-error", "No audio recorded");
@@ -805,23 +928,6 @@ async fn run_continuous_capture(
     let _ = app.emit("continuous-recording-stopped", ());
 
     None
-}
-
-// Apply noise gate
-fn apply_noise_gate(samples: &[f32], threshold: f32) -> Vec<f32> {
-    const KNEE_RATIO: f32 = 3.0; // Compression ratio for soft knee
-
-    samples
-        .iter()
-        .map(|&s| {
-            let abs = s.abs();
-            if abs < threshold {
-                s * (abs / threshold).powf(1.0 / KNEE_RATIO)
-            } else {
-                s
-            }
-        })
-        .collect()
 }
 
 // Calculate RMS and peak (optimized)
@@ -841,33 +947,6 @@ fn calculate_audio_metrics(chunk: &[f32]) -> (f32, f32) {
 
     let rms = (sumsq / chunk.len() as f32).sqrt();
     (rms, peak)
-}
-
-fn normalize_audio_level(samples: &[f32], target_rms: f32) -> Vec<f32> {
-    if samples.is_empty() {
-        return Vec::new();
-    }
-
-    let sum_squares: f32 = samples.iter().map(|&s| s * s).sum();
-    let current_rms = (sum_squares / samples.len() as f32).sqrt();
-
-    if current_rms < 0.001 {
-        return samples.to_vec();
-    }
-
-    let gain = (target_rms / current_rms).min(10.0);
-
-    samples
-        .iter()
-        .map(|&s| {
-            let amplified = s * gain;
-            if amplified.abs() > 1.0 {
-                amplified.signum() * (1.0 - (-amplified.abs()).exp())
-            } else {
-                amplified
-            }
-        })
-        .collect()
 }
 
 // Convert samples to WAV base64 (with proper error handling)
@@ -1017,10 +1096,19 @@ pub async fn stop_system_audio_capture(
     // its session WAV before we return to the frontend.
     let task = state.stream_task.take()?;
 
+    // Drain unconditionally: a live task supersedes anything a previous
+    // unexpected end left behind, and `sweep_stale_session_wavs` reclaims the
+    // superseded file.
+    let orphaned_session_path = state
+        .orphaned_session_path
+        .lock()
+        .map_err(|e| format!("Failed to read session audio path: {}", e))?
+        .take();
+
     let session_path = if let Some(task) = task {
         await_capture_shutdown(task, Duration::from_secs(5)).await
     } else {
-        None
+        orphaned_session_path
     };
 
     // Mark as not capturing
@@ -1179,56 +1267,64 @@ pub fn get_output_devices() -> Result<Vec<AudioDevice>, String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn resample_is_identity_when_rates_match() {
-        let input = vec![0.1, 0.2, 0.3, 0.4];
-        assert_eq!(resample_linear(&input, 16_000, 16_000), input);
+    struct FakeVadReset {
+        result: Result<(), String>,
+        calls: std::sync::atomic::AtomicUsize,
     }
 
-    #[test]
-    fn resample_handles_empty_input() {
-        assert!(resample_linear(&[], 48_000, 16_000).is_empty());
-    }
-
-    #[test]
-    fn resample_downsamples_length_by_the_rate_ratio() {
-        // 48 kHz -> 16 kHz is a 3:1 decimation. 4096 in -> ~1365 out.
-        let input = vec![0.0f32; 4096];
-        let out = resample_linear(&input, 48_000, 16_000);
-        assert_eq!(out.len(), 4096 * 16_000 / 48_000);
-    }
-
-    #[test]
-    fn resample_upsamples_length_by_the_rate_ratio() {
-        // 8 kHz -> 16 kHz doubles the frame count (the sub-16k truncation case).
-        let input = vec![0.0f32; 1000];
-        let out = resample_linear(&input, 8_000, 16_000);
-        assert_eq!(out.len(), 2000);
-    }
-
-    #[test]
-    fn resample_preserves_endpoints_and_stays_in_range() {
-        // A ramp from 0..1 should still start at 0 and end at ~1 after resampling.
-        let input: Vec<f32> = (0..48).map(|i| i as f32 / 47.0).collect();
-        let out = resample_linear(&input, 48_000, 16_000);
-        assert!((out[0] - 0.0).abs() < 1e-6);
-        assert!((out[out.len() - 1] - 1.0).abs() < 1e-6);
-        for &v in &out {
-            assert!((0.0..=1.0).contains(&v));
+    impl CaptureVadReset for FakeVadReset {
+        fn reset_capture_vad(&self) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
         }
     }
 
     #[test]
+    fn capture_boundary_resets_vad_once() {
+        let reset = FakeVadReset {
+            result: Ok(()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        reset_vad_for_capture(Some(&reset)).unwrap();
+
+        assert_eq!(reset.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn capture_boundary_propagates_vad_reset_errors() {
+        let reset = FakeVadReset {
+            result: Err("reset failed".to_string()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        assert_eq!(
+            reset_vad_for_capture(Some(&reset)),
+            Err("reset failed".to_string())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn normalizes_cached_utterance_samples_to_16khz() {
         let device_rate_samples = vec![0.25f32; 48_000];
-        let normalized = samples_for_local_asr(&device_rate_samples, 48_000);
+        let normalized = samples_for_local_asr(&device_rate_samples, 48_000).unwrap();
         assert_eq!(normalized.len(), 16_000);
 
         let native_rate_samples = vec![0.5f32; 16_000];
         assert_eq!(
-            samples_for_local_asr(&native_rate_samples, 16_000),
+            samples_for_local_asr(&native_rate_samples, 16_000).unwrap(),
             native_rate_samples
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn short_utterance_survives_converter_boundaries() {
+        let short = vec![0.1f32; 48_000 / 4];
+        let converted = samples_for_local_asr(&short, 48_000).unwrap();
+        assert_eq!(converted.len(), 4_000);
+        assert!(converted.iter().any(|sample| sample.abs() > 0.0));
     }
 
     #[test]
@@ -1276,26 +1372,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_claim_rejected_while_a_task_is_registered() {
+    async fn second_reservation_is_rejected_before_a_task_is_spawned() {
         let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("Capture already running").unwrap();
         let first = tokio::spawn(std::future::pending::<()>());
-        slot.claim(first, "Capture already running").unwrap();
+        reservation.install(first).unwrap();
 
-        let second = tokio::spawn(async {});
         assert_eq!(
-            slot.claim(second, "Capture already running"),
-            Err("Capture already running".to_string())
+            slot.reserve("Capture already running").err(),
+            Some("Capture already running".to_string())
         );
-        // The winner's entry is untouched by the rejected claim.
         assert!(slot.take().unwrap().is_some());
+    }
+
+    #[test]
+    fn dropped_reservation_reopens_the_slot_after_setup_failure() {
+        let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("busy").unwrap();
+
+        drop(reservation);
+
+        assert!(slot.reserve("busy").is_ok());
     }
 
     #[tokio::test]
     async fn owner_cleanup_releases_the_slot() {
         let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("busy").unwrap();
         let task = tokio::spawn(async {});
         let id = task.id();
-        slot.claim(task, "busy").unwrap();
+        reservation.install(task).unwrap();
 
         slot.release_if_owned(id);
 
@@ -1305,13 +1411,15 @@ mod tests {
     #[tokio::test]
     async fn stale_task_cleanup_does_not_clobber_the_newer_captures_slot() {
         let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("busy").unwrap();
         let first = tokio::spawn(std::future::pending::<()>());
         let stale_id = first.id();
-        slot.claim(first, "busy").unwrap();
+        reservation.install(first).unwrap();
         slot.take().unwrap(); // first capture stopped
 
+        let reservation = slot.reserve("busy").unwrap();
         let second = tokio::spawn(std::future::pending::<()>());
-        slot.claim(second, "busy").unwrap();
+        reservation.install(second).unwrap();
 
         // The first task's exit cleanup runs late (after the slot was
         // reclaimed): it must not clear the newer task's entry.
@@ -1321,13 +1429,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_skips_a_task_that_finished_before_the_claim() {
+    async fn install_skips_a_task_that_finished_before_registration() {
         let slot = TaskSlot::<()>::new();
-        // A capture whose stream ends before the claim must not leave a
-        // finished task in the slot ("Capture already running" forever).
+        let reservation = slot.reserve("busy").unwrap();
         let task = tokio::spawn(async {});
-        tokio::task::yield_now().await; // let the spawned task run to completion
-        slot.claim(task, "busy").unwrap();
+        tokio::task::yield_now().await;
+        reservation.install(task).unwrap();
 
         assert!(slot.take().unwrap().is_none());
     }
@@ -1423,10 +1530,7 @@ mod tests {
     fn session_wav_is_written_with_restrictive_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = std::env::temp_dir().join(format!(
-            "aileron-perms-{}.wav",
-            uuid::Uuid::new_v4()
-        ));
+        let path = std::env::temp_dir().join(format!("aileron-perms-{}.wav", uuid::Uuid::new_v4()));
         let samples = vec![0.1f32, -0.2, 0.3];
 
         write_f32_samples_to_wav(16_000, &samples, &path).unwrap();
@@ -1453,14 +1557,12 @@ pub struct MicDictationState {
 }
 
 #[tauri::command]
-pub async fn start_mic_dictation(
-    app: AppHandle,
-    device_id: Option<String>,
-) -> Result<(), String> {
+pub async fn start_mic_dictation(app: AppHandle, device_id: Option<String>) -> Result<(), String> {
     let state = app.state::<MicDictationState>();
+    let reservation = state.task.reserve("Dictation already running")?;
 
     // Fail fast if Silero isn't available: dictation quality depends on it.
-    if get_silero_vad_probability(&app, &[0.0f32; 512]).is_none() {
+    if get_silero_vad_probability_batch(&app, &[0.0f32; 512]).is_none() {
         return Err(
             "Voice detection isn't ready — initialize speech recognition first".to_string(),
         );
@@ -1494,9 +1596,7 @@ pub async fn start_mic_dictation(
         state.task.release_if_owned(tokio::task::id());
     });
 
-    // Same atomic claim as the system-audio slot: the check and the store
-    // share one lock acquisition, so concurrent starts cannot double-spawn.
-    state.task.claim(task, "Dictation already running")?;
+    reservation.install(task)?;
     Ok(())
 }
 
@@ -1539,23 +1639,21 @@ async fn run_mic_dictation(
         if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
-        let chunk = match tokio::time::timeout(
-            tokio::time::Duration::from_millis(200),
-            rx.recv(),
-        )
-        .await
-        {
-            Ok(Some(c)) => c,
-            Ok(None) => break,  // stream thread ended
-            Err(_) => continue, // timeout: re-check stop flag
-        };
+        let chunk =
+            match tokio::time::timeout(tokio::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(c)) => c,
+                Ok(None) => break,  // stream thread ended
+                Err(_) => continue, // timeout: re-check stop flag
+            };
         pending.extend_from_slice(&chunk);
 
         while pending.len() >= hop {
             let hop_chunk: Vec<f32> = pending.drain(..hop).collect();
-            let chunk_16k = resample_linear(&hop_chunk, sr as usize, SILERO_SAMPLE_RATE);
-            if let Some(p) = get_silero_vad_probability(&app, &chunk_16k) {
-                prob = Some(p);
+            #[cfg(target_os = "macos")]
+            if let Ok(chunk_16k) = samples_for_local_asr(&hop_chunk, sr) {
+                if let Some(probability) = get_silero_vad_probability_batch(&app, &chunk_16k) {
+                    prob = Some(probability);
+                }
             }
             let is_speech = match prob {
                 Some(p) => silero_is_speech(in_speech, p),
@@ -1604,12 +1702,11 @@ async fn run_mic_dictation(
 }
 
 fn emit_dictation_utterance(app: &AppHandle, sr: u32, samples: &[f32], config: &VadConfig) {
-    let cleaned = apply_noise_gate(samples, config.noise_gate_threshold);
-    let normalized = normalize_audio_level(&cleaned, 0.1);
-    if normalized.is_empty() {
+    let processed = prepare_utterance(samples, config.noise_gate_threshold).processed;
+    if processed.is_empty() {
         return;
     }
-    match samples_to_wav_b64(sr, &normalized) {
+    match samples_to_wav_b64(sr, &processed) {
         Ok(b64) => {
             let _ = app.emit("dictation-detected", serde_json::json!({ "audio": b64 }));
         }

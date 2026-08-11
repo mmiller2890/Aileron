@@ -6,6 +6,7 @@ import {
 } from "@/config";
 import { getPlatform, safeLocalStorage, trackAppStart, isMacOS } from "@/lib";
 import { getShortcutsConfig } from "@/lib/storage";
+import { normalizeFluidAudioModel } from "@/lib/fluidaudio-model";
 import {
   saveSecret,
   getSecret,
@@ -28,9 +29,7 @@ import {
 } from "@/lib/provider-sync";
 
 // Provider variable names are stored/compared uppercase.
-function uppercaseKeys(
-  vars: Record<string, unknown>
-): Record<string, string> {
+function uppercaseKeys(vars: Record<string, unknown>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(vars)) {
     out[k.toUpperCase()] = v as string;
@@ -81,7 +80,7 @@ import {
 
 const validateAndProcessCurlProviders = (
   providersJson: string,
-  providerType: "AI" | "STT"
+  providerType: "AI" | "STT",
 ): TYPE_PROVIDER[] => {
   try {
     const parsed = JSON.parse(providersJson);
@@ -118,7 +117,7 @@ const AppContext = createContext<IContextType | undefined>(undefined);
 export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [systemPrompt, setSystemPrompt] = useState<string>(
     safeLocalStorage.getItem(STORAGE_KEYS.SYSTEM_PROMPT) ||
-      DEFAULT_SYSTEM_PROMPT
+      DEFAULT_SYSTEM_PROMPT,
   );
 
   const [selectedAudioDevices, setSelectedAudioDevices] = useState<{
@@ -126,7 +125,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     output: { id: string; name: string };
   }>(() => {
     const savedDevices = safeLocalStorage.getItem(
-      STORAGE_KEYS.SELECTED_AUDIO_DEVICES
+      STORAGE_KEYS.SELECTED_AUDIO_DEVICES,
     );
     if (savedDevices) {
       try {
@@ -144,7 +143,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
   // AI Providers
   const [customAiProviders, setCustomAiProviders] = useState<TYPE_PROVIDER[]>(
-    []
+    [],
   );
 
   const [selectedAIProvider, setSelectedAIProvider] = useState<{
@@ -154,12 +153,17 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
   // STT Providers
   const [customSttProviders, setCustomSttProviders] = useState<TYPE_PROVIDER[]>(
-    []
+    [],
   );
   const [selectedSttProvider, setSelectedSttProvider] = useState<{
     provider: string;
     variables: Record<string, string>;
-  }>({ provider: isMacOS() ? "local-fluidaudio" : "local-whisper", variables: { MODEL: "openai/whisper-large-v3-turbo" } });
+  }>({
+    provider: isMacOS() ? "local-fluidaudio" : "local-whisper",
+    variables: {
+      MODEL: isMacOS() ? "v3" : "openai/whisper-large-v3-turbo",
+    },
+  });
 
   const [screenshotConfiguration, setScreenshotConfiguration] =
     useState<ScreenshotConfig>({
@@ -170,7 +174,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
   // Unified Customizable State
   const [customizable, setCustomizable] = useState<CustomizableState>(
-    DEFAULT_CUSTOMIZABLE_STATE
+    DEFAULT_CUSTOMIZABLE_STATE,
   );
   const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(true);
   const [supportsImages, setSupportsImagesState] = useState<boolean>(() => {
@@ -224,13 +228,13 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   if (!aiStartupSecretReaderRef.current) {
     aiStartupSecretReaderRef.current = createStartupProviderSecretReader(
       storedProviderId(STORAGE_KEYS.SELECTED_AI_PROVIDER),
-      providerSecretStore
+      providerSecretStore,
     );
   }
   if (!sttStartupSecretReaderRef.current) {
     sttStartupSecretReaderRef.current = createStartupProviderSecretReader(
       storedProviderId(STORAGE_KEYS.SELECTED_STT_PROVIDER),
-      providerSecretStore
+      providerSecretStore,
     );
   }
   const aiSecretWriterRef = useRef(
@@ -244,7 +248,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       if (job.emit && lastAiPersistRef.current === job.serialized) {
         emitProviderConfigChanged();
       }
-    })
+    }),
   );
   const sttSecretWriterRef = useRef(
     createSerializedAsyncWriter<{
@@ -257,7 +261,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       if (job.emit && lastSttPersistRef.current === job.serialized) {
         emitProviderConfigChanged();
       }
-    })
+    }),
   );
 
   /**
@@ -286,7 +290,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const loadData = () => {
     // Load system prompt
     const savedSystemPrompt = safeLocalStorage.getItem(
-      STORAGE_KEYS.SYSTEM_PROMPT
+      STORAGE_KEYS.SYSTEM_PROMPT,
     );
     if (savedSystemPrompt) {
       setSystemPrompt(savedSystemPrompt || DEFAULT_SYSTEM_PROMPT);
@@ -294,7 +298,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
     // Load screenshot configuration
     const savedScreenshotConfig = safeLocalStorage.getItem(
-      STORAGE_KEYS.SCREENSHOT_CONFIG
+      STORAGE_KEYS.SCREENSHOT_CONFIG,
     );
     if (savedScreenshotConfig) {
       try {
@@ -323,7 +327,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
     // Load custom STT providers
     const savedStt = safeLocalStorage.getItem(
-      STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS
+      STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS,
     );
     let sttList: TYPE_PROVIDER[] = [];
     if (savedStt) {
@@ -334,7 +338,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     // Load selected AI provider (empty until the user picks one on first run).
     // Provider id lives in localStorage; secret variables live in the keychain.
     const savedSelectedAi = safeLocalStorage.getItem(
-      STORAGE_KEYS.SELECTED_AI_PROVIDER
+      STORAGE_KEYS.SELECTED_AI_PROVIDER,
     );
     if (savedSelectedAi) {
       try {
@@ -360,25 +364,27 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
             // stored before we drop the plaintext copy).
             await saveSecret(
               providerSecretKey(AI_PROVIDER_SECRET_KEY, provider),
-              JSON.stringify(inlineVars)
+              JSON.stringify(inlineVars),
             );
             await removeSecret(AI_PROVIDER_SECRET_KEY);
             if (aiLoadGuardRef.current.isCurrent(loadToken)) {
               safeLocalStorage.setItem(
                 STORAGE_KEYS.SELECTED_AI_PROVIDER,
-                JSON.stringify({ provider })
+                JSON.stringify({ provider }),
               );
             }
           } else {
             const secret = await aiStartupSecretReaderRef.current!.read(
               AI_PROVIDER_SECRET_KEY,
-              provider
+              provider,
             );
             if (secret) {
               try {
                 const vars = uppercaseKeys(JSON.parse(secret));
                 setSelectedAIProvider((prev) => {
-                  if (!aiLoadGuardRef.current.canApply(loadToken, prev.provider)) {
+                  if (
+                    !aiLoadGuardRef.current.canApply(loadToken, prev.provider)
+                  ) {
                     return prev;
                   }
                   const next = { ...prev, variables: vars };
@@ -399,18 +405,28 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     // Load selected STT provider (provider id in localStorage, secrets in the
     // keychain — same scheme as the AI provider above).
     const savedSelectedStt = safeLocalStorage.getItem(
-      STORAGE_KEYS.SELECTED_STT_PROVIDER
+      STORAGE_KEYS.SELECTED_STT_PROVIDER,
     );
     if (savedSelectedStt) {
       try {
         const parsed = JSON.parse(savedSelectedStt);
-        const inlineVars = parsed.variables
+        const provider = parsed.provider ?? "";
+        const storedInlineVars = parsed.variables
           ? uppercaseKeys(parsed.variables)
           : undefined;
-        const provider = parsed.provider ?? "";
+        const inlineVars = storedInlineVars
+          ? provider === "local-fluidaudio"
+            ? {
+                ...storedInlineVars,
+                MODEL: normalizeFluidAudioModel(storedInlineVars?.MODEL),
+              }
+            : storedInlineVars
+          : undefined;
         const loadedStt = {
           provider,
-          variables: inlineVars ?? {},
+          variables:
+            inlineVars ??
+            (provider === "local-fluidaudio" ? { MODEL: "v3" } : {}),
         };
         const loadToken = sttLoadGuardRef.current.begin(provider);
         markSttPersisted(loadedStt);
@@ -419,29 +435,33 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           if (inlineVars && Object.keys(inlineVars).length) {
             await saveSecret(
               providerSecretKey(STT_PROVIDER_SECRET_KEY, provider),
-              JSON.stringify(inlineVars)
+              JSON.stringify(inlineVars),
             );
             await removeSecret(STT_PROVIDER_SECRET_KEY);
             if (sttLoadGuardRef.current.isCurrent(loadToken)) {
               safeLocalStorage.setItem(
                 STORAGE_KEYS.SELECTED_STT_PROVIDER,
-                JSON.stringify({ provider })
+                JSON.stringify({ provider }),
               );
             }
           } else {
             const secret = await sttStartupSecretReaderRef.current!.read(
               STT_PROVIDER_SECRET_KEY,
-              provider
+              provider,
             );
             if (secret) {
               try {
-                const vars = uppercaseKeys(JSON.parse(secret));
+                const storedVars = uppercaseKeys(JSON.parse(secret));
+                const vars =
+                  provider === "local-fluidaudio"
+                    ? {
+                        ...storedVars,
+                        MODEL: normalizeFluidAudioModel(storedVars.MODEL),
+                      }
+                    : storedVars;
                 setSelectedSttProvider((prev) => {
                   if (
-                    !sttLoadGuardRef.current.canApply(
-                      loadToken,
-                      prev.provider
-                    )
+                    !sttLoadGuardRef.current.canApply(loadToken, prev.provider)
                   ) {
                     return prev;
                   }
@@ -458,7 +478,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       } catch {
         setSelectedSttProvider({
           provider: isMacOS() ? "local-fluidaudio" : "local-whisper",
-          variables: { MODEL: "openai/whisper-large-v3-turbo" },
+          variables: {
+            MODEL: isMacOS() ? "v3" : "openai/whisper-large-v3-turbo",
+          },
         });
       }
     }
@@ -492,7 +514,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
     // Load selected audio devices
     const savedAudioDevices = safeLocalStorage.getItem(
-      STORAGE_KEYS.SELECTED_AUDIO_DEVICES
+      STORAGE_KEYS.SELECTED_AUDIO_DEVICES,
     );
     if (savedAudioDevices) {
       try {
@@ -552,7 +574,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       // openai-whisper) on every launch. The saved id is read from storage,
       // not from the first-render closure, which never saw the loaded value.
       const savedSttProvider = storedProviderId(
-        STORAGE_KEYS.SELECTED_STT_PROVIDER
+        STORAGE_KEYS.SELECTED_STT_PROVIDER,
       );
       const sttPlatform = isMacOS() ? "macos" : "other";
       if (sttPlatform === "macos") {
@@ -564,7 +586,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
             shouldFallbackSttProvider(
               savedSttProvider,
               sttPlatform,
-              status.is_supported
+              status.is_supported,
             )
           ) {
             onSetSelectedSttProvider({ provider: "groq", variables: {} });
@@ -607,7 +629,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     const initializeAutostart = async () => {
       try {
         const autostartInitialized = safeLocalStorage.getItem(
-          STORAGE_KEYS.AUTOSTART_INITIALIZED
+          STORAGE_KEYS.AUTOSTART_INITIALIZED,
         );
 
         // Only apply autostart on the very first launch
@@ -687,12 +709,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         e.key === STORAGE_KEYS.SELECTED_AUDIO_DEVICES ||
         // Provider *variables* (model name, API key) live under their own
         // keys, so a change to them never touches the provider-id key above.
-        e.key?.startsWith(
-          `secure_fallback_${AI_PROVIDER_SECRET_KEY}:`
-        ) ||
-        e.key?.startsWith(
-          `secure_fallback_${STT_PROVIDER_SECRET_KEY}:`
-        )
+        e.key?.startsWith(`secure_fallback_${AI_PROVIDER_SECRET_KEY}:`) ||
+        e.key?.startsWith(`secure_fallback_${STT_PROVIDER_SECRET_KEY}:`)
       ) {
         if (reloadTimer) clearTimeout(reloadTimer);
         reloadTimer = setTimeout(() => {
@@ -737,7 +755,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     const checkImageSupport = async () => {
       // Hosted Assistant API has been removed; always evaluate custom provider image support.
       const provider = allAiProviders.find(
-        (p) => p.id === selectedAIProvider.provider
+        (p) => p.id === selectedAIProvider.provider,
       );
       if (provider) {
         const hasImageSupport = provider.curl?.includes("{{IMAGE}}") ?? false;
@@ -761,14 +779,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
     const decision = decideProviderPersist(
       lastAiPersistRef.current,
-      selectedAIProvider
+      selectedAIProvider,
     );
     if (decision.skip) return;
     lastAiPersistRef.current = decision.serialized;
 
     safeLocalStorage.setItem(
       STORAGE_KEYS.SELECTED_AI_PROVIDER,
-      JSON.stringify({ provider: selectedAIProvider.provider })
+      JSON.stringify({ provider: selectedAIProvider.provider }),
     );
     if (!decision.writeSecret) return;
 
@@ -776,7 +794,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       .enqueue({
         key: providerSecretKey(
           AI_PROVIDER_SECRET_KEY,
-          selectedAIProvider.provider
+          selectedAIProvider.provider,
         ),
         value: JSON.stringify(selectedAIProvider.variables || {}),
         serialized: decision.serialized,
@@ -793,14 +811,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
     const decision = decideProviderPersist(
       lastSttPersistRef.current,
-      selectedSttProvider
+      selectedSttProvider,
     );
     if (decision.skip) return;
     lastSttPersistRef.current = decision.serialized;
 
     safeLocalStorage.setItem(
       STORAGE_KEYS.SELECTED_STT_PROVIDER,
-      JSON.stringify({ provider: selectedSttProvider.provider })
+      JSON.stringify({ provider: selectedSttProvider.provider }),
     );
     if (!decision.writeSecret) return;
 
@@ -808,7 +826,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       .enqueue({
         key: providerSecretKey(
           STT_PROVIDER_SECRET_KEY,
-          selectedSttProvider.provider
+          selectedSttProvider.provider,
         ),
         value: JSON.stringify(selectedSttProvider.variables || {}),
         serialized: decision.serialized,
@@ -839,13 +857,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       !allSttProviders.some((p) => p.id === selectedSttProvider.provider)
     ) {
       const fallback = isMacOS()
-        ? { provider: "local-fluidaudio" as const, variables: {} as Record<string, string> }
+        ? {
+            provider: "local-fluidaudio" as const,
+            variables: { MODEL: "v3" } as Record<string, string>,
+          }
         : {
             provider: "local-whisper" as const,
-            variables: { MODEL: "openai/whisper-large-v3-turbo" } as Record<string, string>,
+            variables: { MODEL: "openai/whisper-large-v3-turbo" } as Record<
+              string,
+              string
+            >,
           };
       console.warn(
-        `Saved STT provider "${selectedSttProvider.provider}" no longer exists; falling back to "${fallback.provider}"`
+        `Saved STT provider "${selectedSttProvider.provider}" no longer exists; falling back to "${fallback.provider}"`,
       );
       setSelectedSttProvider(fallback);
     }
@@ -888,18 +912,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     markAiPersisted(loadingValue);
     safeLocalStorage.setItem(
       STORAGE_KEYS.SELECTED_AI_PROVIDER,
-      JSON.stringify({ provider })
+      JSON.stringify({ provider }),
     );
     setSelectedAIProvider(loadingValue);
 
     void hydrateProviderSwitch({
       provider,
       readSecret: () =>
-        readScopedProviderSecret(
-          AI_PROVIDER_SECRET_KEY,
-          provider,
-          getSecret
-        ),
+        readScopedProviderSecret(AI_PROVIDER_SECRET_KEY, provider, getSecret),
       canApply: () => aiLoadGuardRef.current.isCurrent(loadToken),
       parseVariables: (secret) => uppercaseKeys(JSON.parse(secret)),
       apply: (next) => {
@@ -925,34 +945,47 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
     const isProviderSwitch = provider !== selectedSttProvider.provider;
     const hasProvidedVariables = Object.keys(variables).length > 0;
+    const normalizedVariables =
+      provider === "local-fluidaudio"
+        ? {
+            ...variables,
+            MODEL: normalizeFluidAudioModel(variables.MODEL),
+          }
+        : variables;
     if (!isProviderSwitch || hasProvidedVariables || !provider) {
       sttLoadGuardRef.current.invalidate();
-      setSelectedSttProvider({ provider, variables });
+      setSelectedSttProvider({ provider, variables: normalizedVariables });
       return;
     }
 
     const loadToken = sttLoadGuardRef.current.begin(provider);
-    const loadingValue = { provider, variables: {} };
+    const loadingValue = { provider, variables: normalizedVariables };
     markSttPersisted(loadingValue);
     safeLocalStorage.setItem(
       STORAGE_KEYS.SELECTED_STT_PROVIDER,
-      JSON.stringify({ provider })
+      JSON.stringify({ provider }),
     );
     setSelectedSttProvider(loadingValue);
 
     void hydrateProviderSwitch({
       provider,
       readSecret: () =>
-        readScopedProviderSecret(
-          STT_PROVIDER_SECRET_KEY,
-          provider,
-          getSecret
-        ),
+        readScopedProviderSecret(STT_PROVIDER_SECRET_KEY, provider, getSecret),
       canApply: () => sttLoadGuardRef.current.isCurrent(loadToken),
       parseVariables: (secret) => uppercaseKeys(JSON.parse(secret)),
       apply: (next) => {
-        markSttPersisted(next);
-        setSelectedSttProvider(next);
+        const normalizedNext =
+          provider === "local-fluidaudio"
+            ? {
+                ...next,
+                variables: {
+                  ...next.variables,
+                  MODEL: normalizeFluidAudioModel(next.variables.MODEL),
+                },
+              }
+            : next;
+        markSttPersisted(normalizedNext);
+        setSelectedSttProvider(normalizedNext);
       },
       announce: emitProviderConfigChanged,
     });

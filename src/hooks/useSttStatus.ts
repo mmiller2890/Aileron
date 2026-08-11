@@ -1,9 +1,11 @@
 import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { FluidAudioModel } from "@/lib/fluidaudio-model";
 
 export interface SttStatus {
   asrReady: boolean;
+  modelVersion: FluidAudioModel | null;
   vadReady: boolean;
   diarizationReady: boolean;
   isSupported: boolean;
@@ -14,6 +16,7 @@ export interface SttStatus {
 export function useSttStatus() {
   const [status, setStatus] = useState<SttStatus>({
     asrReady: false,
+    modelVersion: null,
     vadReady: false,
     diarizationReady: false,
     isSupported: false,
@@ -25,6 +28,7 @@ export function useSttStatus() {
     try {
       const result = await invoke<{
         asr_ready: boolean;
+        model_version: FluidAudioModel | null;
         vad_ready: boolean;
         diarization_ready: boolean;
         is_supported: boolean;
@@ -32,6 +36,7 @@ export function useSttStatus() {
       setStatus((prev) => ({
         ...prev,
         asrReady: result.asr_ready,
+        modelVersion: result.model_version,
         vadReady: result.vad_ready,
         diarizationReady: result.diarization_ready,
         isSupported: result.is_supported,
@@ -48,10 +53,10 @@ export function useSttStatus() {
     }
   }, []);
 
-  const init = useCallback(async () => {
+  const init = useCallback(async (modelVersion: FluidAudioModel = "v3") => {
     setStatus((prev) => ({ ...prev, isInitializing: true, error: null }));
     try {
-      await invoke("stt_init");
+      await invoke("stt_init", { modelVersion });
       await refresh();
       setStatus((prev) => ({ ...prev, isInitializing: false }));
       return true;

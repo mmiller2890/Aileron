@@ -3,6 +3,7 @@ import { useTitles, useSystemAudio } from "@/hooks";
 import { listen } from "@tauri-apps/api/event";
 import { safeLocalStorage, migrateLocalStorageToSQLite, isWindows } from "@/lib";
 import { getShortcutsConfig } from "@/lib/storage";
+import { TOGGLE_WINDOW_VISIBILITY } from "@/lib/live-session";
 import { invoke } from "@tauri-apps/api/core";
 
 export const useAppLifecycle = () => {
@@ -68,10 +69,13 @@ export const useAppLifecycle = () => {
   // WINDOWS HIDE/SHOW TOGGLE WINDOW WORKAROUND FOR SHORTCUTS
   useEffect(() => {
     const unlistenPromise = listen<boolean>(
-      "toggle-window-visibility",
+      TOGGLE_WINDOW_VISIBILITY,
       (event) => {
         if (typeof event.payload === "boolean" && isWindows()) {
-          setIsHidden(!event.payload);
+          // Payload IS `isHidden` (`true` = now hidden) — see
+          // TOGGLE_WINDOW_VISIBILITY. Negating it here showed the bar on the
+          // hide shortcut and hid it on the show shortcut.
+          setIsHidden(event.payload);
           // find popover open and close it
           const popover = document.getElementById("popover-content");
           // set display to none, change data-state to closed

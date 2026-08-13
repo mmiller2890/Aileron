@@ -545,7 +545,10 @@ export function useSystemAudio() {
     try {
       if (!isContinuousMode || !isRecordingInContinuousMode) return;
 
-      await invoke<string>("stop_system_audio_capture");
+      // `discard: true` is what separates this from stop-and-send: without it
+      // the capture task still emits the take, and the transcript gets the
+      // utterance the user just threw away.
+      await invoke<string>("stop_system_audio_capture", { discard: true });
 
       setRecordingProgress(0);
       setIsProcessing(false);

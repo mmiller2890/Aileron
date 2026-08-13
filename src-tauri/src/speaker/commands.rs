@@ -438,8 +438,11 @@ pub async fn start_system_audio_capture(
     }
 
     state.stop_flag.store(false, Ordering::Release);
+    // A discard applies to one take only; every new take starts wanted.
+    state.discard_take.store(false, Ordering::Release);
     let stop_flag = state.stop_flag.clone();
     let stop_requested = state.stop_flag.clone();
+    let discard_flag = state.discard_take.clone();
 
     let task = tokio::spawn(async move {
         let session_path = if vad_config.enabled {
@@ -453,7 +456,15 @@ pub async fn start_system_audio_capture(
             )
             .await
         } else {
-            run_continuous_capture(app_clone.clone(), stream, sr, vad_config, stop_flag).await;
+            run_continuous_capture(
+                app_clone.clone(),
+                stream,
+                sr,
+                vad_config,
+                stop_flag,
+                discard_flag,
+            )
+            .await;
             None
         };
 
@@ -807,6 +818,24 @@ async fn run_vad_capture(
     session_path
 }
 
+/// What a finished manual take should do with the audio it collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TakeAction {
+    Emit,
+    Drop,
+    ReportNoAudio,
+}
+
+fn finish_take_action(discarded: bool, has_audio: bool) -> TakeAction {
+    if discarded {
+        TakeAction::Drop
+    } else if has_audio {
+        TakeAction::Emit
+    } else {
+        TakeAction::ReportNoAudio
+    }
+}
+
 // Continuous capture (VAD disabled)
 async fn run_continuous_capture(
     app: AppHandle,
@@ -814,6 +843,7 @@ async fn run_continuous_capture(
     sr: u32,
     config: VadConfig,
     stop_flag: Arc<AtomicBool>,
+    discard_flag: Arc<AtomicBool>,
 ) -> Option<std::path::PathBuf> {
     let mut stream = stream;
     let max_samples = (sr as u64 * config.max_recording_duration_secs) as usize;
@@ -907,22 +937,31 @@ async fn run_continuous_capture(
     // Clean up event listener (CRITICAL)
     app.unlisten(stop_listener);
 
-    // Process and emit audio
-    if !audio_buffer.is_empty() {
-        // let duration = start_time.elapsed().as_secs_f32();
-
-        emit_speech_detected(
-            &app,
-            sr,
-            &audio_buffer,
-            config.noise_gate_threshold,
-            config.compare_preprocessing,
-            0.0,
-            0.0,
-        );
-    } else {
-        warn!("No audio captured in continuous mode");
-        let _ = app.emit("audio-encoding-error", "No audio recorded");
+    // Process and emit audio. The discard flag is stored before the stop flag
+    // that broke the loop above, so it is visible here for the take the user
+    // just discarded.
+    match finish_take_action(
+        discard_flag.load(Ordering::Acquire),
+        !audio_buffer.is_empty(),
+    ) {
+        TakeAction::Emit => {
+            emit_speech_detected(
+                &app,
+                sr,
+                &audio_buffer,
+                config.noise_gate_threshold,
+                config.compare_preprocessing,
+                0.0,
+                0.0,
+            );
+        }
+        TakeAction::Drop => {
+            let _ = app.emit("speech-discarded", "Recording discarded");
+        }
+        TakeAction::ReportNoAudio => {
+            warn!("No audio captured in continuous mode");
+            let _ = app.emit("audio-encoding-error", "No audio recorded");
+        }
     }
 
     let _ = app.emit("continuous-recording-stopped", ());
@@ -1088,8 +1127,15 @@ async fn await_capture_shutdown(
 #[tauri::command]
 pub async fn stop_system_audio_capture(
     app: AppHandle,
+    discard: Option<bool>,
 ) -> Result<Option<std::path::PathBuf>, String> {
     let state = app.state::<crate::AudioState>();
+    // Store the intent BEFORE the stop flag: the capture loop breaks on the
+    // stop flag and then reads this, so ordering it this way is what makes the
+    // discard visible to the take being stopped.
+    state
+        .discard_take
+        .store(discard.unwrap_or(false), Ordering::Release);
     state.stop_flag.store(true, Ordering::Release);
 
     // Take the task and await it so the capture function can finish writing
@@ -1343,6 +1389,25 @@ mod tests {
         assert!(silero_is_speech(true, 0.35));
         assert!(!silero_is_speech(true, 0.34));
         assert!(!silero_is_speech(true, 0.10));
+    }
+
+    #[test]
+    fn discarded_take_is_dropped_rather_than_emitted() {
+        // "Discard" on a manual take must drop the audio outright: emitting it
+        // means the frontend transcribes it, appends it to the transcript and
+        // may answer it — i.e. discard behaving exactly like stop-and-send.
+        assert_eq!(finish_take_action(true, true), TakeAction::Drop);
+        assert_eq!(finish_take_action(true, false), TakeAction::Drop);
+    }
+
+    #[test]
+    fn kept_take_with_audio_is_emitted() {
+        assert_eq!(finish_take_action(false, true), TakeAction::Emit);
+    }
+
+    #[test]
+    fn kept_take_without_audio_reports_the_failure() {
+        assert_eq!(finish_take_action(false, false), TakeAction::ReportNoAudio);
     }
 
     #[tokio::test]

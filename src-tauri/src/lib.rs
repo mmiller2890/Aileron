@@ -21,6 +21,9 @@ pub struct AudioState {
     vad_config: Arc<Mutex<VadConfig>>,
     is_capturing: Arc<Mutex<bool>>,
     stop_flag: Arc<AtomicBool>,
+    /// Set alongside `stop_flag` when the user discards a manual take, so the
+    /// capture task drops the audio instead of emitting it for transcription.
+    discard_take: Arc<AtomicBool>,
     /// Session WAV left behind by a capture that ended without a stop request.
     /// That task's `JoinHandle` is already gone, so its return value can no
     /// longer carry the path to `stop_system_audio_capture`.
@@ -34,6 +37,7 @@ impl Default for AudioState {
             vad_config: Arc::new(Mutex::new(VadConfig::default())),
             is_capturing: Arc::new(Mutex::new(false)),
             stop_flag: Arc::new(AtomicBool::new(false)),
+            discard_take: Arc::new(AtomicBool::new(false)),
             orphaned_session_path: Arc::new(Mutex::new(None)),
         }
     }

@@ -3,8 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { fetchSTT } from "@/lib";
 import { useApp } from "@/contexts";
-
-type DictationStatus = "idle" | "starting" | "listening" | "transcribing";
+import type { DictationStatus } from "@/lib/dictation-sync";
 
 /**
  * Native mic dictation (macOS): drives the Rust cpal + Silero pipeline via

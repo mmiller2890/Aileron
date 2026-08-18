@@ -27,13 +27,27 @@ export const Audio = ({
   const speechProviderStatus = selectedSttProvider.provider;
   const configured = Boolean(localApiEnabled || speechProviderStatus);
 
+  // Configured on macOS: the native dictation button stays mounted and owns
+  // the arm/disarm toggle itself. Gating it behind `enableVAD` the way the
+  // web VAD path does cost a click — the first press only flipped the flag
+  // and swapped this button in, and both states draw the same idle mic, so
+  // it read as a dead button.
+  if (configured && isMacOS()) {
+    return (
+      <MicDictationButton
+        submit={submit}
+        setState={setState}
+        enableVAD={enableVAD}
+        setEnableVAD={setEnableVAD}
+      />
+    );
+  }
+
   // Configured + armed: render the actual voice-input control. It is NOT the
   // popover trigger — the warning popover only exists for the unconfigured
   // state, and Radix's asChild cannot wrap a Suspense boundary anyway.
   if (configured && enableVAD) {
-    return isMacOS() ? (
-      <MicDictationButton submit={submit} setState={setState} />
-    ) : (
+    return (
       <Suspense
         fallback={
           <Button size="icon" title="Loading voice input…">

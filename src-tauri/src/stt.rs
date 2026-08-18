@@ -4,7 +4,7 @@ use serde_json;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// How many recent utterances to keep addressable by id.
 ///
@@ -942,6 +942,26 @@ pub async fn stt_get_status(state: State<'_, SttState>) -> Result<serde_json::Va
     state.get_status()
 }
 
+/// Bring Silero VAD up unless it already is.
+///
+/// Idempotent — `init_vad_inner` returns early once a model is ready — so any
+/// feature that needs VAD can call this instead of assuming some other code
+/// path already initialized it.
+#[cfg(target_os = "macos")]
+pub async fn ensure_vad_ready(app: &AppHandle, threshold: f32) -> Result<(), String> {
+    let (streaming_vad, batch_vad) = {
+        let state = app.state::<SttState>();
+        (state.streaming_vad.clone(), state.batch_vad.clone())
+    };
+    let app_for_task = app.clone();
+    tokio::task::spawn_blocking(move || {
+        SttState::init_vad_inner(streaming_vad, app_for_task.clone(), threshold)?;
+        SttState::init_vad_inner(batch_vad, app_for_task, threshold)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn stt_init_vad(
     state: State<'_, SttState>,
@@ -953,14 +973,8 @@ pub async fn stt_init_vad(
 
     #[cfg(target_os = "macos")]
     {
-        let streaming_vad = state.streaming_vad.clone();
-        let batch_vad = state.batch_vad.clone();
-        tokio::task::spawn_blocking(move || {
-            SttState::init_vad_inner(streaming_vad, app.clone(), threshold)?;
-            SttState::init_vad_inner(batch_vad, app, threshold)
-        })
-        .await
-        .map_err(|e| e.to_string())?
+        let _ = state;
+        ensure_vad_ready(&app, threshold).await
     }
 }
 

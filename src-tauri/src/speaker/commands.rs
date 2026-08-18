@@ -1626,7 +1626,16 @@ pub async fn start_mic_dictation(app: AppHandle, device_id: Option<String>) -> R
     let state = app.state::<MicDictationState>();
     let reservation = state.task.reserve("Dictation already running")?;
 
-    // Fail fast if Silero isn't available: dictation quality depends on it.
+    // Dictation quality depends on Silero, but it must not depend on a system
+    // audio capture having run first. `stt_init_vad` is called from that path
+    // only, so on a fresh session VAD was never up and every mic click failed
+    // here — with the error surfacing as nothing louder than a red mic icon.
+    // Bring VAD up on demand, then apply the original guard unchanged.
+    #[cfg(target_os = "macos")]
+    if get_silero_vad_probability_batch(&app, &[0.0f32; 512]).is_none() {
+        crate::stt::ensure_vad_ready(&app, SILERO_POSITIVE_THRESHOLD).await?;
+    }
+
     if get_silero_vad_probability_batch(&app, &[0.0f32; 512]).is_none() {
         return Err(
             "Voice detection isn't ready — initialize speech recognition first".to_string(),

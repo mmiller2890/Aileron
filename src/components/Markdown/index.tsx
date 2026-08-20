@@ -10,17 +10,30 @@ interface MarkdownRendererProps {
   isStreaming?: boolean;
 }
 
-const rehypePlugins = Object.values(defaultRehypePlugins).map((plugin) =>
-  Array.isArray(plugin) && plugin[0] === harden
-    ? [
-        harden,
-        {
-          ...(plugin[1] as Record<string, unknown>),
-          allowedProtocols: ["http:", "https:", "mailto:"],
-        },
-      ]
-    : plugin
-);
+const rehypePlugins = Object.entries(defaultRehypePlugins)
+  .filter(([name]) => name !== "raw")
+  .map(([, plugin]) =>
+    Array.isArray(plugin) && plugin[0] === harden
+      ? [
+          harden,
+          {
+            ...(plugin[1] as Record<string, unknown>),
+            allowedProtocols: ["http:", "https:", "mailto:"],
+          },
+        ]
+      : plugin,
+  );
+
+function isSafeImageSource(src: unknown): src is string {
+  return (
+    typeof src === "string" &&
+    (/^data:image\/(?:png|gif|jpe?g|webp|avif);base64,/i.test(src) ||
+      src.startsWith("blob:") ||
+      src.startsWith("/") ||
+      src.startsWith("./") ||
+      src.startsWith("../"))
+  );
+}
 
 export function Markdown({
   children,
@@ -72,5 +85,9 @@ const COMPONENTS = {
         {children}
       </a>
     );
+  },
+  img: ({ src, node: _node, ...props }: any) => {
+    if (!isSafeImageSource(src)) return null;
+    return <img src={src} {...props} />;
   },
 };

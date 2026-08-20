@@ -48,7 +48,6 @@ describe("isBackchannel", () => {
     expect(isBackchannel("!!!")).toBe(true);
     expect(isBackchannel("…")).toBe(true);
     expect(isBackchannel("—")).toBe(true);
-    expect(isBackchannel("?")).toBe(true);
     expect(isBackchannel(".".repeat(81))).toBe(true);
   });
 
@@ -101,6 +100,7 @@ describe("isBackchannel", () => {
   });
 
   it("never drops a question-marked utterance", () => {
+    expect(isBackchannel("?")).toBe(false);
     expect(isBackchannel("Okay?")).toBe(false);
     expect(isBackchannel("Yeah?")).toBe(false);
     expect(isBackchannel("Right?")).toBe(false);

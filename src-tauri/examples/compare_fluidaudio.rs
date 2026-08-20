@@ -67,7 +67,7 @@ fn transcribe_variant(
 #[cfg(target_os = "macos")]
 fn run(args: ComparisonArgs) -> anyhow::Result<serde_json::Value> {
     let (source, sample_rate) = read_wav(&args.audio_path)?;
-    let prepared = prepare_utterance(&source, 0.0015);
+    let prepared = prepare_utterance(&source, 0.0015, true);
     let model = AsrModelVersion::parse(&args.model).map_err(anyhow::Error::msg)?;
     eprintln!("Loading FluidAudio {} model", args.model);
     let audio = FluidAudio::new()?;

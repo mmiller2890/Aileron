@@ -37,6 +37,10 @@ import { useQuickActions } from "./system-audio/useQuickActions";
 import { useContextSettings } from "./system-audio/useContextSettings";
 import { useCaptureKeyboardShortcuts } from "./system-audio/useCaptureKeyboardShortcuts";
 import { beginCaptureSession } from "./system-audio/startCaptureSession";
+import {
+  reconnectCapture,
+  requiresSessionBoundaryOnDeviceChange,
+} from "./system-audio/reconnectCapture";
 import { createAsyncListenerScope } from "@/lib/async-listener-scope";
 import {
   RecentSpeechEventFingerprints,
@@ -139,6 +143,7 @@ export function useSystemAudio() {
     isSupported,
     asrReady,
     isInitializing: isSttInitializing,
+    progress: sttModelProgress,
     init: initStt,
   } = useSttStatus();
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -898,7 +903,8 @@ export function useSystemAudio() {
 
   // The Rust VAD capture emits `audio-device-changed` when the default output
   // device switches mid-session (e.g. AirPods plugged in) — the tap would
-  // otherwise keep capturing silence. Transparently restart on the new device.
+  // otherwise keep capturing silence. FluidAudio ends the session so its WAV
+  // and utterance timestamps remain aligned; other providers can reconnect.
   // Registered once; reads everything through refs.
   useEffect(() => {
     const scope = createAsyncListenerScope();
@@ -907,19 +913,43 @@ export function useSystemAudio() {
         listen(
           "audio-device-changed",
           scope.guard(async () => {
-            if (!capturingRef.current) return;
-            setError("Audio device changed — reconnecting…");
             try {
-              await invoke("stop_system_audio_capture");
-              const providerConfig = allSttProvidersRef.current.find(
-                (p) => p.id === selectedSttProviderRef.current.provider,
-              );
-              await invoke<string>("start_system_audio_capture", {
-                vadConfig: vadConfigRef.current,
-                deviceId: null, // follow the new default device
-                streaming: providerConfig?.streaming === true,
+              if (
+                requiresSessionBoundaryOnDeviceChange(
+                  selectedSttProviderRef.current.provider,
+                )
+              ) {
+                setError("Audio device changed — finishing this session…");
+                await stopCaptureRef.current();
+                setError(
+                  "Audio device changed, so capture stopped to preserve speaker timing. Start again on the new device.",
+                );
+                return;
+              }
+              const outcome = await reconnectCapture({
+                isCapturing: () => capturingRef.current,
+                isStopping: () => captureStoppingRef.current,
+                setStopping: (value) => {
+                  captureStoppingRef.current = value;
+                },
+                stop: async () => {
+                  setError("Audio device changed — reconnecting…");
+                  await invoke("stop_system_audio_capture");
+                },
+                start: async () => {
+                  const providerConfig = allSttProvidersRef.current.find(
+                    (p) => p.id === selectedSttProviderRef.current.provider,
+                  );
+                  await invoke<string>("start_system_audio_capture", {
+                    vadConfig: vadConfigRef.current,
+                    deviceId: null,
+                    streaming: providerConfig?.streaming === true,
+                  });
+                },
               });
-              setError("");
+              if (outcome === "reconnected") {
+                setError("");
+              }
             } catch (err) {
               console.error("Failed to reconnect after device change:", err);
               setError(`Audio device changed and reconnecting failed: ${err}`);
@@ -956,7 +986,7 @@ export function useSystemAudio() {
         );
         const status = await invoke<{
           asr_ready: boolean;
-          model_version: "v2" | "v3" | null;
+          model_version: "v3" | null;
         }>("stt_get_status");
 
         if (!status.asr_ready || status.model_version !== requestedModel) {
@@ -965,7 +995,7 @@ export function useSystemAudio() {
 
         const statusAfter = await invoke<{
           asr_ready: boolean;
-          model_version: "v2" | "v3" | null;
+          model_version: "v3" | null;
           vad_ready: boolean;
           diarization_ready: boolean;
         }>("stt_get_status");
@@ -1127,6 +1157,7 @@ export function useSystemAudio() {
                 speaker_id: string;
                 start_time: number;
                 end_time: number;
+                quality_score: number;
               }>
             >("stt_diarize_file", { path: sessionPath });
             setSpeakerSegments(segments);
@@ -1521,6 +1552,7 @@ export function useSystemAudio() {
     error,
     setupRequired,
     isSttInitializing,
+    sttModelProgress,
     startCapture,
     stopCapture,
     handleSetup,

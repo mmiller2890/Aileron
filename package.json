@@ -7,6 +7,9 @@
     "name": "Local Fork"
   },
   "license": "GPL-3.0",
+  "engines": {
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
+  },
   "homepage": "",
   "repository": {},
   "bugs": {},
@@ -49,7 +52,7 @@
     "@radix-ui/react-slot": "^1.2.3",
     "@radix-ui/react-switch": "^1.2.6",
     "@radix-ui/react-tabs": "^1.1.13",
-    "@ricky0123/vad-react": "^0.0.30",
+    "@ricky0123/vad-react": "^0.0.36",
     "@tailwindcss/vite": "^4.1.12",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2.5.0",
@@ -86,7 +89,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
-    "jsdom": "^30.0.1",
+    "jsdom": "26.1.0",
     "tw-animate-css": "^1.3.6",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",

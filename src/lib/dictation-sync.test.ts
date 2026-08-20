@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dictationSyncAction } from "./dictation-sync";
+import { dictationStopError, dictationSyncAction } from "./dictation-sync";
 
 /**
  * The mic button and the global audio shortcut both toggle a single armed
@@ -33,5 +33,17 @@ describe("dictationSyncAction", () => {
   it("does nothing when disarmed and already idle", () => {
     expect(dictationSyncAction(false, "idle", false)).toBe("none");
     expect(dictationSyncAction(false, "idle", true)).toBe("none");
+  });
+});
+
+describe("dictationStopError", () => {
+  it("surfaces an unexpected native stream closure so it cannot auto-restart", () => {
+    expect(dictationStopError(true)).toBe(
+      "Microphone input stopped unexpectedly — check your input device, then try again.",
+    );
+  });
+
+  it("does not report an error for an explicit stop", () => {
+    expect(dictationStopError(false)).toBeNull();
   });
 });

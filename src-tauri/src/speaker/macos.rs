@@ -37,7 +37,7 @@ pub fn get_input_devices() -> Result<Vec<AudioDevice>> {
             let uid = device
                 .uid()
                 .map(|u| u.to_string())
-                .unwrap_or_else(|_| format!("macos_input_unknown"));
+                .unwrap_or_else(|_| "macos_input_unknown".to_string());
             let is_default = default_input_uid
                 .as_ref()
                 .map(|def| def == &uid)
@@ -85,7 +85,7 @@ pub fn get_output_devices() -> Result<Vec<AudioDevice>> {
                 let uid = device
                     .uid()
                     .map(|u| u.to_string())
-                    .unwrap_or_else(|_| format!("macos_output_unknown"));
+                    .unwrap_or_else(|_| "macos_output_unknown".to_string());
                 let is_default = default_output_uid
                     .as_ref()
                     .map(|def| def == &uid)

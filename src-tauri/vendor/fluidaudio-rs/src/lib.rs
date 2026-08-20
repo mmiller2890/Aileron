@@ -1,18 +1,18 @@
 //! # fluidaudio-rs
 //!
 //! Rust bindings for [FluidAudio](https://github.com/FluidInference/FluidAudio) -
-//! a Swift library for ASR, VAD, Speaker Diarization, and TTS on Apple platforms.
+//! a Swift library for ASR, VAD, and Speaker Diarization on Apple platforms.
 //!
 //! ## Features
 //!
-//! - **ASR (Automatic Speech Recognition)** - High-quality speech-to-text using Parakeet TDT models
+//! - **ASR (Automatic Speech Recognition)** - High-quality speech-to-text using Parakeet TDT v3
 //! - **VAD (Voice Activity Detection)** - Detect speech segments in audio
 //! - **Speaker Diarization** - Identify and label different speakers in audio
 //!
 //! ## Requirements
 //!
-//! - macOS 14+ or iOS 17+
-//! - Apple Silicon (M1/M2/M3) recommended
+//! - macOS 14+
+//! - Apple Silicon
 //!
 //! ## Example
 //!
@@ -38,7 +38,7 @@ use std::path::Path;
 use thiserror::Error;
 
 // Re-export FFI types
-pub use ffi::{AsrResult, DiarizationSegment, SystemInfo, VadFrame};
+pub use ffi::{AsrResult, DiarizationSegment, ModelProgress, SystemInfo, TokenTiming, VadFrame};
 
 pub fn resample_samples(samples: &[f32], input_rate: f64) -> Result<Vec<f32>, FluidAudioError> {
     ffi::resample_samples(samples, input_rate).map_err(FluidAudioError::from)
@@ -46,14 +46,12 @@ pub fn resample_samples(samples: &[f32], input_rate: f64) -> Result<Vec<f32>, Fl
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsrModelVersion {
-    V2,
     V3,
 }
 
 impl AsrModelVersion {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
-            "v2" => Ok(Self::V2),
             "v3" => Ok(Self::V3),
             _ => Err(format!("Unsupported ASR model version: {value}")),
         }
@@ -61,14 +59,12 @@ impl AsrModelVersion {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::V2 => "v2",
             Self::V3 => "v3",
         }
     }
 
     fn code(self) -> i32 {
         match self {
-            Self::V2 => 2,
             Self::V3 => 3,
         }
     }
@@ -130,6 +126,19 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
+    pub fn init_asr_version_with_progress<F>(
+        &self,
+        version: AsrModelVersion,
+        progress_callback: F,
+    ) -> Result<(), FluidAudioError>
+    where
+        F: Fn(ModelProgress) + Send + Sync,
+    {
+        self.bridge
+            .initialize_asr_version_with_progress(version.code(), progress_callback)
+            .map_err(FluidAudioError::from)
+    }
+
     /// Transcribe an audio file
     ///
     /// # Arguments
@@ -151,9 +160,7 @@ impl FluidAudio {
 
     /// Transcribe audio samples directly
     ///
-    /// This method accepts raw 16kHz mono audio samples, making it ideal for
-    /// real-time audio applications where audio is captured from a microphone
-    /// or other streaming source.
+    /// This method accepts a complete utterance as raw 16kHz mono audio samples.
     ///
     /// # Arguments
     /// * `samples` - Slice of f32 audio samples (16kHz mono, normalized to -1.0 to 1.0)
@@ -189,136 +196,12 @@ impl FluidAudio {
         self.bridge.is_asr_available()
     }
 
-    // ========== Streaming ASR Methods ==========
-
-    /// Initialize Streaming ASR (memory-efficient, uses 99.5% less memory than regular ASR)
-    ///
-    /// Streaming ASR is ideal for long audio files or real-time transcription where
-    /// memory usage is a concern. It processes audio in chunks rather than loading
-    /// the entire file into memory.
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// use fluidaudio_rs::FluidAudio;
-    ///
-    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let audio = FluidAudio::new()?;
-    ///
-    ///     // Initialize streaming ASR
-    ///     audio.init_streaming_asr()?;
-    ///
-    ///     // Use session-based API for real-time streaming
-    ///     audio.streaming_asr_start()?;
-    ///
-    ///     // Feed audio chunks as they become available
-    ///     let chunk1: Vec<f32> = vec![0.0; 16000]; // 1 second
-    ///     audio.streaming_asr_feed(&chunk1)?;
-    ///
-    ///     let chunk2: Vec<f32> = vec![0.0; 16000]; // another second
-    ///     audio.streaming_asr_feed(&chunk2)?;
-    ///
-    ///     // Get final transcription
-    ///     let text = audio.streaming_asr_finish()?;
-    ///     println!("Transcription: {}", text);
-    ///
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn init_streaming_asr(&self) -> Result<(), FluidAudioError> {
-        self.bridge
-            .initialize_streaming_asr()
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Start a streaming ASR session
-    ///
-    /// Call this before feeding audio chunks. Use `streaming_asr_feed()` to process
-    /// audio chunks, then `streaming_asr_finish()` to get the final result.
-    pub fn streaming_asr_start(&self) -> Result<(), FluidAudioError> {
-        self.bridge
-            .streaming_asr_start()
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Feed audio samples to the streaming ASR session
-    ///
-    /// # Arguments
-    /// * `samples` - Slice of f32 audio samples (16kHz mono, normalized to -1.0 to 1.0)
-    ///
-    /// Call this multiple times to process audio in chunks. The transcription engine
-    /// will process the audio incrementally.
-    pub fn streaming_asr_feed(&self, samples: &[f32]) -> Result<(), FluidAudioError> {
-        self.bridge
-            .streaming_asr_feed(samples)
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Finish the streaming ASR session and get the transcription result
-    ///
-    /// # Returns
-    /// * `String` containing the complete transcribed text
-    ///
-    /// This finalizes processing and returns the full transcription. After calling
-    /// this, you must call `streaming_asr_start()` again to start a new session.
-    pub fn streaming_asr_finish(&self) -> Result<String, FluidAudioError> {
-        self.bridge
-            .streaming_asr_finish()
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Transcribe an audio file using streaming ASR (memory-efficient wrapper)
-    ///
-    /// This is a convenience method that handles the session lifecycle for you.
-    /// For long files or when memory usage is critical, this uses significantly
-    /// less memory than `transcribe_file()`.
-    ///
-    /// # Arguments
-    /// * `path` - Path to the audio file (WAV, M4A, MP3, etc.)
-    ///
-    /// # Returns
-    /// * `AsrResult` containing the transcribed text and metadata
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// use fluidaudio_rs::FluidAudio;
-    ///
-    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let audio = FluidAudio::new()?;
-    ///     audio.init_streaming_asr()?;
-    ///
-    ///     let result = audio.transcribe_file_streaming("long_audio.wav")?;
-    ///     println!("Text: {}", result.text);
-    ///     println!("RTFx: {:.2}x", result.rtfx);
-    ///
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn transcribe_file_streaming<P: AsRef<Path>>(
-        &self,
-        path: P,
-    ) -> Result<AsrResult, FluidAudioError> {
-        let path_str = path.as_ref().to_string_lossy();
-
-        if !path.as_ref().exists() {
-            return Err(FluidAudioError::FileNotFound(path_str.to_string()));
-        }
-
-        self.bridge
-            .transcribe_file_streaming(&path_str)
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Check if streaming ASR is initialized and ready
-    pub fn is_streaming_asr_available(&self) -> bool {
-        self.bridge.is_streaming_asr_available()
-    }
-
     // ========== VAD Methods ==========
 
     /// Initialize the VAD (Voice Activity Detection) engine
     ///
     /// # Arguments
-    /// * `threshold` - Detection threshold (0.0-1.0, default 0.85)
+    /// * `threshold` - Detection threshold (0.0-1.0; Assistant uses 0.5)
     pub fn init_vad(&self, threshold: f32) -> Result<(), FluidAudioError> {
         self.bridge
             .initialize_vad(threshold)
@@ -396,7 +279,7 @@ impl FluidAudio {
     /// some time as models are compiled for the Neural Engine.
     ///
     /// # Arguments
-    /// * `threshold` - Clustering threshold (0.0-1.0, default 0.6). Lower values
+    /// * `threshold` - Clustering distance threshold ((0.0, 2.0], default 0.6). Lower values
     ///   produce more speakers, higher values merge speakers more aggressively.
     pub fn init_diarization(&self, threshold: f64) -> Result<(), FluidAudioError> {
         self.bridge
@@ -431,240 +314,6 @@ impl FluidAudio {
         self.bridge.is_diarization_available()
     }
 
-    // ========== Qwen3 ASR Methods ==========
-
-    /// Initialize Qwen3-ASR for multilingual transcription (Japanese, Chinese, Vietnamese, etc.)
-    ///
-    /// Qwen3-ASR supports 30+ languages with high accuracy for non-European languages.
-    /// Requires macOS 15+ or iOS 18+.
-    ///
-    /// # Supported Languages
-    /// - East Asian: Japanese, Chinese, Cantonese, Korean
-    /// - Southeast Asian: Vietnamese, Indonesian, Malay, Thai, Filipino
-    /// - European: English, French, German, Spanish, Portuguese, Italian, Dutch, etc.
-    /// - Other: Russian, Arabic, Hindi, Turkish, Persian, and more
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// use fluidaudio_rs::FluidAudio;
-    ///
-    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let audio = FluidAudio::new()?;
-    ///
-    ///     // Initialize Qwen3 ASR
-    ///     audio.init_qwen3_asr()?;
-    ///
-    ///     // Transcribe Japanese audio
-    ///     let result = audio.qwen3_transcribe_file("japanese_audio.wav", Some("ja"))?;
-    ///     println!("Japanese: {}", result.text);
-    ///
-    ///     // Or automatic language detection
-    ///     let result = audio.qwen3_transcribe_file("audio.wav", None)?;
-    ///     println!("Text: {}", result.text);
-    ///
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn init_qwen3_asr(&self) -> Result<(), FluidAudioError> {
-        self.bridge
-            .initialize_qwen3_asr()
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Transcribe audio samples using Qwen3-ASR
-    ///
-    /// # Arguments
-    /// * `samples` - Slice of f32 audio samples (16kHz mono, normalized to -1.0 to 1.0)
-    /// * `language` - Optional language code (e.g., "ja" for Japanese, "zh" for Chinese).
-    ///                Pass None for automatic language detection.
-    ///
-    /// # Language Codes
-    /// Use ISO 639-1 codes or English names:
-    /// - Japanese: "ja" or "Japanese"
-    /// - Chinese: "zh" or "Chinese"
-    /// - Vietnamese: "vi" or "Vietnamese"
-    /// - Korean: "ko" or "Korean"
-    /// - English: "en" or "English"
-    /// - And many more (see init_qwen3_asr documentation)
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// use fluidaudio_rs::FluidAudio;
-    ///
-    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let audio = FluidAudio::new()?;
-    ///     audio.init_qwen3_asr()?;
-    ///
-    ///     // Japanese audio samples
-    ///     let samples: Vec<f32> = vec![0.0; 16000]; // 1 second
-    ///
-    ///     let result = audio.qwen3_transcribe_samples(&samples, Some("ja"))?;
-    ///     println!("Japanese text: {}", result.text);
-    ///
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn qwen3_transcribe_samples(
-        &self,
-        samples: &[f32],
-        language: Option<&str>,
-    ) -> Result<AsrResult, FluidAudioError> {
-        self.bridge
-            .qwen3_transcribe_samples(samples, language)
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Transcribe an audio file using Qwen3-ASR
-    ///
-    /// # Arguments
-    /// * `path` - Path to the audio file (WAV, M4A, MP3, etc.)
-    /// * `language` - Optional language code (e.g., "ja", "zh", "vi"). None for auto-detect.
-    ///
-    /// # Returns
-    /// * `AsrResult` containing the transcribed text and metadata
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// use fluidaudio_rs::FluidAudio;
-    ///
-    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let audio = FluidAudio::new()?;
-    ///     audio.init_qwen3_asr()?;
-    ///
-    ///     // Transcribe with explicit language hint
-    ///     let result = audio.qwen3_transcribe_file("meeting.wav", Some("Japanese"))?;
-    ///     println!("Text: {}", result.text);
-    ///     println!("RTFx: {:.2}x", result.rtfx);
-    ///
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn qwen3_transcribe_file<P: AsRef<Path>>(
-        &self,
-        path: P,
-        language: Option<&str>,
-    ) -> Result<AsrResult, FluidAudioError> {
-        let path_str = path.as_ref().to_string_lossy();
-
-        if !path.as_ref().exists() {
-            return Err(FluidAudioError::FileNotFound(path_str.to_string()));
-        }
-
-        self.bridge
-            .qwen3_transcribe_file(&path_str, language)
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Check if Qwen3-ASR is initialized and ready
-    pub fn is_qwen3_asr_available(&self) -> bool {
-        self.bridge.is_qwen3_asr_available()
-    }
-
-    // ========== Qwen3 Streaming Methods ==========
-
-    /// Initialize Qwen3 Streaming ASR for real-time multilingual transcription
-    ///
-    /// Streaming mode provides incremental transcription results as audio is fed.
-    /// Ideal for real-time applications like meeting transcription or live captions.
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// use fluidaudio_rs::FluidAudio;
-    ///
-    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let audio = FluidAudio::new()?;
-    ///
-    ///     // Initialize Qwen3 streaming
-    ///     audio.init_qwen3_streaming()?;
-    ///
-    ///     // Start session with Japanese language
-    ///     audio.qwen3_streaming_start(Some("ja"), 1.0, 2.0, 30.0)?;
-    ///
-    ///     // Feed audio chunks
-    ///     loop {
-    ///         let chunk: Vec<f32> = capture_audio_chunk();
-    ///
-    ///         if let Some(partial) = audio.qwen3_streaming_feed(&chunk)? {
-    ///             println!("Partial: {}", partial);
-    ///         }
-    ///
-    ///         if done { break; }
-    ///     }
-    ///
-    ///     // Get final result
-    ///     let final_text = audio.qwen3_streaming_finish()?;
-    ///     println!("Final: {}", final_text);
-    ///
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn init_qwen3_streaming(&self) -> Result<(), FluidAudioError> {
-        self.bridge
-            .initialize_qwen3_streaming()
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Start a Qwen3 streaming session
-    ///
-    /// # Arguments
-    /// * `language` - Optional language code (e.g., "ja", "zh"). None for auto-detect.
-    /// * `min_audio_seconds` - Minimum audio duration before first transcription (default: 1.0)
-    /// * `chunk_seconds` - How often to re-transcribe (default: 2.0)
-    /// * `max_audio_seconds` - Maximum audio to accumulate (default: 30.0)
-    ///
-    /// Call this before feeding audio chunks. The streaming engine will provide
-    /// partial results as configured by the timing parameters.
-    pub fn qwen3_streaming_start(
-        &self,
-        language: Option<&str>,
-        min_audio_seconds: f64,
-        chunk_seconds: f64,
-        max_audio_seconds: f64,
-    ) -> Result<(), FluidAudioError> {
-        self.bridge
-            .qwen3_streaming_start(
-                language,
-                min_audio_seconds,
-                chunk_seconds,
-                max_audio_seconds,
-            )
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Feed audio samples to Qwen3 streaming session
-    ///
-    /// # Arguments
-    /// * `samples` - Slice of f32 audio samples (16kHz mono, normalized to -1.0 to 1.0)
-    ///
-    /// # Returns
-    /// * `Option<String>` - Partial transcript if enough audio has been accumulated, None otherwise
-    ///
-    /// Call this repeatedly as audio chunks become available. The engine will return
-    /// partial transcripts according to the configuration set in `qwen3_streaming_start`.
-    pub fn qwen3_streaming_feed(&self, samples: &[f32]) -> Result<Option<String>, FluidAudioError> {
-        self.bridge
-            .qwen3_streaming_feed(samples)
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Finish Qwen3 streaming session and get final transcription
-    ///
-    /// # Returns
-    /// * `String` - Complete transcription of all audio fed to the session
-    ///
-    /// This finalizes the session and returns the final transcript. After calling
-    /// this, you must call `qwen3_streaming_start()` again to start a new session.
-    pub fn qwen3_streaming_finish(&self) -> Result<String, FluidAudioError> {
-        self.bridge
-            .qwen3_streaming_finish()
-            .map_err(FluidAudioError::from)
-    }
-
-    /// Check if Qwen3 streaming is initialized and ready
-    pub fn is_qwen3_streaming_available(&self) -> bool {
-        self.bridge.is_qwen3_streaming_available()
-    }
-
     // ========== System Info ==========
 
     /// Get system information
@@ -679,7 +328,7 @@ impl FluidAudio {
 
     /// Check if running on an Intel Mac (x86_64).
     ///
-    /// Local Apple-Silicon-only models (Parakeet, Qwen3, CoreML TTS) will fail
+    /// Local Apple-Silicon-only Parakeet models will fail
     /// to load on Intel Macs. Apps can use this to gate UI selection of those
     /// models and steer Intel users to cloud transcription instead.
     pub fn is_intel_mac(&self) -> bool {
@@ -754,9 +403,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_create_instance() {
-        // Note: This test will fail until Swift bridge is properly linked
-        // For now, just test the types exist
-        let _ = FluidAudioError::NotInitialized("test".to_string());
+    fn creates_native_bridge_and_reads_system_info() {
+        let audio = FluidAudio::new().expect("Swift bridge must initialize");
+        let info = audio.system_info();
+
+        assert_eq!(info.platform, "macOS");
+        assert!(!info.chip_name.trim().is_empty());
+        assert!(info.memory_gb.is_finite() && info.memory_gb > 0.0);
+        assert_eq!(info.is_apple_silicon, audio.is_apple_silicon());
+        assert_ne!(audio.is_apple_silicon(), audio.is_intel_mac());
     }
 }

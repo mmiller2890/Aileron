@@ -1,7 +1,7 @@
-export type FluidAudioModel = "v2" | "v3";
+export type FluidAudioModel = "v3";
 
 export function normalizeFluidAudioModel(
-  value: string | undefined
+  _value: string | undefined
 ): FluidAudioModel {
-  return value === "v2" ? "v2" : "v3";
+  return "v3";
 }

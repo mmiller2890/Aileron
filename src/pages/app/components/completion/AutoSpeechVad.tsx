@@ -2,10 +2,11 @@ import { fetchSTT } from "@/lib";
 import { UseCompletionReturn } from "@/types";
 import { useMicVAD } from "@ricky0123/vad-react";
 import { LoaderCircleIcon, MicIcon, MicOffIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components";
 import { useApp } from "@/contexts";
 import { floatArrayToWav } from "@/lib/utils";
+import { microphoneStreamConstraints } from "./microphoneStream";
 
 interface AutoSpeechVADProps {
   submit: UseCompletionReturn["submit"];
@@ -23,15 +24,19 @@ const AutoSpeechVADInternal = ({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const { selectedSttProvider, allSttProviders } = useApp();
 
-  const audioConstraints: MediaTrackConstraints =
-    microphoneDeviceId && microphoneDeviceId !== "default"
-      ? { deviceId: { exact: microphoneDeviceId } }
-      : {};
+  const getMicrophoneStream = useCallback(
+    () =>
+      navigator.mediaDevices.getUserMedia(
+        microphoneStreamConstraints(microphoneDeviceId)
+      ),
+    [microphoneDeviceId]
+  );
 
   const vad = useMicVAD({
     userSpeakingThreshold: 0.6,
     startOnLoad: true,
-    additionalAudioConstraints: audioConstraints,
+    getStream: getMicrophoneStream,
+    resumeStream: getMicrophoneStream,
     onSpeechEnd: async (audio) => {
       try {
         // Deferred: only providers that upload the audio need it encoded.

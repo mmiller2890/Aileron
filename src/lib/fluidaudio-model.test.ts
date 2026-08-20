@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { normalizeFluidAudioModel } from "./fluidaudio-model";
 
 describe("FluidAudio model selection", () => {
-  it("accepts only v2 and v3", () => {
-    expect(normalizeFluidAudioModel("v2")).toBe("v2");
+  it("normalizes stale v2 and current v3 settings to v3", () => {
+    expect(normalizeFluidAudioModel("v2")).toBe("v3");
     expect(normalizeFluidAudioModel("v3")).toBe("v3");
   });
 

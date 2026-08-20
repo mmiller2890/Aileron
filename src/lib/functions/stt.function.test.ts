@@ -74,7 +74,7 @@ describe("local Fluidaudio utterance fallback", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("stt_transcribe_speech", {
       samples: [0.25, -0.25],
-      modelVersion: "v2",
+      modelVersion: "v3",
     });
   });
 
@@ -93,6 +93,15 @@ describe("local Fluidaudio utterance fallback", () => {
           preprocessing: "raw",
         },
       },
+      token_timings: [
+        {
+          token: "primary",
+          token_id: 7,
+          start_time: 0.1,
+          end_time: 0.4,
+          confidence: 0.9,
+        },
+      ],
     });
 
     await expect(fetchSTT(params)).resolves.toBe("primary transcript");
@@ -105,6 +114,15 @@ describe("local Fluidaudio utterance fallback", () => {
         text: "raw transcript",
         diagnostics: { preprocessing: "raw" },
       },
+      token_timings: [
+        {
+          token: "primary",
+          token_id: 7,
+          start_time: 0.1,
+          end_time: 0.4,
+          confidence: 0.9,
+        },
+      ],
     });
     debug.mockRestore();
   });
@@ -116,11 +134,22 @@ describe("local Fluidaudio utterance fallback", () => {
       )
       .mockResolvedValueOnce({ text: "fallback transcript" });
 
-    await expect(fetchSTT(params)).resolves.toBe("fallback transcript");
+    await expect(
+      fetchSTT({
+        ...params,
+        selectedProvider: {
+          provider: "local-fluidaudio",
+          variables: { MODEL: "v2" },
+        },
+      }),
+    ).resolves.toBe("fallback transcript");
     expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
       "stt_transcribe_utterance",
       "stt_transcribe_speech",
     ]);
+    expect(invokeMock.mock.calls[1][1]).toMatchObject({
+      modelVersion: undefined,
+    });
   });
 
   it("does not repeat inference after an ASR failure", async () => {

@@ -54,6 +54,13 @@ interface LocalTranscriptionResult {
   normalized_text?: string;
   diagnostics?: Record<string, unknown>;
   comparison?: Record<string, unknown> | null;
+  token_timings?: Array<{
+    token: string;
+    token_id: number;
+    start_time: number;
+    end_time: number;
+    confidence: number;
+  }>;
 }
 
 function consumeLocalTranscription(result: LocalTranscriptionResult): string {
@@ -63,6 +70,7 @@ function consumeLocalTranscription(result: LocalTranscriptionResult): string {
       normalized_text: result.normalized_text,
       diagnostics: result.diagnostics,
       comparison: result.comparison,
+      token_timings: result.token_timings,
     });
   }
   return result.text.trim();
@@ -150,9 +158,9 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       if (f32.length === 0) throw new Error("Audio file is empty");
       const result = await invoke<LocalTranscriptionResult>("stt_transcribe_speech", {
         samples: Array.from(f32),
-        modelVersion: normalizeFluidAudioModel(
-          selectedProvider.variables.MODEL,
-        ),
+        modelVersion: utteranceId
+          ? undefined
+          : normalizeFluidAudioModel(selectedProvider.variables.MODEL),
       });
       return consumeLocalTranscription(result);
     }

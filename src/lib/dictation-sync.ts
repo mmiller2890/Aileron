@@ -6,6 +6,12 @@ export type DictationStatus =
 
 export type DictationSyncAction = "start" | "stop" | "none";
 
+export function dictationStopError(unexpected: boolean): string | null {
+  return unexpected
+    ? "Microphone input stopped unexpectedly — check your input device, then try again."
+    : null;
+}
+
 /**
  * Reconcile the armed flag with the native dictation task's real status.
  *

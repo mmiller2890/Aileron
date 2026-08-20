@@ -8,9 +8,15 @@ extern "C" {
     // Constructor / Destructor
     fn fluidaudio_bridge_create() -> *mut std::ffi::c_void;
     fn fluidaudio_bridge_destroy(bridge: *mut std::ffi::c_void);
+    fn fluidaudio_bridge_take_last_error(bridge: *mut std::ffi::c_void) -> *mut i8;
 
     // ASR
-    fn fluidaudio_initialize_asr_version(bridge: *mut std::ffi::c_void, version_code: i32) -> i32;
+    fn fluidaudio_initialize_asr_version(
+        bridge: *mut std::ffi::c_void,
+        version_code: i32,
+        progress_callback: Option<ProgressCallback>,
+        progress_context: *mut std::ffi::c_void,
+    ) -> i32;
     fn fluidaudio_transcribe_file(
         bridge: *mut std::ffi::c_void,
         path: *const i8,
@@ -19,6 +25,7 @@ extern "C" {
         out_duration: *mut f64,
         out_processing_time: *mut f64,
         out_rtfx: *mut f32,
+        out_token_timings_json: *mut *mut i8,
     ) -> i32;
     fn fluidaudio_is_asr_available(bridge: *mut std::ffi::c_void) -> i32;
     fn fluidaudio_transcribe_samples(
@@ -30,30 +37,8 @@ extern "C" {
         out_duration: *mut f64,
         out_processing_time: *mut f64,
         out_rtfx: *mut f32,
+        out_token_timings_json: *mut *mut i8,
     ) -> i32;
-
-    // Streaming ASR
-    fn fluidaudio_initialize_streaming_asr(bridge: *mut std::ffi::c_void) -> i32;
-    fn fluidaudio_streaming_asr_start(bridge: *mut std::ffi::c_void) -> i32;
-    fn fluidaudio_streaming_asr_feed(
-        bridge: *mut std::ffi::c_void,
-        samples: *const f32,
-        count: u32,
-    ) -> i32;
-    fn fluidaudio_streaming_asr_finish(
-        bridge: *mut std::ffi::c_void,
-        out_text: *mut *mut i8,
-    ) -> i32;
-    fn fluidaudio_transcribe_file_streaming(
-        bridge: *mut std::ffi::c_void,
-        path: *const i8,
-        out_text: *mut *mut i8,
-        out_confidence: *mut f32,
-        out_duration: *mut f64,
-        out_processing_time: *mut f64,
-        out_rtfx: *mut f32,
-    ) -> i32;
-    fn fluidaudio_is_streaming_asr_available(bridge: *mut std::ffi::c_void) -> i32;
 
     // VAD
     fn fluidaudio_initialize_vad(bridge: *mut std::ffi::c_void, threshold: f32) -> i32;
@@ -137,52 +122,6 @@ extern "C" {
     ) -> i32;
     fn fluidaudio_itn_is_native_available(bridge: *mut std::ffi::c_void) -> i32;
 
-    // Qwen3 ASR
-    fn fluidaudio_initialize_qwen3_asr(bridge: *mut std::ffi::c_void) -> i32;
-    fn fluidaudio_qwen3_transcribe_samples(
-        bridge: *mut std::ffi::c_void,
-        samples: *const f32,
-        sample_count: u32,
-        language: *const i8,
-        out_text: *mut *mut i8,
-        out_confidence: *mut f32,
-        out_duration: *mut f64,
-        out_processing_time: *mut f64,
-        out_rtfx: *mut f32,
-    ) -> i32;
-    fn fluidaudio_qwen3_transcribe_file(
-        bridge: *mut std::ffi::c_void,
-        path: *const i8,
-        language: *const i8,
-        out_text: *mut *mut i8,
-        out_confidence: *mut f32,
-        out_duration: *mut f64,
-        out_processing_time: *mut f64,
-        out_rtfx: *mut f32,
-    ) -> i32;
-    fn fluidaudio_is_qwen3_asr_available(bridge: *mut std::ffi::c_void) -> i32;
-
-    // Qwen3 Streaming
-    fn fluidaudio_initialize_qwen3_streaming(bridge: *mut std::ffi::c_void) -> i32;
-    fn fluidaudio_qwen3_streaming_start(
-        bridge: *mut std::ffi::c_void,
-        language: *const i8,
-        min_audio_seconds: f64,
-        chunk_seconds: f64,
-        max_audio_seconds: f64,
-    ) -> i32;
-    fn fluidaudio_qwen3_streaming_feed(
-        bridge: *mut std::ffi::c_void,
-        samples: *const f32,
-        count: u32,
-        out_partial_text: *mut *mut i8,
-    ) -> i32;
-    fn fluidaudio_qwen3_streaming_finish(
-        bridge: *mut std::ffi::c_void,
-        out_text: *mut *mut i8,
-    ) -> i32;
-    fn fluidaudio_is_qwen3_streaming_available(bridge: *mut std::ffi::c_void) -> i32;
-
     // Cleanup
     fn fluidaudio_cleanup(bridge: *mut std::ffi::c_void);
 
@@ -194,15 +133,46 @@ extern "C" {
         input_rate: f64,
         out_samples: *mut *mut f32,
         out_count: *mut u32,
+        out_error: *mut *mut i8,
     ) -> i32;
     fn fluidaudio_free_float_array(samples: *mut f32);
 }
 
 use std::ffi::{CStr, CString};
 
+type ProgressCallback = unsafe extern "C" fn(*mut std::ffi::c_void, f64, i32, *const i8);
+
 /// Safe wrapper for the FluidAudio bridge
 pub struct FluidAudioBridge {
     ptr: *mut std::ffi::c_void,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_error_message;
+
+    #[test]
+    fn swift_error_detail_wins_over_the_fallback() {
+        assert_eq!(
+            select_error_message(
+                Some("CoreML model compilation failed".to_string()),
+                "ASR init failed"
+            ),
+            "CoreML model compilation failed"
+        );
+    }
+
+    #[test]
+    fn missing_or_empty_swift_error_uses_the_fallback() {
+        assert_eq!(
+            select_error_message(None, "ASR init failed"),
+            "ASR init failed"
+        );
+        assert_eq!(
+            select_error_message(Some("  ".to_string()), "ASR init failed"),
+            "ASR init failed"
+        );
+    }
 }
 
 pub fn resample_samples(samples: &[f32], input_rate: f64) -> Result<Vec<f32>, String> {
@@ -211,6 +181,7 @@ pub fn resample_samples(samples: &[f32], input_rate: f64) -> Result<Vec<f32>, St
     }
     let mut output_ptr = std::ptr::null_mut();
     let mut output_count = 0;
+    let mut error_ptr = std::ptr::null_mut();
     let result = unsafe {
         fluidaudio_resample_samples(
             samples.as_ptr(),
@@ -218,21 +189,49 @@ pub fn resample_samples(samples: &[f32], input_rate: f64) -> Result<Vec<f32>, St
             input_rate,
             &mut output_ptr,
             &mut output_count,
+            &mut error_ptr,
         )
     };
     if result != 0 || output_ptr.is_null() {
-        return Err("Failed to resample audio".to_string());
+        if !output_ptr.is_null() {
+            unsafe { fluidaudio_free_float_array(output_ptr) };
+        }
+        let detail = if error_ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { take_c_string(error_ptr) })
+        };
+        return Err(select_error_message(detail, "Failed to resample audio"));
+    }
+    if !error_ptr.is_null() {
+        unsafe { fluidaudio_free_string(error_ptr) };
     }
     let output = unsafe { std::slice::from_raw_parts(output_ptr, output_count as usize).to_vec() };
     unsafe { fluidaudio_free_float_array(output_ptr) };
     Ok(output)
 }
 
-// The Swift bridge is thread-safe as it uses internal synchronization
 unsafe impl Send for FluidAudioBridge {}
-unsafe impl Sync for FluidAudioBridge {}
+
+fn select_error_message(detail: Option<String>, fallback: &str) -> String {
+    detail
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
 
 impl FluidAudioBridge {
+    fn last_error_message(&self, fallback: &str) -> String {
+        let detail = unsafe {
+            let ptr = fluidaudio_bridge_take_last_error(self.ptr);
+            if ptr.is_null() {
+                None
+            } else {
+                Some(take_c_string(ptr))
+            }
+        };
+        select_error_message(detail, fallback)
+    }
+
     pub fn new() -> Option<Self> {
         let ptr = unsafe { fluidaudio_bridge_create() };
         if ptr.is_null() {
@@ -243,11 +242,65 @@ impl FluidAudioBridge {
     }
 
     pub fn initialize_asr_version(&self, version_code: i32) -> Result<(), String> {
-        let result = unsafe { fluidaudio_initialize_asr_version(self.ptr, version_code) };
+        let result = unsafe {
+            fluidaudio_initialize_asr_version(self.ptr, version_code, None, std::ptr::null_mut())
+        };
         if result == 0 {
             Ok(())
         } else {
-            Err("Failed to initialize requested ASR model".to_string())
+            Err(self.last_error_message("Failed to initialize requested ASR model"))
+        }
+    }
+
+    pub fn initialize_asr_version_with_progress<F>(
+        &self,
+        version_code: i32,
+        progress_callback: F,
+    ) -> Result<(), String>
+    where
+        F: Fn(ModelProgress) + Send + Sync,
+    {
+        unsafe extern "C" fn trampoline<F>(
+            context: *mut std::ffi::c_void,
+            fraction_completed: f64,
+            phase_code: i32,
+            model_name: *const i8,
+        ) where
+            F: Fn(ModelProgress) + Send + Sync,
+        {
+            let callback = &*(context as *const F);
+            let model_name = if model_name.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(model_name).to_string_lossy().into_owned())
+            };
+            let phase = match phase_code {
+                0 => "listing",
+                1 => "downloading",
+                2 => "compiling",
+                _ => "unknown",
+            };
+            let progress = ModelProgress {
+                fraction_completed: fraction_completed.clamp(0.0, 1.0),
+                phase,
+                model_name,
+            };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(progress)));
+        }
+
+        let context = &progress_callback as *const F as *mut std::ffi::c_void;
+        let result = unsafe {
+            fluidaudio_initialize_asr_version(
+                self.ptr,
+                version_code,
+                Some(trampoline::<F>),
+                context,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(self.last_error_message("Failed to initialize requested ASR model"))
         }
     }
 
@@ -259,6 +312,7 @@ impl FluidAudioBridge {
         let mut duration: f64 = 0.0;
         let mut processing_time: f64 = 0.0;
         let mut rtfx: f32 = 0.0;
+        let mut token_timings_ptr: *mut i8 = std::ptr::null_mut();
 
         let result = unsafe {
             fluidaudio_transcribe_file(
@@ -269,11 +323,18 @@ impl FluidAudioBridge {
                 &mut duration,
                 &mut processing_time,
                 &mut rtfx,
+                &mut token_timings_ptr,
             )
         };
 
         if result != 0 {
-            return Err("Transcription failed".to_string());
+            if !text_ptr.is_null() {
+                unsafe { fluidaudio_free_string(text_ptr) };
+            }
+            if !token_timings_ptr.is_null() {
+                unsafe { fluidaudio_free_string(token_timings_ptr) };
+            }
+            return Err(self.last_error_message("Transcription failed"));
         }
 
         let text = if text_ptr.is_null() {
@@ -285,6 +346,7 @@ impl FluidAudioBridge {
             unsafe { fluidaudio_free_string(text_ptr) };
             text
         };
+        let token_timings = unsafe { take_token_timings(token_timings_ptr)? };
 
         Ok(AsrResult {
             text,
@@ -292,6 +354,7 @@ impl FluidAudioBridge {
             duration,
             processing_time,
             rtfx,
+            token_timings,
         })
     }
 
@@ -301,6 +364,7 @@ impl FluidAudioBridge {
         let mut duration: f64 = 0.0;
         let mut processing_time: f64 = 0.0;
         let mut rtfx: f32 = 0.0;
+        let mut token_timings_ptr: *mut i8 = std::ptr::null_mut();
 
         let result = unsafe {
             fluidaudio_transcribe_samples(
@@ -312,11 +376,18 @@ impl FluidAudioBridge {
                 &mut duration,
                 &mut processing_time,
                 &mut rtfx,
+                &mut token_timings_ptr,
             )
         };
 
         if result != 0 {
-            return Err("Transcription failed".to_string());
+            if !text_ptr.is_null() {
+                unsafe { fluidaudio_free_string(text_ptr) };
+            }
+            if !token_timings_ptr.is_null() {
+                unsafe { fluidaudio_free_string(token_timings_ptr) };
+            }
+            return Err(self.last_error_message("Transcription failed"));
         }
 
         let text = if text_ptr.is_null() {
@@ -328,6 +399,7 @@ impl FluidAudioBridge {
             unsafe { fluidaudio_free_string(text_ptr) };
             text
         };
+        let token_timings = unsafe { take_token_timings(token_timings_ptr)? };
 
         Ok(AsrResult {
             text,
@@ -335,6 +407,7 @@ impl FluidAudioBridge {
             duration,
             processing_time,
             rtfx,
+            token_timings,
         })
     }
 
@@ -342,111 +415,12 @@ impl FluidAudioBridge {
         unsafe { fluidaudio_is_asr_available(self.ptr) != 0 }
     }
 
-    pub fn initialize_streaming_asr(&self) -> Result<(), String> {
-        let result = unsafe { fluidaudio_initialize_streaming_asr(self.ptr) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err("Failed to initialize streaming ASR".to_string())
-        }
-    }
-
-    pub fn streaming_asr_start(&self) -> Result<(), String> {
-        let result = unsafe { fluidaudio_streaming_asr_start(self.ptr) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err("Failed to start streaming ASR session".to_string())
-        }
-    }
-
-    pub fn streaming_asr_feed(&self, samples: &[f32]) -> Result<(), String> {
-        let result = unsafe {
-            fluidaudio_streaming_asr_feed(self.ptr, samples.as_ptr(), samples.len() as u32)
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err("Failed to feed samples to streaming ASR".to_string())
-        }
-    }
-
-    pub fn streaming_asr_finish(&self) -> Result<String, String> {
-        let mut text_ptr: *mut i8 = std::ptr::null_mut();
-
-        let result = unsafe { fluidaudio_streaming_asr_finish(self.ptr, &mut text_ptr) };
-
-        if result != 0 {
-            return Err("Failed to finish streaming ASR session".to_string());
-        }
-
-        let text = if text_ptr.is_null() {
-            String::new()
-        } else {
-            let text = unsafe { CStr::from_ptr(text_ptr) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { fluidaudio_free_string(text_ptr) };
-            text
-        };
-
-        Ok(text)
-    }
-
-    pub fn transcribe_file_streaming(&self, path: &str) -> Result<AsrResult, String> {
-        let c_path = CString::new(path).map_err(|_| "Invalid path")?;
-
-        let mut text_ptr: *mut i8 = std::ptr::null_mut();
-        let mut confidence: f32 = 0.0;
-        let mut duration: f64 = 0.0;
-        let mut processing_time: f64 = 0.0;
-        let mut rtfx: f32 = 0.0;
-
-        let result = unsafe {
-            fluidaudio_transcribe_file_streaming(
-                self.ptr,
-                c_path.as_ptr(),
-                &mut text_ptr,
-                &mut confidence,
-                &mut duration,
-                &mut processing_time,
-                &mut rtfx,
-            )
-        };
-
-        if result != 0 {
-            return Err("Streaming file transcription failed".to_string());
-        }
-
-        let text = if text_ptr.is_null() {
-            String::new()
-        } else {
-            let text = unsafe { CStr::from_ptr(text_ptr) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { fluidaudio_free_string(text_ptr) };
-            text
-        };
-
-        Ok(AsrResult {
-            text,
-            confidence,
-            duration,
-            processing_time,
-            rtfx,
-        })
-    }
-
-    pub fn is_streaming_asr_available(&self) -> bool {
-        unsafe { fluidaudio_is_streaming_asr_available(self.ptr) != 0 }
-    }
-
     pub fn initialize_vad(&self, threshold: f32) -> Result<(), String> {
         let result = unsafe { fluidaudio_initialize_vad(self.ptr, threshold) };
         if result == 0 {
             Ok(())
         } else {
-            Err("Failed to initialize VAD".to_string())
+            Err(self.last_error_message("Failed to initialize VAD"))
         }
     }
 
@@ -459,7 +433,7 @@ impl FluidAudioBridge {
         if result == 0 {
             Ok(())
         } else {
-            Err("Failed to reset VAD stream".to_string())
+            Err(self.last_error_message("Failed to reset VAD stream"))
         }
     }
 
@@ -476,7 +450,7 @@ impl FluidAudioBridge {
         if result == 0 {
             Ok(probability)
         } else {
-            Err("Failed to process VAD stream chunk".to_string())
+            Err(self.last_error_message("Failed to process VAD stream chunk"))
         }
     }
 
@@ -485,7 +459,7 @@ impl FluidAudioBridge {
         if result == 0 {
             Ok(())
         } else {
-            Err("Failed to initialize diarization".to_string())
+            Err(self.last_error_message("Failed to initialize diarization"))
         }
     }
 
@@ -511,17 +485,46 @@ impl FluidAudioBridge {
         };
 
         if result != 0 {
-            return Err("Diarization failed".to_string());
+            unsafe {
+                fluidaudio_free_diarization_result(
+                    speaker_ids_ptr,
+                    start_times_ptr,
+                    end_times_ptr,
+                    quality_scores_ptr,
+                    count,
+                )
+            };
+            return Err(self.last_error_message("Diarization failed"));
         }
 
         let mut segments = Vec::with_capacity(count as usize);
 
-        if count > 0
-            && !speaker_ids_ptr.is_null()
-            && !start_times_ptr.is_null()
-            && !end_times_ptr.is_null()
-            && !quality_scores_ptr.is_null()
+        if count == 0 {
+            unsafe {
+                fluidaudio_free_diarization_result(
+                    speaker_ids_ptr,
+                    start_times_ptr,
+                    end_times_ptr,
+                    quality_scores_ptr,
+                    count,
+                )
+            };
+        } else if speaker_ids_ptr.is_null()
+            || start_times_ptr.is_null()
+            || end_times_ptr.is_null()
+            || quality_scores_ptr.is_null()
         {
+            unsafe {
+                fluidaudio_free_diarization_result(
+                    speaker_ids_ptr,
+                    start_times_ptr,
+                    end_times_ptr,
+                    quality_scores_ptr,
+                    count,
+                )
+            };
+            return Err("Diarization returned incomplete native result arrays".to_string());
+        } else {
             for i in 0..count as usize {
                 let id_ptr = unsafe { *speaker_ids_ptr.add(i) };
                 let speaker_id = if id_ptr.is_null() {
@@ -555,216 +558,6 @@ impl FluidAudioBridge {
 
     pub fn is_diarization_available(&self) -> bool {
         unsafe { fluidaudio_is_diarization_available(self.ptr) != 0 }
-    }
-
-    pub fn initialize_qwen3_asr(&self) -> Result<(), String> {
-        let result = unsafe { fluidaudio_initialize_qwen3_asr(self.ptr) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err("Failed to initialize Qwen3 ASR".to_string())
-        }
-    }
-
-    pub fn qwen3_transcribe_samples(
-        &self,
-        samples: &[f32],
-        language: Option<&str>,
-    ) -> Result<AsrResult, String> {
-        let c_language = language.and_then(|l| CString::new(l).ok());
-
-        let mut text_ptr: *mut i8 = std::ptr::null_mut();
-        let mut confidence: f32 = 0.0;
-        let mut duration: f64 = 0.0;
-        let mut processing_time: f64 = 0.0;
-        let mut rtfx: f32 = 0.0;
-
-        let result = unsafe {
-            fluidaudio_qwen3_transcribe_samples(
-                self.ptr,
-                samples.as_ptr(),
-                samples.len() as u32,
-                c_language
-                    .as_ref()
-                    .map(|s| s.as_ptr())
-                    .unwrap_or(std::ptr::null()),
-                &mut text_ptr,
-                &mut confidence,
-                &mut duration,
-                &mut processing_time,
-                &mut rtfx,
-            )
-        };
-
-        if result != 0 {
-            return Err("Qwen3 transcription failed".to_string());
-        }
-
-        let text = if text_ptr.is_null() {
-            String::new()
-        } else {
-            let text = unsafe { CStr::from_ptr(text_ptr) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { fluidaudio_free_string(text_ptr) };
-            text
-        };
-
-        Ok(AsrResult {
-            text,
-            confidence,
-            duration,
-            processing_time,
-            rtfx,
-        })
-    }
-
-    pub fn qwen3_transcribe_file(
-        &self,
-        path: &str,
-        language: Option<&str>,
-    ) -> Result<AsrResult, String> {
-        let c_path = CString::new(path).map_err(|_| "Invalid path")?;
-        let c_language = language.and_then(|l| CString::new(l).ok());
-
-        let mut text_ptr: *mut i8 = std::ptr::null_mut();
-        let mut confidence: f32 = 0.0;
-        let mut duration: f64 = 0.0;
-        let mut processing_time: f64 = 0.0;
-        let mut rtfx: f32 = 0.0;
-
-        let result = unsafe {
-            fluidaudio_qwen3_transcribe_file(
-                self.ptr,
-                c_path.as_ptr(),
-                c_language
-                    .as_ref()
-                    .map(|s| s.as_ptr())
-                    .unwrap_or(std::ptr::null()),
-                &mut text_ptr,
-                &mut confidence,
-                &mut duration,
-                &mut processing_time,
-                &mut rtfx,
-            )
-        };
-
-        if result != 0 {
-            return Err("Qwen3 file transcription failed".to_string());
-        }
-
-        let text = if text_ptr.is_null() {
-            String::new()
-        } else {
-            let text = unsafe { CStr::from_ptr(text_ptr) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { fluidaudio_free_string(text_ptr) };
-            text
-        };
-
-        Ok(AsrResult {
-            text,
-            confidence,
-            duration,
-            processing_time,
-            rtfx,
-        })
-    }
-
-    pub fn is_qwen3_asr_available(&self) -> bool {
-        unsafe { fluidaudio_is_qwen3_asr_available(self.ptr) != 0 }
-    }
-
-    pub fn initialize_qwen3_streaming(&self) -> Result<(), String> {
-        let result = unsafe { fluidaudio_initialize_qwen3_streaming(self.ptr) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err("Failed to initialize Qwen3 Streaming".to_string())
-        }
-    }
-
-    pub fn qwen3_streaming_start(
-        &self,
-        language: Option<&str>,
-        min_audio_seconds: f64,
-        chunk_seconds: f64,
-        max_audio_seconds: f64,
-    ) -> Result<(), String> {
-        let c_language = language.and_then(|l| CString::new(l).ok());
-
-        let result = unsafe {
-            fluidaudio_qwen3_streaming_start(
-                self.ptr,
-                c_language
-                    .as_ref()
-                    .map(|s| s.as_ptr())
-                    .unwrap_or(std::ptr::null()),
-                min_audio_seconds,
-                chunk_seconds,
-                max_audio_seconds,
-            )
-        };
-
-        if result == 0 {
-            Ok(())
-        } else {
-            Err("Failed to start Qwen3 streaming session".to_string())
-        }
-    }
-
-    pub fn qwen3_streaming_feed(&self, samples: &[f32]) -> Result<Option<String>, String> {
-        let mut partial_text_ptr: *mut i8 = std::ptr::null_mut();
-
-        let result = unsafe {
-            fluidaudio_qwen3_streaming_feed(
-                self.ptr,
-                samples.as_ptr(),
-                samples.len() as u32,
-                &mut partial_text_ptr,
-            )
-        };
-
-        if result != 0 {
-            return Err("Failed to feed samples to Qwen3 streaming".to_string());
-        }
-
-        if partial_text_ptr.is_null() {
-            Ok(None)
-        } else {
-            let text = unsafe { CStr::from_ptr(partial_text_ptr) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { fluidaudio_free_string(partial_text_ptr) };
-            Ok(Some(text))
-        }
-    }
-
-    pub fn qwen3_streaming_finish(&self) -> Result<String, String> {
-        let mut text_ptr: *mut i8 = std::ptr::null_mut();
-
-        let result = unsafe { fluidaudio_qwen3_streaming_finish(self.ptr, &mut text_ptr) };
-
-        if result != 0 {
-            return Err("Failed to finish Qwen3 streaming session".to_string());
-        }
-
-        let text = if text_ptr.is_null() {
-            String::new()
-        } else {
-            let text = unsafe { CStr::from_ptr(text_ptr) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { fluidaudio_free_string(text_ptr) };
-            text
-        };
-
-        Ok(text)
-    }
-
-    pub fn is_qwen3_streaming_available(&self) -> bool {
-        unsafe { fluidaudio_is_qwen3_streaming_available(self.ptr) != 0 }
     }
 
     pub fn system_info(&self) -> SystemInfo {
@@ -835,7 +628,8 @@ impl FluidAudioBridge {
         };
 
         if status != 0 {
-            return Err("VAD process file failed".to_string());
+            unsafe { fluidaudio_free_vad_result(probs_ptr, voice_ptr, times_ptr, count) };
+            return Err(self.last_error_message("VAD process file failed"));
         }
 
         Ok(unsafe { collect_vad_frames(probs_ptr, voice_ptr, times_ptr, count) })
@@ -860,7 +654,8 @@ impl FluidAudioBridge {
         };
 
         if status != 0 {
-            return Err("VAD process samples failed".to_string());
+            unsafe { fluidaudio_free_vad_result(probs_ptr, voice_ptr, times_ptr, count) };
+            return Err(self.last_error_message("VAD process samples failed"));
         }
 
         Ok(unsafe { collect_vad_frames(probs_ptr, voice_ptr, times_ptr, count) })
@@ -871,7 +666,7 @@ impl FluidAudioBridge {
         let mut out_ptr: *mut i8 = std::ptr::null_mut();
         let status = unsafe { fluidaudio_itn_normalize(self.ptr, c_text.as_ptr(), &mut out_ptr) };
         if status != 0 {
-            return Err("ITN normalize failed".to_string());
+            return Err(self.last_error_message("ITN normalize failed"));
         }
         Ok(unsafe { take_c_string(out_ptr) })
     }
@@ -882,7 +677,7 @@ impl FluidAudioBridge {
         let status =
             unsafe { fluidaudio_itn_normalize_sentence(self.ptr, c_text.as_ptr(), &mut out_ptr) };
         if status != 0 {
-            return Err("ITN normalize_sentence failed".to_string());
+            return Err(self.last_error_message("ITN normalize_sentence failed"));
         }
         Ok(unsafe { take_c_string(out_ptr) })
     }
@@ -903,7 +698,7 @@ impl FluidAudioBridge {
             )
         };
         if status != 0 {
-            return Err("ITN normalize_sentence_max_span failed".to_string());
+            return Err(self.last_error_message("ITN normalize_sentence_max_span failed"));
         }
         Ok(unsafe { take_c_string(out_ptr) })
     }
@@ -962,6 +757,14 @@ unsafe fn take_c_string(ptr: *mut i8) -> String {
     s
 }
 
+unsafe fn take_token_timings(ptr: *mut i8) -> Result<Vec<TokenTiming>, String> {
+    let json = take_c_string(ptr);
+    if json.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&json).map_err(|error| format!("Invalid ASR token timings: {error}"))
+}
+
 impl Drop for FluidAudioBridge {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
@@ -978,6 +781,26 @@ pub struct AsrResult {
     pub duration: f64,
     pub processing_time: f64,
     pub rtfx: f32,
+    pub token_timings: Vec<TokenTiming>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct TokenTiming {
+    pub token: String,
+    #[serde(alias = "tokenId")]
+    pub token_id: i64,
+    #[serde(alias = "startTime")]
+    pub start_time: f64,
+    #[serde(alias = "endTime")]
+    pub end_time: f64,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelProgress {
+    pub fraction_completed: f64,
+    pub phase: &'static str,
+    pub model_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]

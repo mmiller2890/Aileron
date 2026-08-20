@@ -54,7 +54,7 @@ pub fn parse_comparison_args(args: &[String]) -> Result<ComparisonArgs, String> 
             .get(index + 1)
             .ok_or_else(|| format!("Missing value for {flag}"))?;
         match flag.as_str() {
-            "--model" if value == "v2" || value == "v3" => parsed.model = value.clone(),
+            "--model" if value == "v3" => parsed.model = value.clone(),
             "--model" => return Err(format!("Unsupported model: {value}")),
             "--preprocessing" if value == "processed" || value == "raw" || value == "both" => {
                 parsed.preprocessing = value.clone()
@@ -98,12 +98,12 @@ mod tests {
         let args = vec![
             "audio.wav".to_string(),
             "--model".to_string(),
-            "v2".to_string(),
+            "v3".to_string(),
             "--preprocessing".to_string(),
             "both".to_string(),
         ];
         let parsed = parse_comparison_args(&args).unwrap();
-        assert_eq!(parsed.model, "v2");
+        assert_eq!(parsed.model, "v3");
         assert_eq!(parsed.preprocessing, "both");
     }
 

@@ -16,7 +16,7 @@ revision:
 - recurrent VAD state is retained only by the streaming VAD API and can be
   reset explicitly at the start of each capture session;
 - raw mono sample conversion uses AVFoundation's `AVAudioConverter`;
-- ASR initialization supports explicit English v2 and multilingual v3 model
+- ASR initialization uses the multilingual Parakeet TDT v3 model
   selection;
 - native inverse-text-normalization results remain available separately from
   raw ASR text.

@@ -35,16 +35,15 @@ export function isBackchannel(text: string): boolean {
     return false;
   }
 
+  if (trimmed.includes("?")) {
+    return false;
+  }
+
   if (!WORD_CHARACTER_PATTERN.test(trimmed)) {
     return true;
   }
 
   if (trimmed.length > MAX_BACKCHANNEL_LENGTH) {
-    return false;
-  }
-
-  // A question-marked utterance is never a backchannel.
-  if (trimmed.includes("?")) {
     return false;
   }
 

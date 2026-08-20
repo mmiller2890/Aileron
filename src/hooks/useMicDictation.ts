@@ -3,7 +3,28 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { fetchSTT } from "@/lib";
 import { useApp } from "@/contexts";
-import type { DictationStatus } from "@/lib/dictation-sync";
+import {
+  dictationStopError,
+  type DictationStatus,
+} from "@/lib/dictation-sync";
+
+type InvokeCommand = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+export async function startMicDictation(
+  invokeCommand: InvokeCommand,
+  providerId: string,
+  deviceName: string,
+): Promise<void> {
+  if (providerId === "local-fluidaudio") {
+    await invokeCommand("stt_init", { modelVersion: "v3" });
+  }
+  await invokeCommand("start_mic_dictation", {
+    deviceId: !deviceName || deviceName === "default" ? null : deviceName,
+  });
+}
 
 /**
  * Native mic dictation (macOS): drives the Rust cpal + Silero pipeline via
@@ -71,9 +92,13 @@ export function useMicDictation({
         }
       }
     );
-    const unlistenStopped = listen("dictation-stopped", () => {
-      setStatus("idle");
-    });
+    const unlistenStopped = listen<{ unexpected?: boolean }>(
+      "dictation-stopped",
+      (event) => {
+        setError(dictationStopError(event.payload?.unexpected === true));
+        setStatus("idle");
+      },
+    );
     return () => {
       unlistenDetected.then((fn) => fn());
       unlistenStopped.then((fn) => fn());
@@ -89,9 +114,11 @@ export function useMicDictation({
     try {
       // Rust matches cpal devices by NAME; the stored id is a CoreAudio UID.
       const deviceName = selectedAudioDevices.input.name;
-      await invoke("start_mic_dictation", {
-        deviceId: !deviceName || deviceName === "default" ? null : deviceName,
-      });
+      await startMicDictation(
+        (command, args) => invoke(command, args),
+        selectedSttProviderRef.current.provider,
+        deviceName,
+      );
       setStatus("listening");
     } catch (err) {
       setStatus("idle");

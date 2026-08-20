@@ -69,6 +69,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     ignoreContinuousRecording,
     scrollAreaRef,
     isSttInitializing,
+    sttModelProgress,
     isLabelingSpeakers,
     currentSpeaker,
     audioLevel,
@@ -230,7 +231,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
           sideOffset={8}
         >
           <div className="relative flex flex-col h-[calc(100vh-4rem)] overflow-hidden">
-            {isSttInitializing && <SttInitOverlay />}
+            {isSttInitializing && (
+              <SttInitOverlay progress={sttModelProgress} />
+            )}
 
 
             {/* Header - Mode Switcher + Actions */}

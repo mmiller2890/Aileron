@@ -6,11 +6,41 @@ export interface SpeakerSegment {
   speaker_id: string;
   start_time: number;
   end_time: number;
+  quality_score: number;
 }
 
 export interface UtteranceWindow {
   start: number;
   end: number;
+}
+
+export function getSpeakerForUtterance(
+  startTime: number,
+  endTime: number,
+  segments: SpeakerSegment[],
+): string | null {
+  let bestSpeaker: string | null = null;
+  let bestOverlap = 0;
+  for (const segment of segments) {
+    if (
+      !segment.speaker_id ||
+      !Number.isFinite(segment.quality_score) ||
+      segment.quality_score <= 0 ||
+      !Number.isFinite(segment.start_time) ||
+      !Number.isFinite(segment.end_time) ||
+      segment.end_time <= segment.start_time
+    ) {
+      continue;
+    }
+    const overlap =
+      Math.min(endTime, segment.end_time) -
+      Math.max(startTime, segment.start_time);
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      bestSpeaker = segment.speaker_id;
+    }
+  }
+  return bestSpeaker;
 }
 
 /**
@@ -25,26 +55,7 @@ export function useSpeakerLabels(
   const [isLabelingSpeakers, setIsLabelingSpeakers] = useState(false);
   const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
 
-  const getSpeakerForUtterance = useCallback(
-    (
-      startTime: number,
-      endTime: number,
-      segments: SpeakerSegment[]
-    ): string | null => {
-      let bestSpeaker: string | null = null;
-      let bestOverlap = 0;
-      for (const seg of segments) {
-        const overlap =
-          Math.min(endTime, seg.end_time) - Math.max(startTime, seg.start_time);
-        if (overlap > bestOverlap) {
-          bestOverlap = overlap;
-          bestSpeaker = seg.speaker_id;
-        }
-      }
-      return bestSpeaker;
-    },
-    []
-  );
+  const resolveSpeaker = useCallback(getSpeakerForUtterance, []);
 
   const labelMessagesWithSpeakers = useCallback(
     (segments: SpeakerSegment[], timestamps: UtteranceWindow[]) => {
@@ -67,7 +78,7 @@ export function useSpeakerLabels(
           if (userMsgIndex === undefined) {
             return;
           }
-          const speaker = getSpeakerForUtterance(ts.start, ts.end, segments);
+          const speaker = resolveSpeaker(ts.start, ts.end, segments);
           if (speaker) {
             updated[userMsgIndex] = {
               ...updated[userMsgIndex],
@@ -78,7 +89,7 @@ export function useSpeakerLabels(
         return { ...prev, messages: updated };
       });
     },
-    [getSpeakerForUtterance, setConversation]
+    [resolveSpeaker, setConversation]
   );
 
   return {
@@ -88,7 +99,7 @@ export function useSpeakerLabels(
     setIsLabelingSpeakers,
     currentSpeaker,
     setCurrentSpeaker,
-    getSpeakerForUtterance,
+    getSpeakerForUtterance: resolveSpeaker,
     labelMessagesWithSpeakers,
   };
 }

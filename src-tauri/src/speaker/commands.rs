@@ -1,5 +1,5 @@
 // Assistant AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
-use crate::speaker::preprocessing::{prepare_utterance, PreparedUtterance};
+use crate::speaker::preprocessing::{apply_noise_gate, prepare_utterance, PreparedUtterance};
 use crate::speaker::{AudioDevice, SpeakerInput};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -15,14 +15,22 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 use tauri_plugin_shell::ShellExt;
 use tracing::{error, warn};
 
-#[cfg(target_os = "macos")]
 /// Silero VAD contract: 4096-sample chunks of 16 kHz mono audio (256 ms).
 const SILERO_CHUNK_SAMPLES: usize = 4096;
-const SILERO_SAMPLE_RATE: usize = 16_000;
 
 #[cfg(target_os = "macos")]
 fn samples_for_local_asr(samples: &[f32], sample_rate: u32) -> Result<Vec<f32>, String> {
     fluidaudio_rs::resample_samples(samples, sample_rate as f64).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn resampled_vad_frames(
+    accumulator: &mut VadFrameAccumulator,
+    samples: &[f32],
+    sample_rate: u32,
+) -> Result<Vec<[f32; SILERO_CHUNK_SAMPLES]>, String> {
+    let samples_16k = samples_for_local_asr(samples, sample_rate)?;
+    Ok(accumulator.push(&samples_16k))
 }
 
 /// Hysteresis thresholds mirroring the microphone path (@ricky0123/vad-react
@@ -31,6 +39,37 @@ fn samples_for_local_asr(samples: &[f32], sample_rate: u32) -> Result<Vec<f32>, 
 /// and chops utterances at natural pauses.
 const SILERO_POSITIVE_THRESHOLD: f32 = 0.5;
 const SILERO_NEGATIVE_THRESHOLD: f32 = 0.35;
+
+#[derive(Default)]
+struct VadFrameAccumulator {
+    samples: Vec<f32>,
+}
+
+impl VadFrameAccumulator {
+    fn push(&mut self, samples: &[f32]) -> Vec<[f32; SILERO_CHUNK_SAMPLES]> {
+        self.samples.extend_from_slice(samples);
+        let complete_samples = (self.samples.len() / SILERO_CHUNK_SAMPLES) * SILERO_CHUNK_SAMPLES;
+        if complete_samples == 0 {
+            return Vec::new();
+        }
+
+        self.samples
+            .drain(..complete_samples)
+            .collect::<Vec<_>>()
+            .chunks_exact(SILERO_CHUNK_SAMPLES)
+            .map(|chunk| {
+                chunk
+                    .try_into()
+                    .expect("complete VAD chunks always match the frame size")
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
 
 /// Peak below which a chunk is treated as "no signal at all" for the no-audio
 /// warning. A silent tap (denied permission / wrong output device) delivers
@@ -52,41 +91,49 @@ fn silero_is_speech(in_speech: bool, prob: f32) -> bool {
 
 /// Raw Silero speech probability for a 16 kHz chunk, or
 /// None when Silero is unavailable and the threshold fallback should be used.
-fn get_silero_vad_probability(app: &AppHandle, samples: &[f32]) -> Option<f32> {
+fn get_silero_vad_probability(app: &AppHandle, samples: &[f32]) -> Result<Option<f32>, String> {
     #[cfg(target_os = "macos")]
     {
         if let Some(stt_state) = app.try_state::<crate::stt::SttState>() {
-            if let Ok(probability) = stt_state.vad_process_streaming_samples(samples) {
-                return Some(probability);
-            }
+            return stt_state.vad_process_streaming_samples(samples).map(Some);
         }
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (app, samples);
-    None
+    Ok(None)
 }
 
-fn get_silero_vad_probability_batch(app: &AppHandle, samples: &[f32]) -> Option<f32> {
+fn get_silero_vad_probability_mic(app: &AppHandle, samples: &[f32]) -> Result<Option<f32>, String> {
     #[cfg(target_os = "macos")]
     {
         if let Some(stt_state) = app.try_state::<crate::stt::SttState>() {
-            if let Ok(frames) = stt_state.vad_process_samples(samples) {
-                return Some(
-                    frames
-                        .iter()
-                        .map(|frame| frame.probability)
-                        .fold(0.0, f32::max),
-                );
-            }
+            return stt_state
+                .mic_vad_process_streaming_samples(samples)
+                .map(Some);
         }
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (app, samples);
-    None
+    Ok(None)
+}
+
+fn consume_vad_probability(
+    result: Result<Option<f32>, String>,
+    reported: &mut bool,
+) -> (Option<f32>, Option<String>) {
+    match result {
+        Ok(probability) => (probability, None),
+        Err(error) if take_first_error(reported) => (None, Some(error)),
+        Err(_) => (None, None),
+    }
 }
 
 trait CaptureVadReset {
     fn reset_capture_vad(&self) -> Result<(), String>;
+}
+
+trait DictationVadReset {
+    fn reset_dictation_vad(&self) -> Result<(), String>;
 }
 
 #[cfg(target_os = "macos")]
@@ -96,9 +143,23 @@ impl CaptureVadReset for crate::stt::SttState {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl DictationVadReset for crate::stt::SttState {
+    fn reset_dictation_vad(&self) -> Result<(), String> {
+        self.reset_mic_vad_stream()
+    }
+}
+
 fn reset_vad_for_capture(reset: Option<&dyn CaptureVadReset>) -> Result<(), String> {
     match reset {
         Some(reset) => reset.reset_capture_vad(),
+        None => Ok(()),
+    }
+}
+
+fn reset_vad_for_dictation(reset: Option<&dyn DictationVadReset>) -> Result<(), String> {
+    match reset {
+        Some(reset) => reset.reset_dictation_vad(),
         None => Ok(()),
     }
 }
@@ -118,7 +179,8 @@ fn emit_speech_detected(
     start_time: f32,
     end_time: f32,
 ) {
-    let PreparedUtterance { raw, processed } = prepare_utterance(samples, noise_gate_threshold);
+    let PreparedUtterance { raw, processed } =
+        prepare_utterance(samples, noise_gate_threshold, compare_preprocessing);
     if processed.is_empty() {
         let _ = app.emit(
             "audio-encoding-error",
@@ -154,7 +216,7 @@ fn emit_speech_detected(
                 primary_samples,
                 comparison_samples,
                 sr,
-                raw.len() as f64 / sr as f64,
+                samples.len() as f64 / sr as f64,
             )
         }
         Err(error) => {
@@ -277,6 +339,16 @@ pub struct TaskReservation<'a, T> {
     active: bool,
 }
 
+pub struct TaskStopReservation<'a, T> {
+    slot: &'a TaskSlot<T>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TaskInstallOutcome {
+    Running,
+    Finished,
+}
+
 impl<T> TaskSlot<T> {
     pub fn new() -> Self {
         Self {
@@ -323,10 +395,47 @@ impl<T> TaskSlot<T> {
             TaskSlotState::Vacant | TaskSlotState::Reserved => Ok(None),
         }
     }
+
+    pub fn take_for_stop(
+        &self,
+    ) -> Result<
+        (
+            Option<tokio::task::JoinHandle<T>>,
+            TaskStopReservation<'_, T>,
+        ),
+        String,
+    > {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
+        if matches!(&*guard, TaskSlotState::Reserved) {
+            return Err("Task stop already in progress".to_string());
+        }
+        let task = match std::mem::replace(&mut *guard, TaskSlotState::Reserved) {
+            TaskSlotState::Running(task) => Some(task),
+            TaskSlotState::Vacant => None,
+            TaskSlotState::Reserved => unreachable!(),
+        };
+        Ok((task, TaskStopReservation { slot: self }))
+    }
+}
+
+impl<T> Drop for TaskStopReservation<'_, T> {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.slot.inner.lock() {
+            if matches!(&*guard, TaskSlotState::Reserved) {
+                *guard = TaskSlotState::Vacant;
+            }
+        }
+    }
 }
 
 impl<T> TaskReservation<'_, T> {
-    pub fn install(mut self, task: tokio::task::JoinHandle<T>) -> Result<(), String> {
+    pub fn install(
+        mut self,
+        task: tokio::task::JoinHandle<T>,
+    ) -> Result<TaskInstallOutcome, String> {
         let mut guard = match self.slot.inner.lock() {
             Ok(guard) => guard,
             Err(error) => {
@@ -338,13 +447,15 @@ impl<T> TaskReservation<'_, T> {
             task.abort();
             return Err("Task slot reservation was lost".to_string());
         }
-        *guard = if task.is_finished() {
-            TaskSlotState::Vacant
+        let outcome = if task.is_finished() {
+            *guard = TaskSlotState::Vacant;
+            TaskInstallOutcome::Finished
         } else {
-            TaskSlotState::Running(task)
+            *guard = TaskSlotState::Running(task);
+            TaskInstallOutcome::Running
         };
         self.active = false;
-        Ok(())
+        Ok(outcome)
     }
 }
 
@@ -394,7 +505,7 @@ pub async fn start_system_audio_capture(
     // tap is built, so it reflects the device the tap binds to.
     let on_default_device = device_id
         .as_deref()
-        .map_or(true, |d| d.is_empty() || d == "default");
+        .is_none_or(|d| d.is_empty() || d == "default");
     let monitor_output_uid = if on_default_device {
         crate::speaker::default_output_uid()
     } else {
@@ -444,6 +555,11 @@ pub async fn start_system_audio_capture(
     let stop_requested = state.stop_flag.clone();
     let discard_flag = state.discard_take.clone();
 
+    *state
+        .is_capturing
+        .lock()
+        .map_err(|e| format!("Failed to set capturing state: {}", e))? = true;
+
     let task = tokio::spawn(async move {
         let session_path = if vad_config.enabled {
             run_vad_capture(
@@ -492,15 +608,22 @@ pub async fn start_system_audio_capture(
         session_path
     });
 
-    if let Err(e) = reservation.install(task) {
-        warn!("{}", e);
-        return Err(e);
+    match reservation.install(task) {
+        Ok(TaskInstallOutcome::Running) => {}
+        Ok(TaskInstallOutcome::Finished) => {
+            if let Ok(mut is_capturing) = state.is_capturing.lock() {
+                *is_capturing = false;
+            }
+            return Err("Audio capture ended during startup".to_string());
+        }
+        Err(error) => {
+            if let Ok(mut is_capturing) = state.is_capturing.lock() {
+                *is_capturing = false;
+            }
+            warn!("{}", error);
+            return Err(error);
+        }
     }
-
-    *state
-        .is_capturing
-        .lock()
-        .map_err(|e| format!("Failed to set capturing state: {}", e))? = true;
 
     let _ = app.emit("capture-started", sr);
 
@@ -545,7 +668,9 @@ async fn run_vad_capture(
     let max_session_samples =
         (sr as usize * config.max_recording_duration_secs as usize).min(sr as usize * 3600);
     let mut session_audio: Vec<f32> = Vec::new();
-    let mut vad_accumulator: Vec<f32> = Vec::new();
+    let mut vad_accumulator = VadFrameAccumulator::default();
+    let mut vad_resample_error_reported = false;
+    let mut vad_processing_error_reported = false;
     // macOS assumes silence until the first Silero result; elsewhere Silero
     // never runs, so start at None to engage the threshold fallback.
     let mut pending_silero_prob: Option<f32> = if cfg!(target_os = "macos") {
@@ -553,7 +678,6 @@ async fn run_vad_capture(
     } else {
         None
     };
-    let mut vad_hops_until_refresh: usize = 0;
     let mut utterance_start_time: f32 = 0.0;
 
     while let Some(sample) = stream.next().await {
@@ -625,40 +749,40 @@ async fn run_vad_capture(
                 session_audio.extend_from_slice(&raw_mono);
             }
 
-            // Silero VAD processes 256 ms chunks of 16 kHz audio. The tap runs
-            // at the device rate, so accumulate 256 ms of device-rate samples
-            // and resample down to Silero's expected 4096 @ 16 kHz.
             #[cfg(target_os = "macos")]
             {
-                let silero_device_chunk = (sr as usize * SILERO_CHUNK_SAMPLES) / SILERO_SAMPLE_RATE;
-                vad_accumulator.extend_from_slice(&raw_mono);
-                if vad_accumulator.len() >= silero_device_chunk {
-                    let chunk: Vec<f32> = vad_accumulator.drain(..silero_device_chunk).collect();
-                    pending_silero_prob = match samples_for_local_asr(&chunk, sr) {
-                        Ok(chunk_16k) => get_silero_vad_probability(&app, &chunk_16k),
-                        Err(error) => {
+                match resampled_vad_frames(&mut vad_accumulator, &raw_mono, sr) {
+                    Ok(frames) => {
+                        for frame in frames {
+                            let (probability, error) = consume_vad_probability(
+                                get_silero_vad_probability(&app, &frame),
+                                &mut vad_processing_error_reported,
+                            );
+                            pending_silero_prob = probability;
+                            if let Some(error) = error {
+                                let _ = app.emit(
+                                    "stt-error",
+                                    format!("FluidAudio VAD processing failed: {error}"),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if take_first_error(&mut vad_resample_error_reported) {
                             let _ = app.emit(
                                 "stt-error",
                                 format!("Failed to resample VAD audio: {error}"),
                             );
-                            None
                         }
-                    };
-                    vad_hops_until_refresh = silero_device_chunk / config.hop_size;
-                }
-                if vad_hops_until_refresh > 0 {
-                    vad_hops_until_refresh -= 1;
+                        pending_silero_prob = None;
+                    }
                 }
             }
 
             let is_speech = match pending_silero_prob {
                 // Mic-style hysteresis on the raw probability.
                 Some(prob) => silero_is_speech(in_speech, prob),
-                None => {
-                    // Fallback to threshold VAD
-                    let (rms, peak) = calculate_audio_metrics(&raw_mono);
-                    rms > config.sensitivity_rms || peak > config.peak_threshold
-                }
+                None => fallback_vad_is_speech(&raw_mono, &config),
             };
 
             if is_speech {
@@ -687,7 +811,7 @@ async fn run_vad_capture(
                         if t.elapsed() >= chunk_interval && speech_buffer.len() > last_emitted_len {
                             let new_samples = &speech_buffer[last_emitted_len..];
                             let processed =
-                                prepare_utterance(new_samples, config.noise_gate_threshold)
+                                prepare_utterance(new_samples, config.noise_gate_threshold, false)
                                     .processed;
                             if let Ok(b64) = samples_to_raw_f32_b64(&processed) {
                                 let _ = app.emit("speech-chunk", b64);
@@ -836,6 +960,21 @@ fn finish_take_action(discarded: bool, has_audio: bool) -> TakeAction {
     }
 }
 
+fn take_first_error(reported: &mut bool) -> bool {
+    if *reported {
+        false
+    } else {
+        *reported = true;
+        true
+    }
+}
+
+fn fallback_vad_is_speech(samples: &[f32], config: &VadConfig) -> bool {
+    let gated = apply_noise_gate(samples, config.noise_gate_threshold);
+    let (rms, peak) = calculate_audio_metrics(&gated);
+    rms > config.sensitivity_rms || peak > config.peak_threshold
+}
+
 // Continuous capture (VAD disabled)
 async fn run_continuous_capture(
     app: AppHandle,
@@ -904,6 +1043,7 @@ async fn run_continuous_capture(
                             let processed = prepare_utterance(
                                 new_samples,
                                 config.noise_gate_threshold,
+                                false,
                             )
                             .processed;
                             if let Ok(b64) = samples_to_raw_f32_b64(&processed) {
@@ -1133,9 +1273,7 @@ pub async fn stop_system_audio_capture(
     // Store the intent BEFORE the stop flag: the capture loop breaks on the
     // stop flag and then reads this, so ordering it this way is what makes the
     // discard visible to the take being stopped.
-    state
-        .discard_take
-        .store(discard.unwrap_or(false), Ordering::Release);
+    latch_discard_intent(&state.discard_take, discard.unwrap_or(false));
     state.stop_flag.store(true, Ordering::Release);
 
     // Take the task and await it so the capture function can finish writing
@@ -1166,6 +1304,12 @@ pub async fn stop_system_audio_capture(
     // Emit stopped event
     let _ = app.emit("capture-stopped", ());
     Ok(session_path)
+}
+
+fn latch_discard_intent(discard: &AtomicBool, requested: bool) {
+    if requested {
+        discard.store(true, Ordering::Release);
+    }
 }
 
 /// Manual stop for continuous recording
@@ -1325,6 +1469,13 @@ mod tests {
         }
     }
 
+    impl DictationVadReset for FakeVadReset {
+        fn reset_dictation_vad(&self) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
+        }
+    }
+
     #[test]
     fn capture_boundary_resets_vad_once() {
         let reset = FakeVadReset {
@@ -1347,6 +1498,31 @@ mod tests {
         assert_eq!(
             reset_vad_for_capture(Some(&reset)),
             Err("reset failed".to_string())
+        );
+    }
+
+    #[test]
+    fn dictation_boundary_resets_its_vad_once() {
+        let reset = FakeVadReset {
+            result: Ok(()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        reset_vad_for_dictation(Some(&reset)).unwrap();
+
+        assert_eq!(reset.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dictation_boundary_propagates_vad_reset_errors() {
+        let reset = FakeVadReset {
+            result: Err("mic reset failed".to_string()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        assert_eq!(
+            reset_vad_for_dictation(Some(&reset)),
+            Err("mic reset failed".to_string())
         );
     }
 
@@ -1373,6 +1549,15 @@ mod tests {
         assert!(converted.iter().any(|sample| sample.abs() > 0.0));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resampler_surfaces_swift_error_detail() {
+        let error = samples_for_local_asr(&[0.25], 0).unwrap_err();
+
+        assert!(error.contains("Invalid audio input sample rate"));
+        assert_ne!(error, "Failed to resample audio");
+    }
+
     #[test]
     fn hysteresis_requires_positive_threshold_to_enter_speech() {
         // Not currently in speech: must exceed the positive threshold.
@@ -1392,12 +1577,96 @@ mod tests {
     }
 
     #[test]
+    fn mic_vad_waits_for_a_complete_silero_frame() {
+        let mut accumulator = VadFrameAccumulator::default();
+
+        for value in [1.0, 2.0, 3.0] {
+            assert!(accumulator.push(&vec![value; 1024]).is_empty());
+        }
+
+        let frames = accumulator.push(&vec![4.0; 1024]);
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].len(), SILERO_CHUNK_SAMPLES);
+        assert_eq!(&frames[0][0..1024], vec![1.0; 1024]);
+        assert_eq!(&frames[0][3072..4096], vec![4.0; 1024]);
+    }
+
+    #[test]
+    fn mic_vad_retains_surplus_samples_until_the_next_frame() {
+        let mut accumulator = VadFrameAccumulator::default();
+
+        let first = accumulator.push(&vec![1.0; 5000]);
+        let second = accumulator.push(&vec![2.0; 3192]);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(&second[0][0..904], vec![1.0; 904]);
+        assert_eq!(&second[0][904..4096], vec![2.0; 3192]);
+    }
+
+    #[test]
+    fn vad_accumulator_emits_every_complete_frame_from_one_push() {
+        let mut accumulator = VadFrameAccumulator::default();
+
+        let frames = accumulator.push(&vec![1.0; SILERO_CHUNK_SAMPLES * 3 + 17]);
+
+        assert_eq!(frames.len(), 3);
+        assert!(frames
+            .iter()
+            .all(|frame| frame.len() == SILERO_CHUNK_SAMPLES));
+        assert!(accumulator
+            .push(&vec![2.0; SILERO_CHUNK_SAMPLES - 18])
+            .is_empty());
+        assert_eq!(accumulator.push(&[2.0]).len(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_vad_resampling_emits_exact_frames_at_supported_device_rates() {
+        for sample_rate in [44_100, 48_000, 96_000] {
+            let mut accumulator = VadFrameAccumulator::default();
+            let frames = resampled_vad_frames(
+                &mut accumulator,
+                &vec![0.25; sample_rate as usize],
+                sample_rate,
+            )
+            .unwrap();
+
+            assert_eq!(frames.len(), 3, "sample rate {sample_rate}");
+            assert!(frames
+                .iter()
+                .all(|frame| frame.len() == SILERO_CHUNK_SAMPLES));
+        }
+    }
+
+    #[test]
+    fn mic_vad_reset_discards_an_incomplete_frame() {
+        let mut accumulator = VadFrameAccumulator::default();
+
+        assert!(accumulator.push(&vec![1.0; 904]).is_empty());
+        accumulator.clear();
+
+        assert!(accumulator.push(&vec![2.0; 3192]).is_empty());
+    }
+
+    #[test]
     fn discarded_take_is_dropped_rather_than_emitted() {
         // "Discard" on a manual take must drop the audio outright: emitting it
         // means the frontend transcribes it, appends it to the transcript and
         // may answer it — i.e. discard behaving exactly like stop-and-send.
         assert_eq!(finish_take_action(true, true), TakeAction::Drop);
         assert_eq!(finish_take_action(true, false), TakeAction::Drop);
+    }
+
+    #[test]
+    fn discard_intent_cannot_be_downgraded_by_a_later_stop() {
+        let discard = AtomicBool::new(false);
+
+        latch_discard_intent(&discard, true);
+        latch_discard_intent(&discard, false);
+
+        assert!(discard.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1494,14 +1763,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopping_task_keeps_slot_reserved_until_termination() {
+        let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("busy").unwrap();
+        reservation
+            .install(tokio::spawn(std::future::pending::<()>()))
+            .unwrap();
+
+        let (task, stopping) = slot.take_for_stop().unwrap();
+
+        assert_eq!(slot.reserve("busy").err(), Some("busy".to_string()));
+        task.unwrap().abort();
+        drop(stopping);
+        assert!(slot.reserve("busy").is_ok());
+    }
+
+    #[tokio::test]
+    async fn timed_out_stop_aborts_before_the_slot_reopens() {
+        let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("busy").unwrap();
+        reservation
+            .install(tokio::spawn(std::future::pending::<()>()))
+            .unwrap();
+        let (task, stopping) = slot.take_for_stop().unwrap();
+        let mut task = task.unwrap();
+
+        let timed_out = tokio::time::timeout(Duration::ZERO, &mut task)
+            .await
+            .is_err();
+        assert!(timed_out);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(slot.reserve("busy").err(), Some("busy".to_string()));
+        drop(stopping);
+        assert!(slot.reserve("busy").is_ok());
+    }
+
+    #[tokio::test]
     async fn install_skips_a_task_that_finished_before_registration() {
         let slot = TaskSlot::<()>::new();
         let reservation = slot.reserve("busy").unwrap();
         let task = tokio::spawn(async {});
         tokio::task::yield_now().await;
-        reservation.install(task).unwrap();
+        let outcome = reservation.install(task).unwrap();
 
+        assert_eq!(outcome, TaskInstallOutcome::Finished);
         assert!(slot.take().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn install_reports_a_running_task() {
+        let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("busy").unwrap();
+        let task = tokio::spawn(std::future::pending::<()>());
+
+        let outcome = reservation.install(task).unwrap();
+
+        assert_eq!(outcome, TaskInstallOutcome::Running);
+        assert!(slot.take().unwrap().is_some());
+    }
+
+    #[test]
+    fn dictation_stop_reports_whether_the_stream_ended_unexpectedly() {
+        assert!(!dictation_stopped_payload(true).unexpected);
+        assert!(dictation_stopped_payload(false).unexpected);
+    }
+
+    #[test]
+    fn repeated_vad_resample_failures_are_reported_once() {
+        let mut reported = false;
+
+        assert!(take_first_error(&mut reported));
+        assert!(!take_first_error(&mut reported));
+    }
+
+    #[test]
+    fn vad_processing_failure_switches_to_fallback_and_is_reported_once() {
+        let mut reported = false;
+
+        let (probability, first_error) =
+            consume_vad_probability(Err("CoreML prediction failed".to_string()), &mut reported);
+        let (_, repeated_error) = consume_vad_probability(
+            Err("CoreML prediction failed again".to_string()),
+            &mut reported,
+        );
+
+        assert_eq!(probability, None);
+        assert_eq!(first_error.as_deref(), Some("CoreML prediction failed"));
+        assert_eq!(repeated_error, None);
+    }
+
+    #[test]
+    fn vad_processing_success_preserves_the_native_probability() {
+        let mut reported = false;
+
+        let (probability, error) = consume_vad_probability(Ok(Some(0.73)), &mut reported);
+
+        assert_eq!(probability, Some(0.73));
+        assert_eq!(error, None);
+        assert!(!reported);
+    }
+
+    #[test]
+    fn fallback_vad_keeps_metrics_tuned_to_gated_audio() {
+        let mut samples = vec![0.011; 302];
+        samples.extend(vec![0.00075; 722]);
+        let config = VadConfig::default();
+
+        let (raw_rms, _) = calculate_audio_metrics(&samples);
+        assert!(raw_rms > config.sensitivity_rms);
+        assert!(!fallback_vad_is_speech(&samples, &config));
     }
 
     #[test]
@@ -1513,8 +1884,10 @@ mod tests {
     fn vad_config_validate_rejects_unbounded_hop_size() {
         // hop_size feeds Vec/VecDeque::with_capacity in the capture task: an
         // unbounded value overflows capacity and panics the spawned task.
-        let mut config = VadConfig::default();
-        config.hop_size = 1_000_000;
+        let mut config = VadConfig {
+            hop_size: 1_000_000,
+            ..VadConfig::default()
+        };
         assert!(config.validate().is_err());
 
         config.hop_size = 128; // below the 256 floor
@@ -1523,19 +1896,25 @@ mod tests {
 
     #[test]
     fn vad_config_validate_rejects_unbounded_pre_speech_and_silence_chunks() {
-        let mut config = VadConfig::default();
-        config.pre_speech_chunks = 100_000;
+        let config = VadConfig {
+            pre_speech_chunks: 100_000,
+            ..VadConfig::default()
+        };
         assert!(config.validate().is_err());
 
-        let mut config = VadConfig::default();
-        config.silence_chunks = 100_000;
+        let config = VadConfig {
+            silence_chunks: 100_000,
+            ..VadConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn vad_config_validate_rejects_fast_chunk_interval() {
-        let mut config = VadConfig::default();
-        config.chunk_interval_ms = 1;
+        let config = VadConfig {
+            chunk_interval_ms: 1,
+            ..VadConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
@@ -1549,7 +1928,7 @@ mod tests {
         // 12,288 samples = 12 hops; 2 periods = 24 hops.
         let config = VadConfig::default();
         let sr: usize = 48_000;
-        let silero_device_chunk = (sr * SILERO_CHUNK_SAMPLES) / SILERO_SAMPLE_RATE;
+        let silero_device_chunk = (sr * SILERO_CHUNK_SAMPLES) / 16_000;
         let pre_speech_samples = config.pre_speech_chunks * config.hop_size;
         assert!(
             pre_speech_samples >= 2 * silero_device_chunk,
@@ -1632,14 +2011,22 @@ pub async fn start_mic_dictation(app: AppHandle, device_id: Option<String>) -> R
     // here — with the error surfacing as nothing louder than a red mic icon.
     // Bring VAD up on demand, then apply the original guard unchanged.
     #[cfg(target_os = "macos")]
-    if get_silero_vad_probability_batch(&app, &[0.0f32; 512]).is_none() {
-        crate::stt::ensure_vad_ready(&app, SILERO_POSITIVE_THRESHOLD).await?;
-    }
-
-    if get_silero_vad_probability_batch(&app, &[0.0f32; 512]).is_none() {
-        return Err(
-            "Voice detection isn't ready — initialize speech recognition first".to_string(),
-        );
+    {
+        let needs_init = app
+            .try_state::<crate::stt::SttState>()
+            .is_none_or(|state| !state.is_mic_vad_ready());
+        if needs_init {
+            crate::stt::ensure_vad_ready(&app, SILERO_POSITIVE_THRESHOLD).await?;
+        }
+        let stt_state = app
+            .try_state::<crate::stt::SttState>()
+            .ok_or("Voice detection isn't ready — initialize speech recognition first")?;
+        if !stt_state.is_mic_vad_ready() {
+            return Err(
+                "Voice detection isn't ready — initialize speech recognition first".to_string(),
+            );
+        }
+        reset_vad_for_dictation(Some(&*stt_state))?;
     }
 
     let input = crate::speaker::mic::MicInput::new(device_id)?;
@@ -1665,13 +2052,28 @@ pub async fn start_mic_dictation(app: AppHandle, device_id: Option<String>) -> R
     let task = tokio::spawn(async move {
         run_mic_dictation(app_clone.clone(), rx, sr, vad_config, stop_flag).await;
         drop(stream_guard);
-        let _ = app_clone.emit("dictation-stopped", ());
         let state = app_clone.state::<MicDictationState>();
+        let payload =
+            dictation_stopped_payload(state.stop_flag.load(std::sync::atomic::Ordering::SeqCst));
+        let _ = app_clone.emit("dictation-stopped", payload);
         state.task.release_if_owned(tokio::task::id());
     });
 
-    reservation.install(task)?;
-    Ok(())
+    match reservation.install(task)? {
+        TaskInstallOutcome::Running => Ok(()),
+        TaskInstallOutcome::Finished => Err("Microphone capture ended during startup".to_string()),
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct DictationStoppedPayload {
+    unexpected: bool,
+}
+
+fn dictation_stopped_payload(stop_requested: bool) -> DictationStoppedPayload {
+    DictationStoppedPayload {
+        unexpected: !stop_requested,
+    }
 }
 
 #[tauri::command]
@@ -1680,9 +2082,15 @@ pub async fn stop_mic_dictation(app: AppHandle) -> Result<(), String> {
     state
         .stop_flag
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let task = state.task.take()?;
-    if let Some(task) = task {
-        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(3), task).await;
+    let (task, _stopping) = state.task.take_for_stop()?;
+    if let Some(mut task) = task {
+        if tokio::time::timeout(tokio::time::Duration::from_secs(3), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
     }
     Ok(())
 }
@@ -1702,6 +2110,9 @@ async fn run_mic_dictation(
     let mut in_speech = false;
     let mut silence_hops = 0usize;
     let mut speech_hops = 0usize;
+    let mut vad_accumulator = VadFrameAccumulator::default();
+    let mut vad_resample_error_reported = false;
+    let mut vad_processing_error_reported = false;
     // macOS assumes silence until the first Silero result (mirrors the tap loop).
     let mut prob: Option<f32> = if cfg!(target_os = "macos") {
         Some(0.0)
@@ -1724,18 +2135,35 @@ async fn run_mic_dictation(
         while pending.len() >= hop {
             let hop_chunk: Vec<f32> = pending.drain(..hop).collect();
             #[cfg(target_os = "macos")]
-            if let Ok(chunk_16k) = samples_for_local_asr(&hop_chunk, sr) {
-                if let Some(probability) = get_silero_vad_probability_batch(&app, &chunk_16k) {
-                    prob = Some(probability);
+            match resampled_vad_frames(&mut vad_accumulator, &hop_chunk, sr) {
+                Ok(frames) => {
+                    for frame in frames {
+                        let (probability, error) = consume_vad_probability(
+                            get_silero_vad_probability_mic(&app, &frame),
+                            &mut vad_processing_error_reported,
+                        );
+                        prob = probability;
+                        if let Some(error) = error {
+                            let _ = app.emit(
+                                "stt-error",
+                                format!("FluidAudio microphone VAD processing failed: {error}"),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    if take_first_error(&mut vad_resample_error_reported) {
+                        let _ = app.emit(
+                            "stt-error",
+                            format!("Failed to resample microphone VAD audio: {error}"),
+                        );
+                    }
+                    prob = None;
                 }
             }
             let is_speech = match prob {
                 Some(p) => silero_is_speech(in_speech, p),
-                None => {
-                    // Threshold fallback (mirrors the tap loop's philosophy).
-                    let (rms, peak) = calculate_audio_metrics(&hop_chunk);
-                    rms > config.sensitivity_rms || peak > config.peak_threshold
-                }
+                None => fallback_vad_is_speech(&hop_chunk, &config),
             };
 
             if is_speech {
@@ -1776,7 +2204,7 @@ async fn run_mic_dictation(
 }
 
 fn emit_dictation_utterance(app: &AppHandle, sr: u32, samples: &[f32], config: &VadConfig) {
-    let processed = prepare_utterance(samples, config.noise_gate_threshold).processed;
+    let processed = prepare_utterance(samples, config.noise_gate_threshold, false).processed;
     if processed.is_empty() {
         return;
     }

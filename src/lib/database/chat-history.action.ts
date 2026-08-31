@@ -60,7 +60,7 @@ function validateMessage(message: any): boolean {
  * Create a new conversation with transaction safety
  */
 export async function createConversation(
-  conversation: ChatConversation
+  conversation: ChatConversation,
 ): Promise<ChatConversation> {
   if (!validateConversation(conversation)) {
     throw new Error("Invalid conversation data");
@@ -77,7 +77,7 @@ export async function createConversation(
         conversation.title,
         conversation.createdAt || Date.now(),
         conversation.updatedAt || Date.now(),
-      ]
+      ],
     );
 
     // Insert all messages
@@ -100,7 +100,7 @@ export async function createConversation(
           message.content,
           message.timestamp,
           attachedFilesJson,
-        ]
+        ],
       );
     }
 
@@ -130,7 +130,7 @@ type Db = Awaited<ReturnType<typeof getDatabase>>;
  */
 async function assembleConversations(
   db: Db,
-  conversations: DbConversation[]
+  conversations: DbConversation[],
 ): Promise<ChatConversation[]> {
   if (conversations.length === 0) {
     return [];
@@ -139,7 +139,7 @@ async function assembleConversations(
   const placeholders = conversationIds.map(() => "?").join(",");
   const allMessages = await db.select<DbMessage[]>(
     `SELECT * FROM messages WHERE conversation_id IN (${placeholders}) ORDER BY conversation_id, timestamp ASC`,
-    conversationIds
+    conversationIds,
   );
   return rowsToConversations(conversations, allMessages);
 }
@@ -154,7 +154,7 @@ export async function getAllConversations(): Promise<ChatConversation[]> {
 
   try {
     const conversations = await db.select<DbConversation[]>(
-      "SELECT * FROM conversations ORDER BY updated_at DESC"
+      "SELECT * FROM conversations ORDER BY updated_at DESC",
     );
     return await assembleConversations(db, conversations);
   } catch (error) {
@@ -169,14 +169,14 @@ export async function getAllConversations(): Promise<ChatConversation[]> {
  * make every window focus reload the whole database.
  */
 export async function getRecentConversations(
-  limit = DEFAULT_RECENT_CONVERSATIONS_LIMIT
+  limit = DEFAULT_RECENT_CONVERSATIONS_LIMIT,
 ): Promise<ChatConversation[]> {
   const db = await getDatabase();
 
   try {
     const conversations = await db.select<DbConversation[]>(
       "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?",
-      [limit]
+      [limit],
     );
     return await assembleConversations(db, conversations);
   } catch (error) {
@@ -189,7 +189,7 @@ export async function getRecentConversations(
  * Get a single conversation by ID
  */
 export async function getConversationById(
-  id: string
+  id: string,
 ): Promise<ChatConversation | null> {
   if (!id || typeof id !== "string") {
     console.error("Invalid conversation id");
@@ -202,7 +202,7 @@ export async function getConversationById(
     // Get conversation
     const conversations = await db.select<DbConversation[]>(
       "SELECT * FROM conversations WHERE id = ?",
-      [id]
+      [id],
     );
 
     if (conversations.length === 0) {
@@ -214,7 +214,7 @@ export async function getConversationById(
     // Get messages
     const messages = await db.select<DbMessage[]>(
       "SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC",
-      [id]
+      [id],
     );
 
     return {
@@ -240,7 +240,7 @@ export async function getConversationById(
  * Update a conversation with transaction safety
  */
 export async function updateConversation(
-  conversation: ChatConversation
+  conversation: ChatConversation,
 ): Promise<ChatConversation> {
   if (!validateConversation(conversation)) {
     throw new Error("Invalid conversation data");
@@ -252,7 +252,7 @@ export async function updateConversation(
     // Update conversation
     const updateResult = await db.execute(
       "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-      [conversation.title, conversation.updatedAt, conversation.id]
+      [conversation.title, conversation.updatedAt, conversation.id],
     );
 
     if (updateResult.rowsAffected === 0) {
@@ -262,7 +262,7 @@ export async function updateConversation(
     // Get existing messages for backup
     const existingMessages = await db.select<DbMessage[]>(
       "SELECT * FROM messages WHERE conversation_id = ?",
-      [conversation.id]
+      [conversation.id],
     );
 
     // Delete existing messages
@@ -291,14 +291,14 @@ export async function updateConversation(
             message.content,
             message.timestamp,
             attachedFilesJson,
-          ]
+          ],
         );
       }
     } catch (messageError) {
       // Rollback: restore original messages
       console.error(
         "Failed to insert new messages, restoring backup:",
-        messageError
+        messageError,
       );
       for (const msg of existingMessages) {
         await db
@@ -311,7 +311,7 @@ export async function updateConversation(
               msg.content,
               msg.timestamp,
               msg.attached_files,
-            ]
+            ],
           )
           .catch(() => {});
       }
@@ -329,7 +329,7 @@ export async function updateConversation(
  * Save or update a conversation (upsert operation)
  */
 export async function saveConversation(
-  conversation: ChatConversation
+  conversation: ChatConversation,
 ): Promise<ChatConversation> {
   if (!validateConversation(conversation)) {
     throw new Error("Invalid conversation data");
@@ -472,7 +472,7 @@ export async function migrateLocalStorageToSQLite(): Promise<{
             conversation.title,
             conversation.createdAt || Date.now(),
             conversation.updatedAt || Date.now(),
-          ]
+          ],
         );
 
         // Insert messages
@@ -489,7 +489,7 @@ export async function migrateLocalStorageToSQLite(): Promise<{
             ) {
               console.warn(
                 `Skipping invalid message in conversation ${conversation.id}:`,
-                message
+                message,
               );
               continue;
             }
@@ -507,7 +507,7 @@ export async function migrateLocalStorageToSQLite(): Promise<{
                 message.content,
                 message.timestamp || Date.now(),
                 attachedFilesJson,
-              ]
+              ],
             );
           }
         }
@@ -516,7 +516,7 @@ export async function migrateLocalStorageToSQLite(): Promise<{
       } catch (convError) {
         console.error(
           `Failed to migrate conversation ${conversation?.id}:`,
-          convError
+          convError,
         );
         errorCount++;
         // Clean up partially migrated conversation

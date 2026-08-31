@@ -18,7 +18,7 @@ export async function getDatabase(): Promise<Database> {
       throw new Error(
         `Failed to initialize database: ${
           error instanceof Error ? error.message : String(error)
-        }`
+        }`,
       );
     }
   }

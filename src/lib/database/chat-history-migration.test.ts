@@ -30,9 +30,7 @@ const MIGRATION_KEY = "chat_history_migrated_to_sqlite";
 const conversation = (id: string, title: string) => ({
   id,
   title,
-  messages: [
-    { id: `${id}-m1`, role: "user", content: "hi", timestamp: 100 },
-  ],
+  messages: [{ id: `${id}-m1`, role: "user", content: "hi", timestamp: 100 }],
 });
 
 beforeEach(() => {
@@ -49,7 +47,7 @@ describe("migrateLocalStorageToSQLite", () => {
   test("keeps the legacy data and marker unset when some conversations fail", async () => {
     storage.set(
       LEGACY_KEY,
-      JSON.stringify([conversation("c1", "Good"), { id: "c2" }])
+      JSON.stringify([conversation("c1", "Good"), { id: "c2" }]),
     );
 
     const result = await migrateLocalStorageToSQLite();
@@ -68,7 +66,7 @@ describe("migrateLocalStorageToSQLite", () => {
   test("keeps the legacy data and marker unset when an insert throws", async () => {
     storage.set(
       LEGACY_KEY,
-      JSON.stringify([conversation("c1", "Good"), conversation("c2", "Bad")])
+      JSON.stringify([conversation("c1", "Good"), conversation("c2", "Bad")]),
     );
     dbExecute
       .mockResolvedValueOnce({ rowsAffected: 1 })
@@ -89,12 +87,19 @@ describe("migrateLocalStorageToSQLite", () => {
   test("marks migration complete and clears legacy data on full success", async () => {
     storage.set(
       LEGACY_KEY,
-      JSON.stringify([conversation("c1", "Good"), conversation("c2", "Also good")])
+      JSON.stringify([
+        conversation("c1", "Good"),
+        conversation("c2", "Also good"),
+      ]),
     );
 
     const result = await migrateLocalStorageToSQLite();
 
-    expect(result).toEqual({ success: true, migratedCount: 2, error: undefined });
+    expect(result).toEqual({
+      success: true,
+      migratedCount: 2,
+      error: undefined,
+    });
     expect(storage.has(LEGACY_KEY)).toBe(false);
     expect(storage.get(MIGRATION_KEY)).toBe("true");
   });

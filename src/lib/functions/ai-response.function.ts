@@ -259,8 +259,18 @@ export async function* fetchAIResponse(params: {
           `Failed to parse non-streaming response: ${describeError(parseError)}`,
         );
       }
-      const content =
-        getByPath(json, provider?.responseContentPath || "") || "";
+      const contentPath = provider?.responseContentPath || "";
+      const content = getByPath(json, contentPath);
+      // Without this guard an empty or wrong responseContentPath makes
+      // getByPath hand back the whole parsed response, which the caller
+      // renders and persists as the literal text "[object Object]".
+      if (typeof content !== "string") {
+        throw new Error(
+          `Provider "${
+            provider?.id || "unknown"
+          }" returned a response with no text at responseContentPath "${contentPath}"`,
+        );
+      }
       yield content;
       return;
     }

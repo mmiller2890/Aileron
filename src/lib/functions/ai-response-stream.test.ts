@@ -70,6 +70,73 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+const nonStreamingProvider = (responseContentPath: string): TYPE_PROVIDER =>
+  ({
+    id: "custom-json",
+    curl: `curl -X POST http://x.test/v1/chat/completions -H "Content-Type: application/json" -d '${OPENAI_BODY}'`,
+    responseContentPath,
+    streaming: false,
+  }) as TYPE_PROVIDER;
+
+const drainJson = async (
+  body: unknown,
+  responseContentPath: string,
+): Promise<string[]> => {
+  tauriFetchMock.mockResolvedValueOnce(
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  const out: string[] = [];
+  for await (const chunk of fetchAIResponse({
+    provider: nonStreamingProvider(responseContentPath),
+    selectedProvider: {
+      provider: "custom-json",
+      variables: { MODEL: "m" },
+    },
+    userMessage: "hello",
+  })) {
+    out.push(chunk);
+  }
+  return out;
+};
+
+describe("fetchAIResponse non-streaming response", () => {
+  it("yields the text at responseContentPath", async () => {
+    const out = await drainJson(
+      { choices: [{ message: { content: "Hello" } }] },
+      "choices[0].message.content",
+    );
+
+    expect(out).toEqual(["Hello"]);
+  });
+
+  it("yields an empty string when the provider returns empty content", async () => {
+    const out = await drainJson(
+      { choices: [{ message: { content: "" } }] },
+      "choices[0].message.content",
+    );
+
+    expect(out).toEqual([""]);
+  });
+
+  it("throws instead of yielding the whole body when the path is empty", async () => {
+    await expect(
+      drainJson({ choices: [{ message: { content: "Hello" } }] }, ""),
+    ).rejects.toThrow(/responseContentPath/);
+  });
+
+  it("throws instead of yielding an object when the path does not resolve to text", async () => {
+    await expect(
+      drainJson(
+        { choices: [{ message: { content: "Hello" } }] },
+        "choices[0].message",
+      ),
+    ).rejects.toThrow(/responseContentPath/);
+  });
+});
+
 describe("fetchAIResponse streaming read loop", () => {
   it("assembles deltas from a normal multi-delta stream", async () => {
     const out = await drain([

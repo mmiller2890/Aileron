@@ -85,7 +85,7 @@ export function extractVariables(
     return [];
   }
 
-  const regex = /\{\{([A-Z_]+)\}\}/g;
+  const regex = /\{\{([A-Z0-9_]+)\}\}/g;
   const matches = curl?.match(regex) || [];
   const variables = matches
     .map((match) => {
@@ -259,6 +259,11 @@ export function providerEndpointLabel(url: string): string {
   }
 }
 
+const SECRET_VARIABLE_NAME =
+  /(api_?key|token|secret|password|authorization|auth)/i;
+const NON_SECRET_VARIABLES = new Set(["MODEL"]);
+const MIN_REDACTABLE_SECRET_LENGTH = 8;
+
 export function redactProviderError(
   text: string,
   variables: Record<string, string>,
@@ -267,11 +272,19 @@ export function redactProviderError(
     providerEndpointLabel(url),
   );
   const secretValues = Object.entries(variables)
-    .filter(
-      ([key, value]) =>
-        value &&
-        /(api_?key|token|secret|password|authorization|auth)/i.test(key),
-    )
+    .filter(([key, value]) => {
+      if (!value || NON_SECRET_VARIABLES.has(key.toUpperCase())) return false;
+      // Any variable can hold a secret — a key named `KEY` or `SESSION` does
+      // not match the name pattern — so length, not the name, is the primary
+      // test. Short values are left alone because they are almost never
+      // secrets and blind-replacing one (`REGION: "us"`) would shred the
+      // surrounding message. The name pattern still catches a short value in
+      // an explicitly secret-named variable.
+      return (
+        value.length >= MIN_REDACTABLE_SECRET_LENGTH ||
+        SECRET_VARIABLE_NAME.test(key)
+      );
+    })
     .map(([, value]) => value)
     .sort((a, b) => b.length - a.length);
 

@@ -81,4 +81,30 @@ describe("provider error redaction", () => {
       }),
     ).toBe("model qwen failed");
   });
+
+  it("redacts secrets held in variables the name pattern does not match", () => {
+    const result = redactProviderError("rejected key sk-abcdef123456", {
+      KEY: "sk-abcdef123456",
+      MODEL: "qwen",
+    });
+
+    expect(result).toBe("rejected key [REDACTED]");
+  });
+
+  it("redacts a short value when the variable is explicitly a secret", () => {
+    expect(
+      redactProviderError("bad token abc123", {
+        API_KEY: "abc123",
+      }),
+    ).toBe("bad token [REDACTED]");
+  });
+
+  it("leaves short non-secret values alone so the message survives", () => {
+    expect(
+      redactProviderError("request status 404 in us", {
+        REGION: "us",
+        MODEL: "qwen",
+      }),
+    ).toBe("request status 404 in us");
+  });
 });

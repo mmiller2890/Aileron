@@ -8,27 +8,27 @@ import {
 describe("describeError", () => {
   it("uses an Error's message", () => {
     expect(describeError(new Error("connection refused"))).toBe(
-      "connection refused"
+      "connection refused",
     );
   });
 
   // The Tauri HTTP plugin rejects with a bare string. `instanceof Error` is
   // false for these, which is how a real cause became "Unknown error".
   it("passes a thrown string through unchanged", () => {
-    expect(describeError("error sending request for url (http://localhost:1234)")).toBe(
-      "error sending request for url (http://localhost:1234)"
-    );
+    expect(
+      describeError("error sending request for url (http://localhost:1234)"),
+    ).toBe("error sending request for url (http://localhost:1234)");
   });
 
   it("reads a message property off a plain object", () => {
     expect(describeError({ message: "scope not allowed" })).toBe(
-      "scope not allowed"
+      "scope not allowed",
     );
   });
 
   it("serialises an object with no message", () => {
     expect(describeError({ code: 61, syscall: "connect" })).toBe(
-      '{"code":61,"syscall":"connect"}'
+      '{"code":61,"syscall":"connect"}',
     );
   });
 
@@ -52,8 +52,8 @@ describe("provider error redaction", () => {
   it("shows only the endpoint origin", () => {
     expect(
       providerEndpointLabel(
-        "https://alice:password@example.com/private/key?token=secret"
-      )
+        "https://alice:password@example.com/private/key?token=secret",
+      ),
     ).toBe("https://example.com");
   });
 
@@ -63,11 +63,11 @@ describe("provider error redaction", () => {
       {
         API_KEY: "top-secret",
         MODEL: "qwen",
-      }
+      },
     );
 
     expect(result).toBe(
-      "request to https://example.com failed with [REDACTED]"
+      "request to https://example.com failed with [REDACTED]",
     );
     expect(result).not.toContain("password");
     expect(result).not.toContain("private");
@@ -78,7 +78,7 @@ describe("provider error redaction", () => {
     expect(
       redactProviderError("model qwen failed", {
         MODEL: "qwen",
-      })
+      }),
     ).toBe("model qwen failed");
   });
 });

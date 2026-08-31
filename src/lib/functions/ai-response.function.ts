@@ -29,14 +29,14 @@ function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
   }
 
   const lengthOption = RESPONSE_LENGTHS.find(
-    (l) => l.id === responseSettings.responseLength
+    (l) => l.id === responseSettings.responseLength,
   );
   if (lengthOption?.prompt?.trim()) {
     prompts.push(lengthOption.prompt);
   }
 
   const languageOption = LANGUAGES.find(
-    (l) => l.id === responseSettings.language
+    (l) => l.id === responseSettings.language,
   );
   if (languageOption?.prompt?.trim()) {
     prompts.push(languageOption.prompt);
@@ -89,9 +89,7 @@ export async function* fetchAIResponse(params: {
     try {
       curlJson = curl2Json(provider.curl);
     } catch (error) {
-      throw new Error(
-        `Failed to parse curl: ${describeError(error)}`
-      );
+      throw new Error(`Failed to parse curl: ${describeError(error)}`);
     }
 
     const extractedVariables = extractVariables(provider.curl);
@@ -101,7 +99,7 @@ export async function* fetchAIResponse(params: {
         Object.entries(selectedProvider.variables).map(([key, value]) => [
           key.toUpperCase(),
           value,
-        ])
+        ]),
       ),
       SYSTEM_PROMPT: enhancedSystemPrompt || "",
     };
@@ -112,7 +110,7 @@ export async function* fetchAIResponse(params: {
         key !== "SYSTEM_PROMPT" &&
         key !== "TEXT" &&
         key !== "IMAGE" &&
-        !(apiKeyOptional && key === "API_KEY")
+        !(apiKeyOptional && key === "API_KEY"),
     );
     for (const { key } of requiredVars) {
       if (
@@ -120,7 +118,7 @@ export async function* fetchAIResponse(params: {
         selectedProvider.variables[key].trim() === ""
       ) {
         throw new Error(
-          `Missing required variable: ${key}. Please configure it in settings.`
+          `Missing required variable: ${key}. Please configure it in settings.`,
         );
       }
     }
@@ -130,7 +128,7 @@ export async function* fetchAIResponse(params: {
     }
     if (imagesBase64.length > 0 && !provider.curl.includes("{{IMAGE}}")) {
       throw new Error(
-        `Provider ${provider?.id ?? "unknown"} does not support image input`
+        `Provider ${provider?.id ?? "unknown"} does not support image input`,
       );
     }
 
@@ -138,7 +136,7 @@ export async function* fetchAIResponse(params: {
       ? JSON.parse(JSON.stringify(curlJson.data))
       : {};
     const messagesKey = Object.keys(bodyObj).find((key) =>
-      ["messages", "contents", "conversation", "history"].includes(key)
+      ["messages", "contents", "conversation", "history"].includes(key),
     );
 
     if (messagesKey && Array.isArray(bodyObj[messagesKey])) {
@@ -146,7 +144,7 @@ export async function* fetchAIResponse(params: {
         bodyObj[messagesKey],
         history,
         userMessage,
-        imagesBase64
+        imagesBase64,
       );
       bodyObj[messagesKey] = finalMessages;
     }
@@ -155,14 +153,14 @@ export async function* fetchAIResponse(params: {
     const url = resolvedUrl;
 
     const templateHeaders = (curlJson.header || {}) as Record<string, unknown>;
-    let headers = deepVariableReplacer(
-      templateHeaders,
-      allVariables
-    ) as Record<string, string>;
+    let headers = deepVariableReplacer(templateHeaders, allVariables) as Record<
+      string,
+      string
+    >;
     headers = omitEmptyApiKeyHeaders(
       headers,
       templateHeaders,
-      allVariables.API_KEY
+      allVariables.API_KEY,
     );
     headers["Content-Type"] = "application/json";
     headers = withLoopbackOriginRemoved(headers, url);
@@ -170,7 +168,7 @@ export async function* fetchAIResponse(params: {
     if (provider?.streaming) {
       if (typeof bodyObj === "object" && bodyObj !== null) {
         const streamKey = Object.keys(bodyObj).find(
-          (k) => k.toLowerCase() === "stream"
+          (k) => k.toLowerCase() === "stream",
         );
         if (streamKey) {
           bodyObj[streamKey] = true;
@@ -185,7 +183,7 @@ export async function* fetchAIResponse(params: {
     const supportsConfiguredModel =
       !reasoningCapability?.modelPrefixes?.length ||
       reasoningCapability.modelPrefixes.some((prefix) =>
-        configuredModel.startsWith(prefix.toLowerCase())
+        configuredModel.startsWith(prefix.toLowerCase()),
       );
     if (
       getResponseSettings().thinking === "off" &&
@@ -226,7 +224,7 @@ export async function* fetchAIResponse(params: {
       // say which host failed.
       const detail = redactProviderError(
         describeError(fetchError),
-        allVariables
+        allVariables,
       );
       const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(url);
       const endpoint = providerEndpointLabel(url);
@@ -235,7 +233,7 @@ export async function* fetchAIResponse(params: {
           isLocal
             ? " Check that the local server is running and serving this port."
             : " Check the provider URL and your connection."
-        }`
+        }`,
       );
     }
 
@@ -248,7 +246,7 @@ export async function* fetchAIResponse(params: {
       throw new Error(
         `API request failed: ${response.status} ${response.statusText}${
           safeErrorText ? ` - ${safeErrorText}` : ""
-        }`
+        }`,
       );
     }
 
@@ -258,7 +256,7 @@ export async function* fetchAIResponse(params: {
         json = await response.json();
       } catch (parseError) {
         throw new Error(
-          `Failed to parse non-streaming response: ${describeError(parseError)}`
+          `Failed to parse non-streaming response: ${describeError(parseError)}`,
         );
       }
       const content =
@@ -293,9 +291,7 @@ export async function* fetchAIResponse(params: {
         ) {
           return; // Silently return on abort
         }
-        throw new Error(
-          `Error reading stream: ${describeError(readError)}`
-        );
+        throw new Error(`Error reading stream: ${describeError(readError)}`);
       }
       const { done, value } = readResult;
       if (done) break;
@@ -318,7 +314,7 @@ export async function* fetchAIResponse(params: {
             const parsed = JSON.parse(trimmed);
             const delta = getStreamingContent(
               parsed,
-              provider?.responseContentPath || ""
+              provider?.responseContentPath || "",
             );
             if (delta) {
               yield delta;

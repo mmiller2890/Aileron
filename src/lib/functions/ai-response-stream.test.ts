@@ -42,7 +42,7 @@ const sseResponse = (chunks: string[]): Response => {
         controller.close();
       },
     }),
-    { status: 200 }
+    { status: 200 },
   );
 };
 

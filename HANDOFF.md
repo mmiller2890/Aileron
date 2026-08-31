@@ -1,7 +1,8 @@
 # HANDOFF — Code-review fix passes for the Assistant (Aileron) fork
 
-Handoff written after the session hit its limit. The next agent should continue from
-"IN PROGRESS" below. Everything before that is committed and verified.
+Handoff written after the session hit its limit, then updated by the continuation
+session. The next agent should start at **Task 14** under "REMAINING tasks". Everything
+listed under "Work completed" is committed and verified.
 
 ## Project
 
@@ -10,14 +11,16 @@ Handoff written after the session hit its limit. The next agent should continue 
 - Path: `/Users/ghost/interview_copilot_new/better/assistant-dev`, git branch `dev`.
 - Conventions (AGENTS.md): no comments in code unless requested; run `npx tsc --noEmit` and
   `npm run build` after changes; never commit secrets; follow existing style.
-- The `code-review-graph` MCP tools mentioned in AGENTS.md are NOT connected in this
-  environment (0 MCP servers) — ignore that instruction; use Grep/Read.
+- The `code-review-graph` MCP tools mentioned in AGENTS.md were not connected in the
+  first session. They ARE connected in the continuation session, but the graph was built
+  at commit `1dad916` (many commits stale), so it still can't be trusted for this work —
+  use Grep/Read, or rebuild the graph first.
 - Vendored dirs to never touch/review: `Aileron/`, `FluidAudio/`, venvs, `node_modules/`.
 
 ## Verification baseline (must stay green)
 
 - `npx tsc --noEmit` — clean
-- `npm test` — 34 files / 263 tests (vitest)
+- `npm test` — 35 files / 268 tests (vitest)
 - `cargo check --manifest-path src-tauri/Cargo.toml` — clean
 - `cargo test --manifest-path src-tauri/Cargo.toml` — 75 tests
 - `npm run build` — succeeds (~16s)
@@ -81,62 +84,25 @@ Pass 2 (in flight):
    `file.file.read(...)`, dead `model_name` Form param dropped, `Form` import removed,
    model lazy-load narrowed through local `active_model` (analyzer demanded it).
 
-## IN PROGRESS — task: "database integrity" (next work item)
+## Work completed — continuation session
 
-Files: `src/lib/database/config.ts`, `src/lib/database/chat-history.action.ts`.
-I had just read both regions and drafted the first fix. Findings to fix:
+6. `b07175e` — chore: finish the rustfmt pass the previous session left half-applied
+   (`build.rs` trailing newline, `shortcuts.rs` over-wrapped statements).
+7. `e075f0b` — chore: prettier autofixes for `src/lib/database/` (trailing commas only),
+   split out so the fix below stays reviewable.
+8. `24157ff` — **Task 13 "database integrity" — DONE.** All three findings were verified in
+   source first, all three held. `getDatabase` now caches the in-flight `Database.load`
+   promise (clears it on failure so a retry is still possible); `updateConversation` runs
+   BEGIN/COMMIT with ROLLBACK on error, replacing the manual backup/restore loop whose
+   `.catch(() => {})` could silently drop every message; the migration outer catch no
+   longer sets `chat_history_migrated_to_sqlite`, so a transient DB failure stays
+   retryable (the terminal cases — no data, unparseable payload, no valid conversations —
+   still set it). Added `src/lib/database/chat-history-update.test.ts` (3 tests) plus 2
+   migration tests; all 5 were confirmed to FAIL against the previous implementation.
 
-1. **`getDatabase` connection leak** (config.ts, verified): no in-flight-promise guard —
-   two concurrent first calls each run `Database.load` and one connection leaks. Draft fix
-   (cache the promise, reset it on failure so a later call can retry):
-
-   ```ts
-   let dbInstance: Database | null = null;
-   let dbLoadPromise: Promise<Database> | null = null;
-
-   export async function getDatabase(): Promise<Database> {
-     if (dbInstance) return dbInstance;
-     if (!dbLoadPromise) {
-       dbLoadPromise = Database.load(DB_NAME).then(
-         (db) => { dbInstance = db; return db; },
-         (error) => {
-           dbLoadPromise = null;
-           throw new Error(
-             `Failed to initialize database: ${
-               error instanceof Error ? error.message : String(error)
-             }`
-           );
-         },
-       );
-     }
-     return dbLoadPromise;
-   }
-   ```
-
-   (No new comments — project convention. Check `src/lib/database/*.test.ts` for mocks of
-   `Database.load` that may need updating.)
-
-2. **`updateConversation` is not transactional** (chat-history.action.ts:242–306,
-   verified by reading): UPDATE conversations → SELECT backup → DELETE all messages →
-   INSERT new ones, with a manual rollback loop whose `.catch(() => {})` can fail silently.
-   A crash mid-way loses the whole conversation. Fix: wrap in `BEGIN`/`COMMIT`/`ROLLBACK`
-   via `db.execute("BEGIN")` etc. (the plugin holds a single connection per DB path since
-   `getDatabase` is a singleton, so this is safe), then DELETE the manual backup/rollback
-   block in favor of ROLLBACK-on-error + rethrow. Keep `validateConversation` guard and the
-   rowsAffected==0 "Conversation not found" error. Check tests that mock `db.execute`
-   sequences before/after.
-
-3. **Migration marker set on transient failure** (chat-history.action.ts outer catch,
-   ~line 546, verified by reading): the inner loop deliberately keeps
-   `chat_history_migrated_to_sqlite` unset when `errorCount > 0` so a later launch retries;
-   but the OUTER catch sets the marker to "true" on any thrown error (comment says
-   "prevent infinite retry loops"), contradicting that design — a transient DB failure
-   permanently skips migration and orphans legacy data. Fix: don't set the marker in the
-   outer catch (keep the legacy key so retry happens next launch). Nuance: a permanently
-   broken DB would then retry every launch — acceptable (it logs via console.error), this
-   matches the reviewer's recommendation.
-
-Then commit this batch (conventions: `fix:` prefix, terse body explaining why).
+   Note for later: `src/lib/database/chat-history.map.ts`, `chat-history.map.test.ts` and
+   `system-prompt.action.ts` are still prettier-unclean. Pre-existing, left alone — the
+   workflow only formats files a task actually edits.
 
 ## REMAINING tasks (in order, each = verify finding in source first, fix, then commit)
 

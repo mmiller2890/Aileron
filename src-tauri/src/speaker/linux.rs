@@ -242,7 +242,7 @@ impl SpeakerInput {
         None
     }
 
-    pub fn stream(self) -> SpeakerStream {
+    pub fn stream(self) -> Result<SpeakerStream> {
         let sample_queue = Arc::new(Mutex::new(VecDeque::new()));
         let waker_state = Arc::new(Mutex::new(WakerState {
             waker: None,
@@ -266,19 +266,22 @@ impl SpeakerInput {
             }
         }));
 
-        let (sample_rate, init_success) = match init_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(sr)) => (sr, true),
+        let init_result = init_rx.recv_timeout(Duration::from_secs(5));
+        let (sample_rate, init_error) = match init_result {
+            Ok(Ok(sr)) => (sr, None),
             Ok(Err(e)) => {
-                eprintln!("Audio initialization failed: {}", e);
-                (DEFAULT_SAMPLE_RATE, false)
+                let msg = format!("Audio initialization failed: {}", e);
+                eprintln!("{}", msg);
+                (DEFAULT_SAMPLE_RATE, Some(msg))
             }
             Err(e) => {
-                eprintln!("Failed to receive audio init signal: {}", e);
-                (DEFAULT_SAMPLE_RATE, false)
+                let msg = format!("Failed to receive audio init signal: {}", e);
+                eprintln!("{}", msg);
+                (DEFAULT_SAMPLE_RATE, Some(msg))
             }
         };
 
-        if !init_success {
+        if let Some(err) = init_error {
             {
                 let mut state = waker_state
                     .lock()
@@ -293,14 +296,16 @@ impl SpeakerInput {
             if let Some(handle) = capture_thread.take() {
                 let _ = handle.join();
             }
+
+            return Err(anyhow!(err));
         }
 
-        SpeakerStream {
+        Ok(SpeakerStream {
             sample_queue,
             waker_state,
             capture_thread,
             sample_rate,
-        }
+        })
     }
 }
 

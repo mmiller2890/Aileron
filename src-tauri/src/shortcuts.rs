@@ -429,6 +429,15 @@ pub fn update_shortcuts<R: Runtime>(
     // First, stop any ongoing window movement
     stop_all_move_windows(&app);
 
+    let state = app.state::<RegisteredShortcuts>();
+    let previous_shortcuts = match state.shortcuts.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => {
+            eprintln!("Mutex poisoned in update_shortcuts, recovering...");
+            poisoned.into_inner().clone()
+        }
+    };
+
     // Then, unregister all existing shortcuts
     unregister_all_shortcuts(&app)?;
 
@@ -446,6 +455,39 @@ pub fn update_shortcuts<R: Runtime>(
             Err(e) => {
                 eprintln!("Failed to register {} shortcut: {}", action_id, e);
                 registration_failures.push((action_id, shortcut_str, e.to_string()));
+            }
+        }
+    }
+
+    if !registration_failures.is_empty() {
+        // Fall each failed action back to its previous binding so an update
+        // never leaves fewer working shortcuts than before.
+        for (action_id, _, _) in registration_failures.iter() {
+            if let Some(prev_str) = previous_shortcuts.get(action_id) {
+                match prev_str.parse::<Shortcut>() {
+                    Ok(shortcut) => match app.global_shortcut().register(shortcut) {
+                        Ok(_) => {
+                            eprintln!(
+                                "Restored previous shortcut for {}: {}",
+                                action_id, prev_str
+                            );
+                            successfully_registered
+                                .insert(action_id.clone(), prev_str.clone());
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Failed to restore previous shortcut {} for {}: {}",
+                                prev_str, action_id, e
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to parse previous shortcut {} for {}: {}",
+                            prev_str, action_id, e
+                        );
+                    }
+                }
             }
         }
     }

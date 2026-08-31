@@ -574,6 +574,7 @@ pub struct SttState {
     streaming_vad: Arc<Mutex<VadInner>>,
     mic_vad: Arc<Mutex<VadInner>>,
     session_wav_path: Arc<Mutex<Option<std::path::PathBuf>>>,
+    last_status: Mutex<Option<serde_json::Value>>,
 }
 
 #[cfg(test)]
@@ -924,6 +925,27 @@ impl SttState {
         }
     }
 
+    fn cached_status(&self) -> Result<serde_json::Value, String> {
+        if let Ok(guard) = self.last_status.lock() {
+            if let Some(snapshot) = guard.as_ref() {
+                return Ok(snapshot.clone());
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        let (is_apple_silicon, is_intel) = (true, false);
+        #[cfg(not(target_arch = "aarch64"))]
+        let (is_apple_silicon, is_intel) = (false, true);
+        Ok(serde_json::json!({
+            "asr_ready": false,
+            "model_version": serde_json::Value::Null,
+            "vad_ready": false,
+            "diarization_ready": false,
+            "is_apple_silicon": is_apple_silicon,
+            "is_intel": is_intel,
+            "is_supported": is_apple_silicon && !is_intel,
+        }))
+    }
+
     pub fn get_status(&self) -> Result<serde_json::Value, String> {
         #[cfg(not(target_os = "macos"))]
         {
@@ -940,9 +962,22 @@ impl SttState {
 
         #[cfg(target_os = "macos")]
         {
-            let guard = self.inner.lock().map_err(|e| e.to_string())?;
-            let streaming_vad_guard = self.streaming_vad.lock().map_err(|e| e.to_string())?;
-            let mic_vad_guard = self.mic_vad.lock().map_err(|e| e.to_string())?;
+            // init_asr_inner holds `inner` across the whole ASR model download
+            // and transcriptions hold it for their duration, so a blocking
+            // lock here can pin a tokio worker for minutes. Status polls are
+            // advisory: serve the last snapshot instead of waiting.
+            let guard = match self.inner.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return self.cached_status(),
+            };
+            let streaming_vad_guard = match self.streaming_vad.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return self.cached_status(),
+            };
+            let mic_vad_guard = match self.mic_vad.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return self.cached_status(),
+            };
 
             let (is_apple_silicon, is_intel) = if let Some(audio) = guard.audio.as_ref() {
                 (audio.is_apple_silicon(), audio.is_intel_mac())
@@ -953,7 +988,7 @@ impl SttState {
                 }
             };
 
-            Ok(serde_json::json!({
+            let status = serde_json::json!({
                 "asr_ready": guard.asr_ready,
                 "model_version": guard.model_version.map(AsrModelVersion::as_str),
                 "vad_ready": streaming_vad_guard.ready && mic_vad_guard.ready,
@@ -961,7 +996,11 @@ impl SttState {
                 "is_apple_silicon": is_apple_silicon,
                 "is_intel": is_intel,
                 "is_supported": is_apple_silicon && !is_intel,
-            }))
+            });
+            if let Ok(mut snapshot) = self.last_status.lock() {
+                *snapshot = Some(status.clone());
+            }
+            Ok(status)
         }
     }
 }
@@ -1120,6 +1159,7 @@ pub async fn stt_diarize_file(
                 streaming_vad: Arc::default(),
                 mic_vad: Arc::default(),
                 session_wav_path: Arc::default(),
+                last_status: Mutex::default(),
             };
             state.diarize_file(&path_for_diarization)
         })

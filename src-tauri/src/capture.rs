@@ -142,7 +142,7 @@ pub async fn start_screen_capture(app: tauri::AppHandle) -> Result<(), String> {
                 .minimizable(false)
                 .maximizable(false)
                 .visible(false)
-                .focused(true)
+                .focused(false)
                 .accept_first_mouse(true)
                 .build()
                 .map_err(|e| {

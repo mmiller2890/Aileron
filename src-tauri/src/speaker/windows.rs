@@ -127,7 +127,7 @@ impl SpeakerInput {
     }
 
     // Starts the audio stream
-    pub fn stream(self) -> SpeakerStream {
+    pub fn stream(self) -> Result<SpeakerStream> {
         let sample_queue = Arc::new(Mutex::new(VecDeque::new()));
         let waker_state = Arc::new(Mutex::new(WakerState {
             waker: None,
@@ -152,20 +152,35 @@ impl SpeakerInput {
             Ok(Ok(rate)) => rate,
             Ok(Err(e)) => {
                 error!("Assistant Audio initialization failed: {}", e);
-                44100
+                {
+                    let mut state = waker_state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    state.shutdown = true;
+                }
+                return Err(anyhow::anyhow!(
+                    "Audio initialization failed: {}",
+                    e
+                ));
             }
             Err(_) => {
                 error!("Assistant Audio initialization timeout");
-                44100
+                {
+                    let mut state = waker_state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    state.shutdown = true;
+                }
+                return Err(anyhow::anyhow!("Audio initialization timed out"));
             }
         };
 
-        SpeakerStream {
+        Ok(SpeakerStream {
             sample_queue,
             waker_state,
             capture_thread: Some(capture_thread),
             actual_sample_rate,
-        }
+        })
     }
 }
 
@@ -202,9 +217,7 @@ impl SpeakerStream {
                             .unwrap_or_else(|_| "Unknown".to_string());
                         d
                     }
-                    None => {
-                        get_default_device(&Direction::Render).expect("No default render device")
-                    }
+                    None => get_default_device(&Direction::Render)?,
                 },
                 None => get_default_device(&Direction::Render)?,
             };

@@ -57,7 +57,7 @@ interface ChatCompletionState {
 export const useChatCompletion = (
   conversationId: string,
   messages: ChatConversation | null,
-  setMessages: (messages: ChatConversation | null) => void
+  setMessages: (messages: ChatConversation | null) => void,
 ) => {
   const {
     selectedAIProvider,
@@ -87,7 +87,7 @@ export const useChatCompletion = (
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeBatcherRef = useRef<ReturnType<typeof createTokenBatcher> | null>(
-    null
+    null,
   );
   const currentRequestIdRef = useRef<string | null>(null);
   const isProcessingScreenshotRef = useRef(false);
@@ -180,7 +180,7 @@ export const useChatCompletion = (
         // screenshot, so relying on state alone silently dropped it.
         const imagesBase64 = collectImagesBase64(
           state.attachedFiles,
-          extraImagesBase64
+          extraImagesBase64,
         );
 
         // Check if AI provider is configured
@@ -193,7 +193,7 @@ export const useChatCompletion = (
         }
 
         const provider = allAiProviders.find(
-          (p) => p.id === selectedAIProvider.provider
+          (p) => p.id === selectedAIProvider.provider,
         );
         if (!provider) {
           setState((prev) => ({
@@ -253,10 +253,7 @@ export const useChatCompletion = (
               if (last && last.role === "assistant") {
                 setMessages({
                   ...updatedMessages,
-                  messages: [
-                    ...baseMsgs.slice(0, -1),
-                    { ...assistantMsg },
-                  ],
+                  messages: [...baseMsgs.slice(0, -1), { ...assistantMsg }],
                 });
               } else {
                 setMessages({
@@ -268,7 +265,7 @@ export const useChatCompletion = (
               scrollToBottom();
             },
             undefined,
-            isCurrent
+            isCurrent,
           );
           activeBatcherRef.current = batcher;
 
@@ -373,9 +370,8 @@ export const useChatCompletion = (
             await saveConversation(conversation);
 
             // Reload conversation from database to ensure consistency
-            const updatedConversation = await getConversationById(
-              conversationId
-            );
+            const updatedConversation =
+              await getConversationById(conversationId);
             if (updatedConversation) {
               setMessages(updatedConversation);
             }
@@ -407,7 +403,7 @@ export const useChatCompletion = (
       messages,
       conversationId,
       setMessages,
-    ]
+    ],
   );
 
   const cancel = useCallback(() => {
@@ -438,7 +434,7 @@ export const useChatCompletion = (
     const files = Array.from(e.target.files || []);
     const selectedFiles = selectImageFilesWithinLimit(
       files,
-      state.attachedFiles.length
+      state.attachedFiles.length,
     );
     selectedFiles.forEach((file) => {
       addFile(file);
@@ -492,7 +488,7 @@ export const useChatCompletion = (
         }));
       }
     },
-    [state.attachedFiles.length, submit]
+    [state.attachedFiles.length, submit],
   );
 
   const onRemoveAllFiles = () => {
@@ -516,7 +512,7 @@ export const useChatCompletion = (
       if (!items) return;
 
       const hasImages = Array.from(items).some((item) =>
-        item.type.startsWith("image/")
+        item.type.startsWith("image/"),
       );
 
       // If we have images, prevent default text pasting and process images
@@ -528,14 +524,14 @@ export const useChatCompletion = (
           .filter((file): file is File => file !== null);
         const processedFiles = selectImageFilesWithinLimit(
           clipboardFiles,
-          state.attachedFiles.length
+          state.attachedFiles.length,
         );
 
         // Process all files
         await Promise.all(processedFiles.map((file) => addFile(file)));
       }
     },
-    [state.attachedFiles.length, addFile]
+    [state.attachedFiles.length, addFile],
   );
 
   const captureScreenshot = useCallback(async () => {
@@ -658,8 +654,8 @@ export const useChatCompletion = (
                 isProcessingScreenshotRef.current = false;
               }, 100);
             }
-          })
-        )
+          }),
+        ),
       )
       .catch((error) => {
         console.error("Failed to listen for captured selection:", error);
@@ -680,8 +676,8 @@ export const useChatCompletion = (
             setIsScreenshotLoading(false);
             isProcessingScreenshotRef.current = false;
             screenshotInitiatedByThisContext.current = false;
-          })
-        )
+          }),
+        ),
       )
       .catch((error) => {
         console.error("Failed to listen for capture close:", error);

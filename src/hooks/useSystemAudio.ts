@@ -1344,7 +1344,7 @@ export function useSystemAudio() {
       if (isSavingRef.current) {
         saveTimeoutRef.current = setTimeout(
           runSave,
-          CONVERSATION_SAVE_DEBOUNCE_MS
+          CONVERSATION_SAVE_DEBOUNCE_MS,
         );
         return;
       }

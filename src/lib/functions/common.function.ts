@@ -26,7 +26,9 @@ export async function blobToBase64(blob: Blob): Promise<string> {
  * Uses the Web Audio API. If AudioContext is unavailable in the runtime,
  * this will reject.
  */
-export async function wavBase64ToF32Samples(base64: string): Promise<Float32Array> {
+export async function wavBase64ToF32Samples(
+  base64: string,
+): Promise<Float32Array> {
   const rawBase64 = base64.includes(",") ? base64.split(",")[1] : base64;
   if (!rawBase64 || rawBase64.length < 100) {
     throw new Error(`Invalid base64 WAV: length ${rawBase64?.length ?? 0}`);
@@ -48,7 +50,8 @@ export async function wavBase64ToF32Samples(base64: string): Promise<Float32Arra
   const blob = new Blob([bytes], { type: "audio/wav" });
   const arrayBuffer = await blob.arrayBuffer();
 
-  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+  const AudioContextClass =
+    window.AudioContext || (window as any).webkitAudioContext;
   if (!AudioContextClass) {
     throw new Error("AudioContext is not available in this environment");
   }
@@ -76,7 +79,7 @@ export async function wavBase64ToF32Samples(base64: string): Promise<Float32Arra
 
 export function extractVariables(
   curl: string,
-  includeAll = false
+  includeAll = false,
 ): { key: string; value: string }[] {
   if (typeof curl !== "string") {
     return [];
@@ -100,7 +103,7 @@ export function extractVariables(
     : ["SYSTEM_PROMPT", "TEXT", "IMAGE", "AUDIO"];
 
   const filteredVariables = uniqueVariables?.filter(
-    (variable) => !doNotInclude?.includes(variable)
+    (variable) => !doNotInclude?.includes(variable),
   );
 
   return filteredVariables.map((variable) => ({
@@ -119,7 +122,7 @@ export function extractVariables(
 export function processUserMessageTemplate(
   template: any,
   userMessage: string,
-  imagesBase64: string[] = []
+  imagesBase64: string[] = [],
 ): any {
   const escapeForJson = (value: string) =>
     JSON.stringify(value ?? "").slice(1, -1);
@@ -127,7 +130,7 @@ export function processUserMessageTemplate(
   const imageReplacer = (node: any): any => {
     if (Array.isArray(node)) {
       const imageTemplateIndex = node.findIndex((item) =>
-        JSON.stringify(item).includes("{{IMAGE}}")
+        JSON.stringify(item).includes("{{IMAGE}}"),
       );
 
       if (imageTemplateIndex > -1) {
@@ -137,13 +140,13 @@ export function processUserMessageTemplate(
             ? imagesBase64.map((img) => {
                 const partStr = JSON.stringify(imageTemplate).replace(
                   /\{\{IMAGE\}\}/g,
-                  img
+                  img,
                 );
                 try {
                   return JSON.parse(partStr);
                 } catch {
                   throw new Error(
-                    "Invalid provider template: the {{IMAGE}} message part is not valid JSON"
+                    "Invalid provider template: the {{IMAGE}} message part is not valid JSON",
                   );
                 }
               })
@@ -173,15 +176,14 @@ export function processUserMessageTemplate(
   // by base64-injected copies when they are.
   const withImages = imageReplacer(template);
 
-  const templateStr = JSON.stringify(withImages).replace(
-    /\{\{TEXT\}\}/g,
-    () => escapeForJson(userMessage)
+  const templateStr = JSON.stringify(withImages).replace(/\{\{TEXT\}\}/g, () =>
+    escapeForJson(userMessage),
   );
   try {
     return JSON.parse(templateStr);
   } catch {
     throw new Error(
-      "Invalid provider template: the {{TEXT}} message part is not valid JSON"
+      "Invalid provider template: the {{TEXT}} message part is not valid JSON",
     );
   }
 }
@@ -198,10 +200,10 @@ export function buildDynamicMessages(
   messagesTemplate: any[],
   history: Message[],
   userMessage: string,
-  imagesBase64: string[] = []
+  imagesBase64: string[] = [],
 ): any[] {
   const userMessageTemplateIndex = messagesTemplate.findIndex((m) =>
-    JSON.stringify(m).includes("{{TEXT}}")
+    JSON.stringify(m).includes("{{TEXT}}"),
   );
 
   if (userMessageTemplateIndex === -1) {
@@ -215,7 +217,7 @@ export function buildDynamicMessages(
   const newUserMessage = processUserMessageTemplate(
     userMessageTemplate,
     userMessage,
-    imagesBase64
+    imagesBase64,
   );
 
   return [...prefixMessages, ...history, newUserMessage, ...suffixMessages];
@@ -259,17 +261,16 @@ export function providerEndpointLabel(url: string): string {
 
 export function redactProviderError(
   text: string,
-  variables: Record<string, string>
+  variables: Record<string, string>,
 ): string {
-  let redacted = text.replace(
-    /https?:\/\/[^\s]+/gi,
-    (url) => providerEndpointLabel(url)
+  let redacted = text.replace(/https?:\/\/[^\s]+/gi, (url) =>
+    providerEndpointLabel(url),
   );
   const secretValues = Object.entries(variables)
     .filter(
       ([key, value]) =>
         value &&
-        /(api_?key|token|secret|password|authorization|auth)/i.test(key)
+        /(api_?key|token|secret|password|authorization|auth)/i.test(key),
     )
     .map(([, value]) => value)
     .sort((a, b) => b.length - a.length);
@@ -298,11 +299,11 @@ export function restoreUrlPlaceholders(url: string): string {
   return url
     .replace(
       /%7[Bb]%7[Bb]([A-Za-z0-9_]+)%7[Dd]%7[Dd]/g,
-      (_, name: string) => `{{${name.toUpperCase()}}}`
+      (_, name: string) => `{{${name.toUpperCase()}}}`,
     )
     .replace(
       /\{\{([A-Za-z0-9_]+)\}\}/g,
-      (_, name: string) => `{{${name.toUpperCase()}}}`
+      (_, name: string) => `{{${name.toUpperCase()}}}`,
     );
 }
 
@@ -311,11 +312,11 @@ export function resolveCurlUrl(
     url?: string;
     params?: Record<string, unknown>;
   },
-  variables: Record<string, string>
+  variables: Record<string, string>,
 ): string {
   let url = deepVariableReplacer(
     restoreUrlPlaceholders(parsedCurl.url || ""),
-    variables
+    variables,
   );
   const decodedParams = Object.fromEntries(
     Object.entries(parsedCurl.params || {}).map(([key, value]) => {
@@ -325,7 +326,7 @@ export function resolveCurlUrl(
       } catch {
         return [key, value];
       }
-    })
+    }),
   );
   const replacedParams = deepVariableReplacer(decodedParams, variables);
   const query = new URLSearchParams(replacedParams).toString();
@@ -337,7 +338,7 @@ export function resolveCurlUrl(
 
 export function deepVariableReplacer(
   node: any,
-  variables: Record<string, string>
+  variables: Record<string, string>,
 ): any {
   if (typeof node === "string") {
     let result = node;
@@ -347,7 +348,7 @@ export function deepVariableReplacer(
       // prompt containing them would be silently corrupted.
       result = result.replace(
         new RegExp(`\\{\\{${key}\\}\\}`, "g"),
-        () => value
+        () => value,
       );
     }
     return result;
@@ -374,7 +375,7 @@ export function deepVariableReplacer(
  */
 export function getStreamingContent(
   chunk: any,
-  defaultPath: string
+  defaultPath: string,
 ): string | null {
   // A set of possible paths to check for streaming content.
   // Using a Set automatically handles duplicates.

@@ -2,6 +2,8 @@
 use super::AudioDevice;
 use anyhow::{anyhow, Result};
 use futures_util::Stream;
+use libpulse_binding as pulse;
+use libpulse_simple_binding as psimple;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -11,8 +13,6 @@ use std::thread;
 use std::time::Duration;
 use tracing::error;
 use tracing::warn;
-use libpulse_binding as pulse;
-use libpulse_simple_binding as psimple;
 
 use psimple::Simple;
 use pulse::context::introspect::Introspector;
@@ -283,9 +283,7 @@ impl SpeakerInput {
 
         if let Some(err) = init_error {
             {
-                let mut state = waker_state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut state = waker_state.lock().unwrap_or_else(|e| e.into_inner());
                 state.shutdown = true;
                 if let Some(waker) = state.waker.take() {
                     drop(state);
@@ -351,7 +349,7 @@ impl SpeakerStream {
         let init_result: Result<(Simple, u32)> = (|| {
             let simple = Simple::new(
                 None,                    // Use default server
-                "assistant",              // Application name
+                "assistant",             // Application name
                 Direction::Record,       // Record direction
                 final_source.as_deref(), // Source name (monitor)
                 "System Audio Capture",  // Stream description
@@ -399,9 +397,8 @@ impl SpeakerStream {
                             if !samples.is_empty() {
                                 // Consistent buffer overflow handling
                                 let dropped = {
-                                    let mut queue = sample_queue
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
+                                    let mut queue =
+                                        sample_queue.lock().unwrap_or_else(|e| e.into_inner());
                                     let max_buffer_size = 131072; // 128KB buffer (matching macOS/Windows)
 
                                     queue.extend(samples.iter());
@@ -422,9 +419,8 @@ impl SpeakerStream {
 
                                 // Wake up consumer
                                 {
-                                    let mut state = waker_state
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
+                                    let mut state =
+                                        waker_state.lock().unwrap_or_else(|e| e.into_inner());
                                     if !state.has_data {
                                         state.has_data = true;
                                         if let Some(waker) = state.waker.take() {
@@ -458,10 +454,7 @@ fn get_default_monitor_source() -> Option<String> {
 impl Drop for SpeakerStream {
     fn drop(&mut self) {
         {
-            let mut state = self
-                .waker_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut state = self.waker_state.lock().unwrap_or_else(|e| e.into_inner());
             state.shutdown = true;
             if let Some(waker) = state.waker.take() {
                 waker.wake();
@@ -480,18 +473,12 @@ impl Stream for SpeakerStream {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let mut queue = self
-            .sample_queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut queue = self.sample_queue.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(sample) = queue.pop_front() {
             return Poll::Ready(Some(sample));
         }
 
-        let mut state = self
-            .waker_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut state = self.waker_state.lock().unwrap_or_else(|e| e.into_inner());
         if state.shutdown {
             return Poll::Ready(None);
         }

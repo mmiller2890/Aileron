@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { buildDynamicMessages, processUserMessageTemplate } from "./common.function";
+import {
+  buildDynamicMessages,
+  processUserMessageTemplate,
+} from "./common.function";
 
 // OpenAI-style vision template: the image payload is a structured node that
 // happens to carry the same placeholder string users can type as literal text.
@@ -18,7 +21,7 @@ describe("processUserMessageTemplate", () => {
   test("preserves literal {{IMAGE}} in the user text when no images are attached", () => {
     const result = processUserMessageTemplate(
       visionTemplate,
-      "explain this: {{IMAGE}}"
+      "explain this: {{IMAGE}}",
     );
 
     expect(result).toEqual({
@@ -31,7 +34,7 @@ describe("processUserMessageTemplate", () => {
     const result = processUserMessageTemplate(
       visionTemplate,
       "explain {{IMAGE}}",
-      ["abc123"]
+      ["abc123"],
     );
 
     expect(result).toEqual({
@@ -49,7 +52,7 @@ describe("processUserMessageTemplate", () => {
   test("substitutes plain user text as before", () => {
     const result = processUserMessageTemplate(
       visionTemplate,
-      "describe the chart"
+      "describe the chart",
     );
 
     expect(result).toEqual({
@@ -80,7 +83,7 @@ describe("buildDynamicMessages", () => {
       messagesTemplate,
       [],
       "explain {{IMAGE}}",
-      []
+      [],
     );
 
     expect(result[1]).toEqual({

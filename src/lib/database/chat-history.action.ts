@@ -248,8 +248,9 @@ export async function updateConversation(
 
   const db = await getDatabase();
 
+  await db.execute("BEGIN");
+
   try {
-    // Update conversation
     const updateResult = await db.execute(
       "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
       [conversation.title, conversation.updatedAt, conversation.id],
@@ -259,67 +260,40 @@ export async function updateConversation(
       throw new Error("Conversation not found");
     }
 
-    // Get existing messages for backup
-    const existingMessages = await db.select<DbMessage[]>(
-      "SELECT * FROM messages WHERE conversation_id = ?",
-      [conversation.id],
-    );
-
-    // Delete existing messages
     await db.execute("DELETE FROM messages WHERE conversation_id = ?", [
       conversation.id,
     ]);
 
-    // Insert updated messages
-    try {
-      for (const message of conversation.messages) {
-        if (!validateMessage(message)) {
-          console.warn("Skipping invalid message in conversation update");
-          continue;
-        }
-
-        const attachedFilesJson = message.attachedFiles
-          ? JSON.stringify(message.attachedFiles)
-          : null;
-
-        await db.execute(
-          "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
-          [
-            message.id,
-            conversation.id,
-            message.role,
-            message.content,
-            message.timestamp,
-            attachedFilesJson,
-          ],
-        );
+    for (const message of conversation.messages) {
+      if (!validateMessage(message)) {
+        console.warn("Skipping invalid message in conversation update");
+        continue;
       }
-    } catch (messageError) {
-      // Rollback: restore original messages
-      console.error(
-        "Failed to insert new messages, restoring backup:",
-        messageError,
+
+      const attachedFilesJson = message.attachedFiles
+        ? JSON.stringify(message.attachedFiles)
+        : null;
+
+      await db.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+          message.id,
+          conversation.id,
+          message.role,
+          message.content,
+          message.timestamp,
+          attachedFilesJson,
+        ],
       );
-      for (const msg of existingMessages) {
-        await db
-          .execute(
-            "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
-            [
-              msg.id,
-              msg.conversation_id,
-              msg.role,
-              msg.content,
-              msg.timestamp,
-              msg.attached_files,
-            ],
-          )
-          .catch(() => {});
-      }
-      throw messageError;
     }
+
+    await db.execute("COMMIT");
 
     return conversation;
   } catch (error) {
+    await db.execute("ROLLBACK").catch((rollbackError) => {
+      console.error("Failed to roll back conversation update:", rollbackError);
+    });
     console.error("Failed to update conversation:", error);
     throw error;
   }
@@ -544,8 +518,6 @@ export async function migrateLocalStorageToSQLite(): Promise<{
     };
   } catch (error) {
     console.error("Migration failed:", error);
-    // Mark as attempted to prevent infinite retry loops
-    safeLocalStorage.setItem(migrationKey, "true");
     return {
       success: false,
       migratedCount: 0,

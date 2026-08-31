@@ -103,4 +103,30 @@ describe("migrateLocalStorageToSQLite", () => {
     expect(storage.has(LEGACY_KEY)).toBe(false);
     expect(storage.get(MIGRATION_KEY)).toBe("true");
   });
+
+  test("keeps the legacy data and marker unset when the database is unavailable", async () => {
+    storage.set(LEGACY_KEY, JSON.stringify([conversation("c1", "Good")]));
+    getDatabaseMock.mockRejectedValue(new Error("database is locked"));
+
+    const result = await migrateLocalStorageToSQLite();
+
+    expect(result).toEqual({
+      success: false,
+      migratedCount: 0,
+      error: "database is locked",
+    });
+    // A transient failure must stay retryable: marking it migrated here would
+    // orphan the legacy data permanently.
+    expect(storage.has(LEGACY_KEY)).toBe(true);
+    expect(storage.get(MIGRATION_KEY)).toBeUndefined();
+  });
+
+  test("still marks migration done when the legacy payload cannot be parsed", async () => {
+    storage.set(LEGACY_KEY, "{not json");
+
+    const result = await migrateLocalStorageToSQLite();
+
+    expect(result.success).toBe(false);
+    expect(storage.get(MIGRATION_KEY)).toBe("true");
+  });
 });

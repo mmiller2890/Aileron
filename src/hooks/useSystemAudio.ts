@@ -178,6 +178,8 @@ export function useSystemAudio() {
   const summarySeqRef = useRef(0);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
+  const pendingSaveConversationRef = useRef<ChatConversation | null>(null);
+  const inFlightSaveRef = useRef<Promise<unknown> | null>(null);
   const utteranceTimestampsRef = useRef<Array<{ start: number; end: number }>>(
     [],
   );
@@ -1297,6 +1299,33 @@ export function useSystemAudio() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      const flush = async () => {
+        const snapshot = pendingSaveConversationRef.current;
+        pendingSaveConversationRef.current = null;
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+          saveTimeoutRef.current = null;
+        }
+        if (!snapshot) return;
+        if (inFlightSaveRef.current) {
+          try {
+            await inFlightSaveRef.current;
+          } catch (error) {
+            console.debug("Concurrent conversation save failed:", error);
+          }
+        }
+        try {
+          await saveConversation(snapshot);
+        } catch (error) {
+          console.error("Failed to save system audio conversation:", error);
+        }
+      };
+      flush();
+    };
+  }, []);
+
+  useEffect(() => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
     }
@@ -1309,24 +1338,39 @@ export function useSystemAudio() {
       return;
     }
 
-    saveTimeoutRef.current = setTimeout(async () => {
+    pendingSaveConversationRef.current = conversation;
+
+    const runSave = async () => {
       if (isSavingRef.current) {
+        saveTimeoutRef.current = setTimeout(
+          runSave,
+          CONVERSATION_SAVE_DEBOUNCE_MS
+        );
         return;
       }
-
+      const snapshot = pendingSaveConversationRef.current;
+      pendingSaveConversationRef.current = null;
+      saveTimeoutRef.current = null;
+      if (!snapshot) return;
+      isSavingRef.current = true;
       try {
-        isSavingRef.current = true;
-        await saveConversation(conversation);
+        const save = saveConversation(snapshot);
+        inFlightSaveRef.current = save;
+        await save;
       } catch (error) {
         console.error("Failed to save system audio conversation:", error);
       } finally {
         isSavingRef.current = false;
+        inFlightSaveRef.current = null;
       }
-    }, CONVERSATION_SAVE_DEBOUNCE_MS);
+    };
+
+    saveTimeoutRef.current = setTimeout(runSave, CONVERSATION_SAVE_DEBOUNCE_MS);
 
     return () => {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
       }
     };
   }, [

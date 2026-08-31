@@ -306,6 +306,7 @@ export const useChatCompletion = (
         } catch (e: any) {
           // Only show error if this is still the current request and not aborted
           if (currentRequestIdRef.current === requestId && !signal.aborted) {
+            setMessages(updatedMessages);
             setState((prev) => ({
               ...prev,
               isLoading: false,

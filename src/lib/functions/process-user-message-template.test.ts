@@ -57,6 +57,16 @@ describe("processUserMessageTemplate", () => {
       content: [{ type: "text", text: "describe the chart" }],
     });
   });
+
+  test("preserves regex replacement sequences in user text", () => {
+    const message = "cost is $5, match $&, before $`, after $', group $1";
+    const result = processUserMessageTemplate(visionTemplate, message);
+
+    expect(result).toEqual({
+      role: "user",
+      content: [{ type: "text", text: message }],
+    });
+  });
 });
 
 describe("buildDynamicMessages", () => {

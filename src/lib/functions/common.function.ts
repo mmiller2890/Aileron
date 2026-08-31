@@ -1,4 +1,4 @@
-import { Message } from "@/types";
+import type { Message } from "@/types";
 
 export function getByPath(obj: any, path: string): any {
   if (!path) return obj;
@@ -7,17 +7,6 @@ export function getByPath(obj: any, path: string): any {
     .replace(/\]/g, "")
     .split(".")
     .reduce((o, k) => (o || {})[k], obj);
-}
-
-export function setByPath(obj: any, path: string, value: any): void {
-  const keys = path.split(".");
-  let current = obj;
-  for (let i = 0; i < keys.length - 1; i++) {
-    const key = keys[i].replace(/\[(\d+)\]/g, ".$1");
-    if (!current[key]) current[key] = /^\d+$/.test(keys[i + 1]) ? [] : {};
-    current = current[key];
-  }
-  current[keys[keys.length - 1].replace(/\[(\d+)\]/g, ".$1")] = value;
 }
 
 export async function blobToBase64(blob: Blob): Promise<string> {
@@ -150,7 +139,13 @@ export function processUserMessageTemplate(
                   /\{\{IMAGE\}\}/g,
                   img
                 );
-                return JSON.parse(partStr);
+                try {
+                  return JSON.parse(partStr);
+                } catch {
+                  throw new Error(
+                    "Invalid provider template: the {{IMAGE}} message part is not valid JSON"
+                  );
+                }
               })
             : [];
 
@@ -180,9 +175,15 @@ export function processUserMessageTemplate(
 
   const templateStr = JSON.stringify(withImages).replace(
     /\{\{TEXT\}\}/g,
-    escapeForJson(userMessage)
+    () => escapeForJson(userMessage)
   );
-  return JSON.parse(templateStr);
+  try {
+    return JSON.parse(templateStr);
+  } catch {
+    throw new Error(
+      "Invalid provider template: the {{TEXT}} message part is not valid JSON"
+    );
+  }
 }
 
 /**

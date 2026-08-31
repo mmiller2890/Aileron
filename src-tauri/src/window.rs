@@ -136,8 +136,11 @@ pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
 pub fn create_dashboard_window<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<WebviewWindow<R>, tauri::Error> {
-    let base_builder =
-        WebviewWindowBuilder::new(app, "dashboard", tauri::WebviewUrl::App("/dashboard".into()));
+    let base_builder = WebviewWindowBuilder::new(
+        app,
+        "dashboard",
+        tauri::WebviewUrl::App("/dashboard".into()),
+    );
 
     #[cfg(target_os = "macos")]
     let base_builder = base_builder

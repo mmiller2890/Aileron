@@ -185,9 +185,8 @@ impl SpeakerInput {
             Some(ref uid) if !uid.is_empty() && uid != "default" => {
                 match find_output_device_by_uid(uid) {
                     Some(device) => device,
-                    None => ca::System::default_output_device().map_err(|e| {
-                        anyhow::anyhow!("No default output device found: {}", e)
-                    })?,
+                    None => ca::System::default_output_device()
+                        .map_err(|e| anyhow::anyhow!("No default output device found: {}", e))?,
                 }
             }
             _ => ca::System::default_output_device()?,
@@ -374,10 +373,7 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
 
     // Wake up consumer if we have new data
     let should_wake = {
-        let mut waker_state = ctx
-            .waker_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut waker_state = ctx.waker_state.lock().unwrap_or_else(|e| e.into_inner());
         if !waker_state.has_data {
             waker_state.has_data = true;
             waker_state.waker.take()
@@ -410,10 +406,7 @@ impl Stream for SpeakerStream {
         }
 
         {
-            let mut state = self
-                .waker_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut state = self.waker_state.lock().unwrap_or_else(|e| e.into_inner());
             state.has_data = false;
             state.waker = Some(cx.waker().clone());
         }

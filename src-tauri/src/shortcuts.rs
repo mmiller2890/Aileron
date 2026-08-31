@@ -467,12 +467,8 @@ pub fn update_shortcuts<R: Runtime>(
                 match prev_str.parse::<Shortcut>() {
                     Ok(shortcut) => match app.global_shortcut().register(shortcut) {
                         Ok(_) => {
-                            eprintln!(
-                                "Restored previous shortcut for {}: {}",
-                                action_id, prev_str
-                            );
-                            successfully_registered
-                                .insert(action_id.clone(), prev_str.clone());
+                            eprintln!("Restored previous shortcut for {}: {}", action_id, prev_str);
+                            successfully_registered.insert(action_id.clone(), prev_str.clone());
                         }
                         Err(e) => {
                             eprintln!(

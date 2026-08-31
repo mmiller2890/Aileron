@@ -53,13 +53,6 @@
   "plugins": {
     "sql": {
       "preload": ["sqlite:assistant.db"]
-    },
-    "updater": {
-      "endpoints": [],
-      "pubkey": "",
-      "windows": {
-        "installMode": "passive"
-      }
     }
   }
 }

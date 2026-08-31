@@ -99,6 +99,6 @@ src-tauri/
 ## Conventions
 - No comments in code unless explicitly requested.
 - Follow existing code style (Tailwind classes, component patterns).
-- All UI text uses "Assistant" as the product name.
+- All UI text uses "Aileron" as the product name.
 - Run `npx tsc --noEmit` and `npm run build` after any change to verify it compiles.
 - Do not commit secrets, API keys, or tokens.

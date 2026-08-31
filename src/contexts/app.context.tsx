@@ -589,7 +589,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
               status.is_supported,
             )
           ) {
-            onSetSelectedSttProvider({ provider: "groq", variables: {} });
+            onSetSelectedSttProvider({
+              provider: "local-whisper",
+              variables: { MODEL: "openai/whisper-large-v3-turbo" },
+            });
           }
         } catch (error) {
           console.debug("Failed to check STT status:", error);
@@ -597,7 +600,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       } else if (
         shouldFallbackSttProvider(savedSttProvider, sttPlatform, false)
       ) {
-        onSetSelectedSttProvider({ provider: "groq", variables: {} });
+        onSetSelectedSttProvider({
+          provider: "local-whisper",
+          variables: { MODEL: "openai/whisper-large-v3-turbo" },
+        });
       }
     };
     // Load data

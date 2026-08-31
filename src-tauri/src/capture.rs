@@ -38,6 +38,14 @@ impl Default for CaptureState {
     }
 }
 
+fn destroy_overlay_windows(app: &tauri::AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if label.starts_with("capture-overlay-") {
+            window.destroy().ok();
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn start_screen_capture(app: tauri::AppHandle) -> Result<(), String> {
     // Get all monitors
@@ -146,6 +154,7 @@ pub async fn start_screen_capture(app: tauri::AppHandle) -> Result<(), String> {
                 .accept_first_mouse(true)
                 .build()
                 .map_err(|e| {
+                    destroy_overlay_windows(&app);
                     state.overlay_active.store(false, Ordering::SeqCst);
                     format!("Failed to create overlay window {}: {}", idx, e)
                 })?;
@@ -183,14 +192,7 @@ pub async fn start_screen_capture(app: tauri::AppHandle) -> Result<(), String> {
 // close overlay window
 #[tauri::command]
 pub fn close_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
-    // Get all webview windows and close those that are capture overlays
-    let webview_windows = app.webview_windows();
-
-    for (label, window) in webview_windows.iter() {
-        if label.starts_with("capture-overlay-") {
-            window.destroy().ok();
-        }
-    }
+    destroy_overlay_windows(&app);
 
     // Clear captured monitors from state
     let state = app.state::<CaptureState>();
@@ -232,13 +234,16 @@ pub async fn capture_selected_area(
         }
     };
 
-    let monitor_info = captured_monitors.remove(&monitor_index).ok_or({
+    let monitor_info = captured_monitors.remove(&monitor_index).ok_or_else(|| {
+        destroy_overlay_windows(&app);
         state.overlay_active.store(false, Ordering::SeqCst);
         format!("No captured image found for monitor {}", monitor_index)
     })?;
 
     // Validate coordinates
     if coords.width == 0 || coords.height == 0 {
+        destroy_overlay_windows(&app);
+        state.overlay_active.store(false, Ordering::SeqCst);
         return Err("Invalid selection dimensions".to_string());
     }
 
@@ -271,12 +276,7 @@ pub async fn capture_selected_area(
     drop(captured_monitors);
 
     // Close all overlay windows
-    let webview_windows = app.webview_windows();
-    for (label, window) in webview_windows.iter() {
-        if label.starts_with("capture-overlay-") {
-            window.destroy().ok();
-        }
-    }
+    destroy_overlay_windows(&app);
 
     // Emit event with base64 data
     app.emit("captured-selection", &base64_str)

@@ -1417,27 +1417,6 @@ pub async fn get_capture_status(app: AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub fn get_audio_sample_rate(_app: AppHandle) -> Result<u32, String> {
-    let input = SpeakerInput::new().map_err(|e| {
-        error!("Failed to create speaker input: {}", e);
-        format!("Failed to access system audio: {}", e)
-    })?;
-
-    // macOS exposes the tap's format rate without starting the aggregate
-    // device; the other platforms only learn the rate once the capture loop
-    // runs, so they fall back to starting the stream.
-    if let Some(sr) = input.sample_rate() {
-        return Ok(sr);
-    }
-
-    let stream = input.stream().map_err(|e| {
-        error!("Failed to start audio stream: {}", e);
-        format!("Failed to access system audio: {}", e)
-    })?;
-    Ok(stream.sample_rate())
-}
-
-#[tauri::command]
 pub fn get_input_devices() -> Result<Vec<AudioDevice>, String> {
     crate::speaker::list_input_devices().map_err(|e| {
         error!("Failed to get input devices: {}", e);

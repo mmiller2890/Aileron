@@ -74,8 +74,22 @@ pub fn center_window_completely(window: &WebviewWindow) -> Result<(), Box<dyn st
 pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
     use tauri::{LogicalSize, Size};
 
-    // Simply set the window size with fixed width and new height
-    let new_size = LogicalSize::new(600.0, height as f64);
+    let max_logical_height = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .and_then(|m| {
+            let scale = m.scale_factor();
+            if scale > 0.0 {
+                Some(m.size().height as f64 / scale)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(f64::MAX);
+    let clamped = (height as f64).clamp(1.0, max_logical_height);
+
+    let new_size = LogicalSize::new(600.0, clamped);
     window
         .set_size(Size::Logical(new_size))
         .map_err(|e| format!("Failed to resize window: {}", e))?;
@@ -114,34 +128,6 @@ pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     } else {
         // Window doesn't exist, create and show it
         show_dashboard_window(&app)?;
-    }
-
-    Ok(())
-}
-
-#[tauri::command]
-pub fn move_window(app: tauri::AppHandle, direction: String, step: i32) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        let current_pos = window
-            .outer_position()
-            .map_err(|e| format!("Failed to get window position: {}", e))?;
-
-        let (new_x, new_y) = match direction.as_str() {
-            "up" => (current_pos.x, current_pos.y - step),
-            "down" => (current_pos.x, current_pos.y + step),
-            "left" => (current_pos.x - step, current_pos.y),
-            "right" => (current_pos.x + step, current_pos.y),
-            _ => return Err(format!("Invalid direction: {}", direction)),
-        };
-
-        window
-            .set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: new_x,
-                y: new_y,
-            }))
-            .map_err(|e| format!("Failed to set window position: {}", e))?;
-    } else {
-        return Err("Main window not found".to_string());
     }
 
     Ok(())

@@ -58,7 +58,7 @@ tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-plugin-macos-permissions = "2"
 cidre = "0.11.3"
-tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "18ffb9a201fbf6fedfaa382fd4b92315ea30ab1a" }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
 fluidaudio-rs = { path = "vendor/fluidaudio-rs" }

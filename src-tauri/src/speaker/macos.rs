@@ -203,9 +203,10 @@ impl SpeakerInput {
         let tap_desc = ca::TapDesc::with_mono_global_tap_excluding_processes(&ns::Array::new());
         let tap = tap_desc.create_process_tap()?;
 
+        let tap_uid = tap.uid()?;
         let sub_tap = cf::DictionaryOf::with_keys_values(
             &[ca::sub_device_keys::uid()],
-            &[tap.uid().unwrap().as_type_ref()],
+            &[tap_uid.as_type_ref()],
         );
 
         let agg_desc = cf::DictionaryOf::with_keys_values(
@@ -415,6 +416,13 @@ impl Stream for SpeakerStream {
                 .unwrap_or_else(|e| e.into_inner());
             state.has_data = false;
             state.waker = Some(cx.waker().clone());
+        }
+
+        // Re-check after registering the waker: a producer that pushed
+        // between the first try_pop and the registration saw a stale
+        // has_data and skipped the wake, so the buffer may hold data now.
+        if let Some(sample) = self.consumer.try_pop() {
+            return Poll::Ready(Some(sample));
         }
 
         Poll::Pending

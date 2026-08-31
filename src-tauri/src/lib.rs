@@ -5,7 +5,7 @@ mod shortcuts;
 mod window;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager};
 pub mod speaker;
 mod stt;
 pub mod stt_diagnostics;
@@ -81,7 +81,6 @@ pub fn run() {
             window::set_window_height,
             window::open_dashboard,
             window::toggle_dashboard,
-            window::move_window,
             capture::capture_to_base64,
             capture::start_screen_capture,
             capture::capture_selected_area,
@@ -104,7 +103,6 @@ pub fn run() {
             speaker::get_vad_config,
             speaker::update_vad_config,
             speaker::get_capture_status,
-            speaker::get_audio_sample_rate,
             speaker::get_input_devices,
             speaker::get_output_devices,
             speaker::start_mic_dictation,
@@ -240,9 +238,15 @@ pub fn run() {
 #[cfg(target_os = "macos")]
 #[allow(deprecated, unexpected_cfgs)]
 fn init(app_handle: &AppHandle) {
-    let window: WebviewWindow = app_handle.get_webview_window("main").unwrap();
+    let Some(window) = app_handle.get_webview_window("main") else {
+        eprintln!("main window not found; skipping panel setup");
+        return;
+    };
 
-    let panel = window.to_panel().unwrap();
+    let Ok(panel) = window.to_panel() else {
+        eprintln!("failed to convert main window to panel; skipping panel setup");
+        return;
+    };
 
     let delegate = panel_delegate!(MyPanelDelegate {
         window_did_become_key,

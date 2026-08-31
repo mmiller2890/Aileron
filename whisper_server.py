@@ -31,7 +31,7 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+    from fastapi import FastAPI, UploadFile, File, HTTPException
     import uvicorn
 except ImportError:
     print("Missing dependency. Install with:\n  python3.12 -m pip install faster-whisper fastapi uvicorn python-multipart")
@@ -42,10 +42,10 @@ model: WhisperModel | None = None
 
 
 @app.post("/v1/audio/transcriptions")
-async def transcribe(file: UploadFile = File(...), model_name: str = Form(default="")):
+def transcribe(file: UploadFile = File(...)):
     # Read at most MAX_UPLOAD_BYTES + 1: if we get more than the cap, the
     # upload exceeds the limit (reject rather than OOM on `file.read()`).
-    audio_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    audio_bytes = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(audio_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
@@ -53,14 +53,16 @@ async def transcribe(file: UploadFile = File(...), model_name: str = Form(defaul
         )
 
     global model
-    if model is None:
+    active_model = model
+    if active_model is None:
         # Module run directly (e.g. `uvicorn whisper_server:app`) skips
         # main(), which is where the model is normally loaded. Load the
         # default model lazily instead of crashing with a 500.
         print(f"Loading default model: {DEFAULT_MODEL} (device=auto, compute_type=default)...")
-        model = WhisperModel(DEFAULT_MODEL, device="auto", compute_type="default")
+        active_model = WhisperModel(DEFAULT_MODEL, device="auto", compute_type="default")
+        model = active_model
 
-    segments, info = model.transcribe(io.BytesIO(audio_bytes), beam_size=5)
+    segments, info = active_model.transcribe(io.BytesIO(audio_bytes), beam_size=5)
     text = " ".join(seg.text for seg in segments).strip()
     return {"text": text}
 

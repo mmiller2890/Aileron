@@ -1043,6 +1043,16 @@ pub async fn stt_transcribe_speech(
     model_version: Option<String>,
     state: State<'_, SttState>,
 ) -> Result<serde_json::Value, String> {
+    // Bound the payload the webview can hand us: 10 minutes at 16 kHz.
+    const MAX_TRANSCRIBE_SAMPLES: usize = 16_000 * 60 * 10;
+    if samples.len() > MAX_TRANSCRIBE_SAMPLES {
+        return Err(format!(
+            "Speech sample count {} exceeds the {} sample limit",
+            samples.len(),
+            MAX_TRANSCRIBE_SAMPLES
+        ));
+    }
+
     let inner = state.inner.clone();
     tokio::task::spawn_blocking(move || {
         SttState::transcribe_samples_inner(inner, &samples, model_version)

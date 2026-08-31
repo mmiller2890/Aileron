@@ -1,7 +1,7 @@
 # HANDOFF — Code-review fix passes for the Assistant (Aileron) fork
 
 Handoff written after the session hit its limit, then updated by the continuation
-session. The next agent should start at **Task 14** under "REMAINING tasks". Everything
+session. The next agent should start at **Task 15** under "REMAINING tasks". Everything
 listed under "Work completed" is committed and verified.
 
 ## Project
@@ -20,7 +20,7 @@ listed under "Work completed" is committed and verified.
 ## Verification baseline (must stay green)
 
 - `npx tsc --noEmit` — clean
-- `npm test` — 35 files / 268 tests (vitest)
+- `npm test` — 36 files / 280 tests (vitest)
 - `cargo check --manifest-path src-tauri/Cargo.toml` — clean
 - `cargo test --manifest-path src-tauri/Cargo.toml` — 75 tests
 - `npm run build` — succeeds (~16s)
@@ -104,22 +104,23 @@ Pass 2 (in flight):
    `system-prompt.action.ts` are still prettier-unclean. Pre-existing, left alone — the
    workflow only formats files a task actually edits.
 
+9. `7f8d5ae` — chore: prettier autofixes for `src/lib/functions/` (trailing commas only).
+10. `4be8334` — **Task 14 "lib function correctness" — DONE.** All three findings verified
+    and all three held. `redactProviderError` now redacts every variable value except
+    `MODEL`, **with a deviation from the handoff's "redact ALL"**: values under 8 chars are
+    skipped unless the variable name still looks secret-ish. Reason — `allVariables` at the
+    call sites carries user-set entries (`REGION`, `PROJECT_ID`) plus `SYSTEM_PROMPT`, and
+    `redacted.split(value).join("[REDACTED]")` on a 2-char value like `"us"` would shred the
+    very message it sanitises (`status` -> `stat[REDACTED]`). `extractVariables` regex is
+    now `[A-Z0-9_]+` (matches `restoreUrlPlaceholders`; `deepVariableReplacer` already
+    substituted digit-bearing keys, so the UI simply never prompted for them). The
+    non-streaming path in `ai-response.function.ts` now requires a string from `getByPath`
+    and throws naming the provider + path; empty string still yields. New
+    `src/lib/functions/extract-variables.test.ts`, plus tests added to
+    `describe-error.test.ts` and `ai-response-stream.test.ts` — the 4 that pin changed
+    behaviour were confirmed to fail against the old code.
+
 ## REMAINING tasks (in order, each = verify finding in source first, fix, then commit)
-
-**Task 14 — lib function correctness** (`src/lib/functions/`):
-
-- `redactProviderError` (common.function.ts ~line 266): only redacts variable values whose
-  KEY matches `/(api_?key|token|secret|password|authorization|auth)/i`; a secret named
-  `KEY` or `SESSION` can surface in error text. Fix: redact ALL variable values except
-  `MODEL`. FIRST check `describe-error.test.ts` and any redact tests — update expectations.
-- `extractVariables` regex `/\{\{([A-Z_]+)\}\}/g` misses digits (`{{API_KEY2}}`); change to
-  `[A-Z0-9_]+`. Grep tests for existing expectations first.
-- `ai-response.function.ts:265` non-streaming path: `const content = getByPath(json,
-  provider?.responseContentPath || "") || ""; yield content;` — an empty/missing path
-  yields the whole JSON object → rendered/persisted as "[object Object]". Fix: require
-  `typeof content === "string"` before yielding; throw a descriptive error otherwise
-  (mention the provider id and responseContentPath). Note: still yield empty-string
-  content; only non-strings throw.
 
 **Task 15 — hook races and leaks** (NOT yet personally verified — read each first):
 

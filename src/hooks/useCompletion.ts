@@ -108,6 +108,18 @@ export const useCompletion = () => {
     null
   );
   const currentRequestIdRef = useRef<string | null>(null);
+  const activeGenerationRef = useRef(0);
+
+  const invalidateActiveCompletion = useCallback(() => {
+    activeGenerationRef.current += 1;
+    activeBatcherRef.current?.cancel();
+    activeBatcherRef.current = null;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    currentRequestIdRef.current = null;
+  }, []);
 
   const setInput = useCallback((value: string) => {
     setState((prev) => ({ ...prev, input: value }));
@@ -160,6 +172,7 @@ export const useCompletion = () => {
         return;
       }
 
+      const saveGeneration = activeGenerationRef.current;
       const conversationId =
         state.currentConversationId || generateConversationId("chat");
       const timestamp = Date.now();
@@ -209,18 +222,25 @@ export const useCompletion = () => {
       try {
         await saveConversation(conversation);
 
-        setState((prev) => ({
-          ...prev,
-          currentConversationId: conversationId,
-          conversationHistory: newMessages,
-        }));
+        // A conversation switch may have invalidated this save while it was
+        // in flight; the database write is allowed to finish against its
+        // original conversation id, but it may not rewrite the new state.
+        if (activeGenerationRef.current === saveGeneration) {
+          setState((prev) => ({
+            ...prev,
+            currentConversationId: conversationId,
+            conversationHistory: newMessages,
+          }));
+        }
       } catch (error) {
         console.error("Failed to save conversation:", error);
-        // Show error to user
-        setState((prev) => ({
-          ...prev,
-          error: "Failed to save conversation. Please try again.",
-        }));
+        if (activeGenerationRef.current === saveGeneration) {
+          // Show error to user
+          setState((prev) => ({
+            ...prev,
+            error: "Failed to save conversation. Please try again.",
+          }));
+        }
       }
     },
     [state.currentConversationId, state.conversationHistory]
@@ -244,6 +264,7 @@ export const useCompletion = () => {
       // Generate unique request ID
       const requestId = generateRequestId();
       currentRequestIdRef.current = requestId;
+      const activeGeneration = activeGenerationRef.current;
 
       // Cancel any existing request
       activeBatcherRef.current?.cancel();
@@ -260,8 +281,6 @@ export const useCompletion = () => {
         // token on a local model, so an unbounded history makes every turn
         // slower than the last (and eventually overflows the context window).
         const messageHistory = buildAIHistory(state.conversationHistory);
-
-        // Handle image attachments
         const imagesBase64: string[] = [];
         if (state.attachedFiles.length > 0) {
           state.attachedFiles.forEach((file) => {
@@ -304,7 +323,9 @@ export const useCompletion = () => {
         // Rendering the response re-parses the whole markdown string, so
         // batch tokens instead of re-rendering per token.
         const isCurrent = () =>
-          currentRequestIdRef.current === requestId && !signal.aborted;
+          currentRequestIdRef.current === requestId &&
+          !signal.aborted &&
+          activeGenerationRef.current === activeGeneration;
         const batcher = createTokenBatcher(
           (batched) => {
             setState((prev) => ({
@@ -360,7 +381,11 @@ export const useCompletion = () => {
         }
 
         // Only proceed if this is still the current request
-        if (currentRequestIdRef.current !== requestId || signal.aborted) {
+        if (
+          currentRequestIdRef.current !== requestId ||
+          signal.aborted ||
+          activeGenerationRef.current !== activeGeneration
+        ) {
           return;
         }
 
@@ -379,11 +404,17 @@ export const useCompletion = () => {
             state.attachedFiles
           );
           // Clear input and attached files after saving
-          setState((prev) => ({
-            ...prev,
-            input: "",
-            attachedFiles: [],
-          }));
+          if (
+            currentRequestIdRef.current === requestId &&
+            !signal.aborted &&
+            activeGenerationRef.current === activeGeneration
+          ) {
+            setState((prev) => ({
+              ...prev,
+              input: "",
+              attachedFiles: [],
+            }));
+          }
         }
       } catch (error) {
         // Only show error if not aborted
@@ -450,6 +481,7 @@ export const useCompletion = () => {
   // are now imported from lib/database/chat-history.action.ts
 
   const loadConversation = useCallback((conversation: ChatConversation) => {
+    invalidateActiveCompletion();
     setState((prev) => ({
       ...prev,
       currentConversationId: conversation.id,
@@ -459,9 +491,10 @@ export const useCompletion = () => {
       error: null,
       isLoading: false,
     }));
-  }, []);
+  }, [invalidateActiveCompletion]);
 
   const startNewConversation = useCallback(() => {
+    invalidateActiveCompletion();
     setState((prev) => ({
       ...prev,
       currentConversationId: null,
@@ -472,7 +505,7 @@ export const useCompletion = () => {
       isLoading: false,
       attachedFiles: [],
     }));
-  }, []);
+  }, [invalidateActiveCompletion]);
 
   // Listen for conversation events from the main ChatHistory component
   useEffect(() => {
@@ -595,6 +628,7 @@ export const useCompletion = () => {
           // Generate unique request ID
           const requestId = generateRequestId();
           currentRequestIdRef.current = requestId;
+          const activeGeneration = activeGenerationRef.current;
 
           // Cancel any existing request
           activeBatcherRef.current?.cancel();
@@ -641,7 +675,9 @@ export const useCompletion = () => {
             }));
 
             const isCurrent = () =>
-              currentRequestIdRef.current === requestId && !signal.aborted;
+              currentRequestIdRef.current === requestId &&
+              !signal.aborted &&
+              activeGenerationRef.current === activeGeneration;
             const batcher = createTokenBatcher(
               (batched) => {
                 setState((prev) => ({
@@ -689,7 +725,11 @@ export const useCompletion = () => {
             }
 
             // Only proceed if this is still the current request
-            if (currentRequestIdRef.current !== requestId || signal.aborted) {
+            if (
+              currentRequestIdRef.current !== requestId ||
+              signal.aborted ||
+              activeGenerationRef.current !== activeGeneration
+            ) {
               return;
             }
 
@@ -706,14 +746,24 @@ export const useCompletion = () => {
                 attachedFile,
               ]);
               // Clear input after saving
-              setState((prev) => ({
-                ...prev,
-                input: "",
-              }));
+              if (
+                currentRequestIdRef.current === requestId &&
+                !signal.aborted &&
+                activeGenerationRef.current === activeGeneration
+              ) {
+                setState((prev) => ({
+                  ...prev,
+                  input: "",
+                }));
+              }
             }
           } catch (e: any) {
             // Only show error if this is still the current request and not aborted
-            if (currentRequestIdRef.current === requestId && !signal.aborted) {
+            if (
+              currentRequestIdRef.current === requestId &&
+              !signal.aborted &&
+              activeGenerationRef.current === activeGeneration
+            ) {
               setState((prev) => ({
                 ...prev,
                 error: e.message || "An error occurred",
@@ -721,7 +771,11 @@ export const useCompletion = () => {
             }
           } finally {
             // Only update loading state if this is still the current request
-            if (currentRequestIdRef.current === requestId && !signal.aborted) {
+            if (
+              currentRequestIdRef.current === requestId &&
+              !signal.aborted &&
+              activeGenerationRef.current === activeGeneration
+            ) {
               setState((prev) => ({ ...prev, isLoading: false }));
             }
           }

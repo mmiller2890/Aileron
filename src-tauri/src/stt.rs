@@ -234,7 +234,6 @@ mod utterance_store_tests {
     use super::{
         build_local_transcription_result, cleanup_session_file_after,
         resolve_transcription_model, LocalTranscriptionContext, TranscriptionVariant,
-        UtteranceStore as _,
     };
     #[cfg(target_os = "macos")]
     use super::AsrModelVersion;

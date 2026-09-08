@@ -1346,9 +1346,10 @@ pub async fn stop_system_audio_capture(
     latch_discard_intent(&state.discard_take, discard.unwrap_or(false));
     state.stop_flag.store(true, Ordering::Release);
 
-    // Take the task and await it so the capture function can finish writing
-    // its session WAV before we return to the frontend.
-    let task = state.stream_task.take()?;
+    // Hold the stop reservation until the capture task has joined and its
+    // finalization completed: releasing the slot early would let a start/stop
+    // overlap claim it while the previous capture is still shutting down.
+    let (task, stop_reservation) = state.stream_task.take_for_stop()?;
 
     // Drain unconditionally: a live task supersedes anything a previous
     // unexpected end left behind, and `sweep_stale_session_wavs` reclaims the
@@ -1360,8 +1361,11 @@ pub async fn stop_system_audio_capture(
         .take();
 
     let session_path = if let Some(task) = task {
-        await_capture_shutdown(task, Duration::from_secs(5)).await
+        let joined = await_capture_shutdown(task, Duration::from_secs(5)).await;
+        drop(stop_reservation);
+        joined
     } else {
+        drop(stop_reservation);
         orphaned_session_path
     };
 
@@ -1825,6 +1829,21 @@ mod tests {
         task.unwrap().abort();
         drop(stopping);
         assert!(slot.reserve("busy").is_ok());
+    }
+
+    #[tokio::test]
+    async fn second_stop_is_rejected_while_the_first_is_in_progress() {
+        let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("busy").unwrap();
+        reservation
+            .install(tokio::spawn(std::future::pending::<()>()))
+            .unwrap();
+
+        let (_task, stopping) = slot.take_for_stop().unwrap();
+
+        assert!(slot.take_for_stop().is_err());
+        drop(stopping);
+        assert!(slot.take_for_stop().is_ok());
     }
 
     #[tokio::test]

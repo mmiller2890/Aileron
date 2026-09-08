@@ -48,6 +48,7 @@ import {
 } from "@/lib/speech-event-dedupe";
 import {
   createCaptureSessionWork,
+  discardSessionAudio,
   getSessionAudioStopAction,
 } from "@/lib/capture-session-work";
 import { completedStreamValue } from "@/lib/completed-stream";
@@ -461,7 +462,7 @@ export function useSystemAudio() {
               } finally {
                 clearTimeout(timeoutId);
               }
-            } catch (err) {
+            } catch {
               if (captureSessionWorkRef.current.isCurrent(generation)) {
                 setError("Failed to process speech");
               }
@@ -487,7 +488,7 @@ export function useSystemAudio() {
 
     const effectiveSystemPrompt = getEffectiveSystemPrompt();
 
-    let updatedMessages = [...conversation.messages];
+    const updatedMessages = [...conversation.messages];
 
     if (lastTranscription && lastTranscription.trim()) {
       const lastMessage = updatedMessages[updatedMessages.length - 1];
@@ -525,13 +526,25 @@ export function useSystemAudio() {
       // first — otherwise the start below is rejected with "Capture already
       // running" and the VAD session keeps picking up audio.
       if (capturingRef.current) {
-        await invoke("stop_system_audio_capture");
+        const stoppedPath = await invoke<string | null>(
+          "stop_system_audio_capture",
+        );
+        const action = getSessionAudioStopAction(
+          selectedSttProviderRef.current.provider,
+          stoppedPath,
+          false,
+          { modeChange: true },
+        );
+        await discardSessionAudio(
+          invoke,
+          action === "discard" ? stoppedPath : null,
+        );
       }
 
       const deviceId =
-        selectedAudioDevices.output.id !== "default"
-          ? selectedAudioDevices.output.id
-          : null;
+        selectedAudioDevices.output.id === "default"
+          ? null
+          : selectedAudioDevices.output.id;
 
       const providerConfig = allSttProviders.find(
         (p) => p.id === selectedSttProvider.provider,
@@ -735,7 +748,7 @@ export function useSystemAudio() {
             setCurrentSpeaker(speaker);
           }
         }
-      } catch (err) {
+      } catch {
         if (isCurrent() && !signal.aborted) {
           setError("Failed to get AI response");
         }
@@ -944,7 +957,18 @@ export function useSystemAudio() {
                 },
                 stop: async () => {
                   setError("Audio device changed — reconnecting…");
-                  await invoke("stop_system_audio_capture");
+                  const stoppedPath = await invoke<string | null>(
+                    "stop_system_audio_capture",
+                  );
+                  const action = getSessionAudioStopAction(
+                    selectedSttProviderRef.current.provider,
+                    stoppedPath,
+                    false,
+                    { modeChange: true },
+                  );
+                  if (action === "discard") {
+                    await discardSessionAudio(invoke, stoppedPath);
+                  }
                 },
                 start: async () => {
                   const providerConfig = allSttProvidersRef.current.find(
@@ -1051,9 +1075,9 @@ export function useSystemAudio() {
 
       const isContinuous = !vadConfig.enabled;
       const deviceId =
-        selectedAudioDevices.output.id !== "default"
-          ? selectedAudioDevices.output.id
-          : null;
+        selectedAudioDevices.output.id === "default"
+          ? null
+          : selectedAudioDevices.output.id;
 
       const providerConfig = allSttProviders.find(
         (p) => p.id === selectedSttProvider.provider,
@@ -1182,7 +1206,7 @@ export function useSystemAudio() {
           }
         } else if (sessionAudioStopAction === "discard") {
           try {
-            await invoke("stt_discard_session_audio", { path: sessionPath });
+            await discardSessionAudio(invoke, sessionPath);
           } catch (err) {
             console.warn("Failed to discard session audio:", err);
           }
@@ -1254,7 +1278,7 @@ export function useSystemAudio() {
         setSetupRequired(true);
         setError("Permission not granted. Please try the manual steps.");
       }
-    } catch (err) {
+    } catch {
       setError("Failed to request access. Please try the manual steps below.");
       setSetupRequired(true);
     }
@@ -1302,7 +1326,13 @@ export function useSystemAudio() {
         abortControllerRef.current.abort();
       }
       summaryAbortRef.current?.abort();
-      invoke("stop_system_audio_capture").catch(() => {});
+      invoke<string | null>("stop_system_audio_capture")
+        .then((sessionPath) => {
+          // Nothing can diarize after unmount, so the returned session WAV is
+          // discarded instead of orphaning it for the startup sweep.
+          return discardSessionAudio(invoke, sessionPath);
+        })
+        .catch(() => {});
     };
   }, []);
 
@@ -1438,9 +1468,9 @@ export function useSystemAudio() {
         if (vadConfig.enabled) {
           // Switching to VAD: start listening immediately.
           const deviceId =
-            selectedAudioDevices.output.id !== "default"
-              ? selectedAudioDevices.output.id
-              : null;
+            selectedAudioDevices.output.id === "default"
+              ? null
+              : selectedAudioDevices.output.id;
           const providerConfig = allSttProvidersRef.current.find(
             (p) => p.id === selectedSttProviderRef.current.provider,
           );

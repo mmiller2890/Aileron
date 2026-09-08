@@ -40,6 +40,7 @@ pub(crate) struct CachedUtterance {
     created_at: Instant,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 struct TranscriptionVariant {
     raw_text: String,
@@ -50,6 +51,7 @@ struct TranscriptionVariant {
     token_timings: Vec<fluidaudio_rs::TokenTiming>,
 }
 
+#[cfg(target_os = "macos")]
 fn transcription_variant_json(variant: &TranscriptionVariant) -> serde_json::Value {
     serde_json::json!({
         "text": variant.normalized_text,
@@ -63,6 +65,7 @@ fn transcription_variant_json(variant: &TranscriptionVariant) -> serde_json::Val
     })
 }
 
+#[cfg(target_os = "macos")]
 struct LocalTranscriptionContext<'a> {
     model_version: &'a str,
     path: &'a str,
@@ -73,6 +76,7 @@ struct LocalTranscriptionContext<'a> {
     comparison_converted_sample_count: Option<usize>,
 }
 
+#[cfg(target_os = "macos")]
 fn build_local_transcription_result(
     primary: TranscriptionVariant,
     comparison: Option<(Result<TranscriptionVariant, String>, f64)>,
@@ -224,12 +228,15 @@ impl UtteranceStore {
 #[cfg(test)]
 mod utterance_store_tests {
     use super::{
-        build_local_transcription_result, cleanup_session_file_after, try_lock_stt_inner,
-        LocalTranscriptionContext, SttInner, SttState, TranscriptionVariant, UtteranceStore,
-        MAX_CACHED_UTTERANCES,
+        try_lock_stt_inner, SttInner, SttState, UtteranceStore, MAX_CACHED_UTTERANCES,
     };
     #[cfg(target_os = "macos")]
-    use super::{resolve_transcription_model, AsrModelVersion};
+    use super::{
+        build_local_transcription_result, cleanup_session_file_after,
+        resolve_transcription_model, LocalTranscriptionContext, TranscriptionVariant,
+    };
+    #[cfg(target_os = "macos")]
+    use super::AsrModelVersion;
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -246,6 +253,7 @@ mod utterance_store_tests {
         assert!(AsrModelVersion::parse("turbo").is_err());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn sample_fallback_reuses_v3_when_no_version_is_requested() {
         assert_eq!(
@@ -254,6 +262,7 @@ mod utterance_store_tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn direct_sample_transcription_rejects_explicit_v2() {
         assert!(
@@ -313,6 +322,7 @@ mod utterance_store_tests {
         assert_eq!(cached.source_duration, 1.25);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn comparison_failure_keeps_the_primary_result() {
         let primary = TranscriptionVariant {
@@ -352,6 +362,7 @@ mod utterance_store_tests {
         assert!(result["diagnostics"].get("path").is_none());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn local_transcription_preserves_token_timings() {
         let primary = TranscriptionVariant {
@@ -592,6 +603,7 @@ fn not_supported() -> String {
     "Local STT requires macOS Apple Silicon".to_string()
 }
 
+#[cfg(target_os = "macos")]
 fn resolve_transcription_model(
     loaded: Option<AsrModelVersion>,
     requested: Option<String>,

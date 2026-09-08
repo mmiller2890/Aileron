@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getDatabase } from "./config";
 import { ChatConversation } from "@/types";
 import { safeLocalStorage } from "@/lib";
@@ -7,6 +8,53 @@ import {
   rowsToConversations,
   safeJsonParse,
 } from "./chat-history.map";
+
+type SaveOperation = "create" | "update" | "upsert";
+
+type NativeConversationPayload = {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: {
+    id: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    timestamp: number;
+    attachedFiles: unknown;
+  }[];
+};
+
+function toNativePayload(
+  conversation: ChatConversation,
+): NativeConversationPayload {
+  return {
+    id: conversation.id,
+    title: conversation.title,
+    createdAt: conversation.createdAt || Date.now(),
+    updatedAt: conversation.updatedAt || Date.now(),
+    messages: conversation.messages
+      .filter((message) => validateMessage(message))
+      .map((message) => ({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        timestamp: message.timestamp,
+        attachedFiles: message.attachedFiles ? message.attachedFiles : null,
+      })),
+  };
+}
+
+async function saveViaNativeCommand(
+  conversation: ChatConversation,
+  operation: SaveOperation,
+): Promise<ChatConversation> {
+  await invoke("db_save_conversation", {
+    conversation: toNativePayload(conversation),
+    operation,
+  });
+  return conversation;
+}
 
 // Legacy localStorage key for migration purposes
 const LEGACY_CHAT_HISTORY_KEY = "chat_history";
@@ -66,51 +114,10 @@ export async function createConversation(
     throw new Error("Invalid conversation data");
   }
 
-  const db = await getDatabase();
-
   try {
-    // Insert conversation
-    await db.execute(
-      "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-      [
-        conversation.id,
-        conversation.title,
-        conversation.createdAt || Date.now(),
-        conversation.updatedAt || Date.now(),
-      ],
-    );
-
-    // Insert all messages
-    for (const message of conversation.messages) {
-      if (!validateMessage(message)) {
-        console.warn("Skipping invalid message in conversation creation");
-        continue;
-      }
-
-      const attachedFilesJson = message.attachedFiles
-        ? JSON.stringify(message.attachedFiles)
-        : null;
-
-      await db.execute(
-        "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
-        [
-          message.id,
-          conversation.id,
-          message.role,
-          message.content,
-          message.timestamp,
-          attachedFilesJson,
-        ],
-      );
-    }
-
-    return conversation;
+    return await saveViaNativeCommand(conversation, "create");
   } catch (error) {
     console.error("Failed to create conversation:", error);
-    // Rollback: delete conversation if message insertion failed
-    await db
-      .execute("DELETE FROM conversations WHERE id = ?", [conversation.id])
-      .catch(() => {});
     throw error;
   }
 }
@@ -246,54 +253,9 @@ export async function updateConversation(
     throw new Error("Invalid conversation data");
   }
 
-  const db = await getDatabase();
-
-  await db.execute("BEGIN");
-
   try {
-    const updateResult = await db.execute(
-      "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-      [conversation.title, conversation.updatedAt, conversation.id],
-    );
-
-    if (updateResult.rowsAffected === 0) {
-      throw new Error("Conversation not found");
-    }
-
-    await db.execute("DELETE FROM messages WHERE conversation_id = ?", [
-      conversation.id,
-    ]);
-
-    for (const message of conversation.messages) {
-      if (!validateMessage(message)) {
-        console.warn("Skipping invalid message in conversation update");
-        continue;
-      }
-
-      const attachedFilesJson = message.attachedFiles
-        ? JSON.stringify(message.attachedFiles)
-        : null;
-
-      await db.execute(
-        "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
-        [
-          message.id,
-          conversation.id,
-          message.role,
-          message.content,
-          message.timestamp,
-          attachedFilesJson,
-        ],
-      );
-    }
-
-    await db.execute("COMMIT");
-
-    return conversation;
+    return await saveViaNativeCommand(conversation, "update");
   } catch (error) {
-    await db.execute("ROLLBACK").catch((rollbackError) => {
-      console.error("Failed to roll back conversation update:", rollbackError);
-    });
     console.error("Failed to update conversation:", error);
     throw error;
   }
@@ -310,13 +272,7 @@ export async function saveConversation(
   }
 
   try {
-    const existing = await getConversationById(conversation.id);
-
-    if (existing) {
-      return await updateConversation(conversation);
-    } else {
-      return await createConversation(conversation);
-    }
+    return await saveViaNativeCommand(conversation, "upsert");
   } catch (error) {
     console.error("Failed to save conversation:", error);
     throw error;

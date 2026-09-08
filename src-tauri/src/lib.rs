@@ -115,6 +115,7 @@ pub fn run() {
             stt::stt_diarize_file,
             stt::stt_discard_session_audio,
             stt::stt_get_status,
+            db::db_save_conversation,
         ])
         .setup(|app| {
             // Crash recovery: drop session WAVs abandoned before diarization.

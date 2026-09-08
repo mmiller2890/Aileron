@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createCaptureSessionWork,
+  discardSessionAudio,
   getSessionAudioStopAction,
 } from "./capture-session-work";
 
@@ -46,6 +47,18 @@ describe("createCaptureSessionWork", () => {
 
     await expect(sessions.drain(generation, 1)).resolves.toBe(false);
   });
+
+  it("invalidating a stale generation leaves a newer one untouched", async () => {
+    const sessions = createCaptureSessionWork();
+    const stale = sessions.begin();
+    const current = sessions.begin();
+    void sessions.track(stale, new Promise<void>(() => {}));
+
+    sessions.invalidate(stale);
+
+    expect(sessions.isCurrent(current)).toBe(true);
+    await expect(sessions.drain(current, 10)).resolves.toBe(true);
+  });
 });
 
 describe("getSessionAudioStopAction", () => {
@@ -77,5 +90,33 @@ describe("getSessionAudioStopAction", () => {
 
   it("does nothing when capture produced no session audio", () => {
     expect(getSessionAudioStopAction("deepgram", null, true)).toBe("none");
+  });
+
+  it("discards the WAV path a mode-change stop returns", () => {
+    expect(
+      getSessionAudioStopAction("local-fluidaudio", "/tmp/session.wav", true, {
+        modeChange: true,
+      })
+    ).toBe("discard");
+  });
+});
+
+describe("discardSessionAudio", () => {
+  it("discards a returned session WAV path", async () => {
+    const invokeCommand = vi.fn().mockResolvedValue(undefined);
+
+    await discardSessionAudio(invokeCommand, "/tmp/session.wav");
+
+    expect(invokeCommand).toHaveBeenCalledWith("stt_discard_session_audio", {
+      path: "/tmp/session.wav",
+    });
+  });
+
+  it("does nothing without a session WAV", async () => {
+    const invokeCommand = vi.fn().mockResolvedValue(undefined);
+
+    await discardSessionAudio(invokeCommand, null);
+
+    expect(invokeCommand).not.toHaveBeenCalled();
   });
 });

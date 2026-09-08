@@ -30,11 +30,12 @@ function readFallback(key: string): string | null {
   }
 }
 
-function writeFallback(key: string, value: string): void {
+function writeFallback(key: string, value: string): boolean {
   try {
     localStorage.setItem(fallbackKey(key), value);
+    return true;
   } catch {
-    /* localStorage unavailable — nothing more we can do */
+    return false;
   }
 }
 
@@ -58,10 +59,21 @@ export async function saveSecret(key: string, value: string): Promise<void> {
   } catch {
     /* keychain unavailable — fall through to the plaintext fallback */
   }
-  writeFallback(key, value);
+  // The plaintext fallback is the last backend that can retain the value:
+  // if it fails too, the caller must know the save did not happen.
+  if (!writeFallback(key, value)) {
+    throw new Error("Failed to store the secret in any backend");
+  }
 }
 
 export async function getSecret(key: string): Promise<string | null> {
+  // A pending fallback is the latest successfully retained value: it wins
+  // over older keychain data. Compared against null, not truthiness — an
+  // empty string is a legitimately retained value.
+  const pending = readFallback(key);
+  if (pending !== null) {
+    return pending;
+  }
   try {
     const fromKeychain = await getItem(key);
     if (fromKeychain != null) {
@@ -70,7 +82,7 @@ export async function getSecret(key: string): Promise<string | null> {
   } catch {
     /* keychain unavailable — try the fallback */
   }
-  return readFallback(key);
+  return null;
 }
 
 export async function removeSecret(key: string): Promise<void> {

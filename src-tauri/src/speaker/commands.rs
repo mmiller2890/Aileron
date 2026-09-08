@@ -1,5 +1,6 @@
 // Assistant AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
 use crate::speaker::preprocessing::{apply_noise_gate, prepare_utterance, PreparedUtterance};
+use crate::speaker::session_recording;
 use crate::speaker::{AudioDevice, SpeakerInput};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -665,9 +666,12 @@ async fn run_vad_capture(
     let mut last_chunk_time: Option<Instant> = None;
 
     let session_start = Instant::now();
-    let max_session_samples =
-        (sr as usize * config.max_recording_duration_secs as usize).min(sr as usize * 3600);
-    let mut session_audio: Vec<f32> = Vec::new();
+    #[cfg(target_os = "macos")]
+    let mut session_recording: Option<
+        session_recording::SessionRecording<std::fs::File>,
+    > = None;
+    #[cfg(target_os = "macos")]
+    let mut session_recording_issue_reported = false;
     let mut vad_accumulator = VadFrameAccumulator::default();
     let mut vad_resample_error_reported = false;
     let mut vad_processing_error_reported = false;
@@ -745,8 +749,56 @@ async fn run_vad_capture(
                 silent_warned = true;
             }
 
-            if session_audio.len() + raw_mono.len() <= max_session_samples {
-                session_audio.extend_from_slice(&raw_mono);
+            #[cfg(target_os = "macos")]
+            {
+                if session_recording.is_none() && !session_recording_issue_reported {
+                    let temp_path = std::env::temp_dir().join(format!(
+                        "assistant-session-{}.wav",
+                        uuid::Uuid::new_v4()
+                    ));
+                    match session_recording::SessionRecording::create_file(
+                        temp_path,
+                        sr,
+                        sr as usize
+                            * session_recording::SESSION_RECORDING_MAX_SECS as usize,
+                    ) {
+                        Ok(recording) => session_recording = Some(recording),
+                        Err(e) => {
+                            session_recording_issue_reported = true;
+                            error!("Failed to open session recording: {}", e);
+                            let _ = app.emit(
+                                "stt-error",
+                                "Speaker labels are unavailable for this session.",
+                            );
+                        }
+                    }
+                }
+                if let Some(recording) = session_recording.as_mut() {
+                    match recording.append(&raw_mono) {
+                        Ok(session_recording::AppendOutcome::Appended) => {}
+                        Ok(session_recording::AppendOutcome::Full) => {
+                            session_recording = None;
+                            if !session_recording_issue_reported {
+                                session_recording_issue_reported = true;
+                                let message =
+                                    "Speaker labels cover the first hour of a session.";
+                                error!("{}", message);
+                                let _ = app.emit("stt-error", message);
+                            }
+                        }
+                        Err(e) => {
+                            session_recording = None;
+                            if !session_recording_issue_reported {
+                                session_recording_issue_reported = true;
+                                error!("Session recording failed: {}", e);
+                                let _ = app.emit(
+                                    "stt-error",
+                                    "Speaker labels are unavailable for this session.",
+                                );
+                            }
+                        }
+                    }
+                }
             }
 
             #[cfg(target_os = "macos")]
@@ -918,26 +970,44 @@ async fn run_vad_capture(
         );
     }
 
-    // Write session WAV for diarization
-    let mut session_path: Option<std::path::PathBuf> = None;
-    if !session_audio.is_empty() {
-        let temp_dir = std::env::temp_dir();
-        let temp_path = temp_dir.join(format!("assistant-session-{}.wav", uuid::Uuid::new_v4()));
-        if let Err(e) = write_f32_samples_to_wav(sr, &session_audio, &temp_path) {
-            error!("Failed to write session WAV: {}", e);
-        } else {
-            let Some(stt_state) = app.try_state::<crate::stt::SttState>() else {
-                let _ = std::fs::remove_file(&temp_path);
-                return None;
-            };
-            if let Err(e) = stt_state.set_session_wav_path(temp_path.clone()) {
-                error!("Failed to manage session WAV: {}", e);
-                let _ = std::fs::remove_file(&temp_path);
-                return None;
+    // Finalize the session WAV for diarization before its path is returned.
+    #[cfg(target_os = "macos")]
+    let session_path: Option<std::path::PathBuf> = match session_recording {
+        Some(recording) => {
+            let path = recording.path().to_path_buf();
+            match recording.finalize() {
+                Ok(()) => {
+                    match app
+                        .try_state::<crate::stt::SttState>()
+                        .map(|state| state.set_session_wav_path(path.clone()))
+                    {
+                        Some(Ok(())) => Some(path),
+                        Some(Err(e)) => {
+                            error!("Failed to manage session WAV: {}", e);
+                            let _ = std::fs::remove_file(&path);
+                            None
+                        }
+                        None => {
+                            let _ = std::fs::remove_file(&path);
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to finalize session recording: {}", e);
+                    let _ = app.emit(
+                        "stt-error",
+                        "Speaker labels are unavailable for this session.",
+                    );
+                    None
+                }
             }
-            session_path = Some(temp_path);
         }
-    }
+        None => None,
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let session_path: Option<std::path::PathBuf> = None;
 
     session_path
 }
@@ -1276,9 +1346,10 @@ pub async fn stop_system_audio_capture(
     latch_discard_intent(&state.discard_take, discard.unwrap_or(false));
     state.stop_flag.store(true, Ordering::Release);
 
-    // Take the task and await it so the capture function can finish writing
-    // its session WAV before we return to the frontend.
-    let task = state.stream_task.take()?;
+    // Hold the stop reservation until the capture task has joined and its
+    // finalization completed: releasing the slot early would let a start/stop
+    // overlap claim it while the previous capture is still shutting down.
+    let (task, stop_reservation) = state.stream_task.take_for_stop()?;
 
     // Drain unconditionally: a live task supersedes anything a previous
     // unexpected end left behind, and `sweep_stale_session_wavs` reclaims the
@@ -1290,8 +1361,11 @@ pub async fn stop_system_audio_capture(
         .take();
 
     let session_path = if let Some(task) = task {
-        await_capture_shutdown(task, Duration::from_secs(5)).await
+        let joined = await_capture_shutdown(task, Duration::from_secs(5)).await;
+        drop(stop_reservation);
+        joined
     } else {
+        drop(stop_reservation);
         orphaned_session_path
     };
 
@@ -1755,6 +1829,21 @@ mod tests {
         task.unwrap().abort();
         drop(stopping);
         assert!(slot.reserve("busy").is_ok());
+    }
+
+    #[tokio::test]
+    async fn second_stop_is_rejected_while_the_first_is_in_progress() {
+        let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("busy").unwrap();
+        reservation
+            .install(tokio::spawn(std::future::pending::<()>()))
+            .unwrap();
+
+        let (_task, stopping) = slot.take_for_stop().unwrap();
+
+        assert!(slot.take_for_stop().is_err());
+        drop(stopping);
+        assert!(slot.take_for_stop().is_ok());
     }
 
     #[tokio::test]

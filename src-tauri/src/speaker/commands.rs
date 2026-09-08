@@ -918,8 +918,11 @@ async fn run_vad_capture(
         );
     }
 
-    // Write session WAV for diarization
+    // Write session WAV for diarization (macOS-only: diarization is a local
+    // fluidaudio capability; other platforms use external Whisper without it).
+    #[cfg(target_os = "macos")]
     let mut session_path: Option<std::path::PathBuf> = None;
+    #[cfg(target_os = "macos")]
     if !session_audio.is_empty() {
         let temp_dir = std::env::temp_dir();
         let temp_path = temp_dir.join(format!("assistant-session-{}.wav", uuid::Uuid::new_v4()));
@@ -938,6 +941,9 @@ async fn run_vad_capture(
             session_path = Some(temp_path);
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    let session_path: Option<std::path::PathBuf> = None;
 
     session_path
 }

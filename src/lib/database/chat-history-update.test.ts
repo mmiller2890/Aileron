@@ -1,9 +1,12 @@
 import { describe, expect, test, vi, beforeEach } from "vitest";
 
-const { dbExecute, dbSelect, getDatabaseMock } = vi.hoisted(() => ({
-  dbExecute: vi.fn(),
-  dbSelect: vi.fn(),
+const { invokeMock, getDatabaseMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
   getDatabaseMock: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
 }));
 
 vi.mock("@/lib", () => ({
@@ -18,7 +21,8 @@ vi.mock("./config", () => ({
   getDatabase: getDatabaseMock,
 }));
 
-const { updateConversation } = await import("./chat-history.action");
+const { createConversation, updateConversation, saveConversation } =
+  await import("./chat-history.action");
 
 const conversation = {
   id: "c1",
@@ -31,62 +35,76 @@ const conversation = {
   ],
 };
 
-const sql = () => dbExecute.mock.calls.map((call) => call[0]);
-
 beforeEach(() => {
-  dbExecute.mockReset().mockResolvedValue({ rowsAffected: 1 });
-  dbSelect.mockReset().mockResolvedValue([]);
-  getDatabaseMock.mockReset().mockResolvedValue({
-    execute: dbExecute,
-    select: dbSelect,
-  });
+  invokeMock.mockReset().mockResolvedValue(undefined);
+  getDatabaseMock.mockReset();
 });
 
-describe("updateConversation", () => {
-  test("wraps the delete-and-reinsert in a committed transaction", async () => {
-    await updateConversation(conversation as never);
+describe("native save delegation", () => {
+  test("updateConversation delegates to the native command and returns the input conversation", async () => {
+    const result = await updateConversation(conversation as never);
 
-    const statements = sql();
-    expect(statements[0]).toBe("BEGIN");
-    expect(statements[statements.length - 1]).toBe("COMMIT");
-    expect(statements).not.toContain("ROLLBACK");
-    expect(
-      statements.filter((s) => s.startsWith("INSERT INTO messages")),
-    ).toHaveLength(2);
+    expect(invokeMock).toHaveBeenCalledWith("db_save_conversation", {
+      conversation: expect.objectContaining({
+        id: "c1",
+        title: "Title",
+        createdAt: 1,
+        updatedAt: 2,
+      }),
+      operation: "update",
+    });
+    expect(result).toBe(conversation);
   });
 
-  test("rolls back and rethrows when a message insert fails", async () => {
-    dbExecute.mockImplementation((statement: string) =>
-      statement.startsWith("INSERT INTO messages")
-        ? Promise.reject(new Error("disk I/O error"))
-        : Promise.resolve({ rowsAffected: 1 }),
-    );
+  test("createConversation delegates with the create operation", async () => {
+    await createConversation(conversation as never);
 
-    await expect(updateConversation(conversation as never)).rejects.toThrow(
-      "disk I/O error",
-    );
-
-    const statements = sql();
-    expect(statements[0]).toBe("BEGIN");
-    expect(statements).toContain("ROLLBACK");
-    expect(statements).not.toContain("COMMIT");
+    expect(invokeMock).toHaveBeenCalledWith("db_save_conversation", {
+      conversation: expect.objectContaining({ id: "c1" }),
+      operation: "create",
+    });
   });
 
-  test("rolls back when the conversation row is missing", async () => {
-    dbExecute.mockImplementation((statement: string) =>
-      statement.startsWith("UPDATE conversations")
-        ? Promise.resolve({ rowsAffected: 0 })
-        : Promise.resolve({ rowsAffected: 1 }),
-    );
+  test("saveConversation delegates with the upsert operation", async () => {
+    await saveConversation(conversation as never);
+
+    expect(invokeMock).toHaveBeenCalledWith("db_save_conversation", {
+      conversation: expect.objectContaining({ id: "c1" }),
+      operation: "upsert",
+    });
+  });
+
+  test("propagates native command errors", async () => {
+    invokeMock.mockRejectedValue(new Error("Conversation not found"));
 
     await expect(updateConversation(conversation as never)).rejects.toThrow(
       "Conversation not found",
     );
+  });
 
-    const statements = sql();
-    expect(statements).toContain("ROLLBACK");
-    expect(statements).not.toContain(
-      "DELETE FROM messages WHERE conversation_id = ?",
-    );
+  test("rejects invalid conversations without invoking the native command", async () => {
+    await expect(
+      updateConversation({ id: "c1" } as never),
+    ).rejects.toThrow("Invalid conversation data");
+
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  test("payload carries only valid messages", async () => {
+    const mixed = {
+      ...conversation,
+      messages: [
+        ...conversation.messages,
+        { id: "m3", role: "nope", content: "bad", timestamp: 300 },
+      ],
+    };
+
+    await createConversation(mixed as never);
+
+    const payload = invokeMock.mock.calls[0][1].conversation;
+    expect(payload.messages.map((m: { id: string }) => m.id)).toEqual([
+      "m1",
+      "m2",
+    ]);
   });
 });

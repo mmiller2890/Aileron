@@ -396,7 +396,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
               }
             }
           }
-        })();
+        })().catch((error) => {
+          console.error("Failed to migrate AI provider secrets:", error);
+        });
       } catch {
         setSelectedAIProvider({ provider: "", variables: {} });
       }
@@ -474,7 +476,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
               }
             }
           }
-        })();
+        })().catch((error) => {
+          console.error("Failed to migrate STT provider secrets:", error);
+        });
       } catch {
         setSelectedSttProvider({
           provider: isMacOS() ? "local-fluidaudio" : "local-whisper",

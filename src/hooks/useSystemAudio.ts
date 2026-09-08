@@ -1463,7 +1463,19 @@ export function useSystemAudio() {
       try {
         // Stop whatever session is running (no-op if manual mode was armed
         // with no active task).
-        await invoke("stop_system_audio_capture");
+        const stoppedPath = await invoke<string | null>(
+          "stop_system_audio_capture",
+        );
+        const action = getSessionAudioStopAction(
+          selectedSttProviderRef.current.provider,
+          stoppedPath,
+          false,
+          { modeChange: true },
+        );
+        await discardSessionAudio(
+          invoke,
+          action === "discard" ? stoppedPath : null,
+        );
 
         if (vadConfig.enabled) {
           // Switching to VAD: start listening immediately.

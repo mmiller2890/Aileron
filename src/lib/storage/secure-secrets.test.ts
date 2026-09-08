@@ -70,6 +70,33 @@ describe("secure-secrets", () => {
     expect(await getSecret("api")).toBe("sk-2");
   });
 
+  it("prefers a pending update over an older keychain value", async () => {
+    await saveSecret("api", "old-value");
+    keychainMode = "lies";
+    await saveSecret("api", "new-value");
+    expect(await getSecret("api")).toBe("new-value");
+  });
+
+  it("returns a legitimately empty pending value instead of keychain data", async () => {
+    await saveSecret("api", "old-value");
+    keychainMode = "lies";
+    await saveSecret("api", "");
+    expect(await getSecret("api")).toBe("");
+  });
+
+  it("rejects the save when neither backend can retain the value", async () => {
+    keychainMode = "throws";
+    vi.stubGlobal("localStorage", {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error("localStorage unavailable");
+      },
+      removeItem: () => undefined,
+    });
+
+    await expect(saveSecret("api", "sk-123")).rejects.toThrow();
+  });
+
   it("removeSecret clears both keychain and fallback", async () => {
     keychainMode = "throws";
     await saveSecret("api", "sk-1"); // fallback

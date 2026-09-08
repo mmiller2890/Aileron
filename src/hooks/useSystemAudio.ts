@@ -180,9 +180,9 @@ export function useSystemAudio() {
   const isSavingRef = useRef<boolean>(false);
   const pendingSaveConversationRef = useRef<ChatConversation | null>(null);
   const inFlightSaveRef = useRef<Promise<unknown> | null>(null);
-  const utteranceTimestampsRef = useRef<Array<{ start: number; end: number }>>(
-    [],
-  );
+  const utteranceRecordsRef = useRef<
+    Array<{ messageId: string | null; start: number; end: number }>
+  >([]);
   const recentSpeechEventsRef = useRef(new RecentSpeechEventFingerprints());
   const captureSessionWorkRef = useRef(createCaptureSessionWork());
   const captureGenerationRef = useRef(0);
@@ -329,11 +329,16 @@ export function useSystemAudio() {
                 return;
               }
 
-              if (payload.start_time !== 0 || payload.end_time !== 0) {
-                utteranceTimestampsRef.current.push({
-                  start: payload.start_time,
-                  end: payload.end_time,
-                });
+              const utteranceRecord: {
+                messageId: string | null;
+                start: number;
+                end: number;
+              } | null =
+                payload.start_time !== 0 || payload.end_time !== 0
+                  ? { messageId: null, start: payload.start_time, end: payload.end_time }
+                  : null;
+              if (utteranceRecord) {
+                utteranceRecordsRef.current.push(utteranceRecord);
               }
 
               // Deferred: the local provider transcribes by handle (below) and
@@ -409,6 +414,9 @@ export function useSystemAudio() {
                   // questions earn an automatic answer. The rest can be
                   // answered on demand via the answer-last shortcut.
                   const messageId = appendUtteranceMessage(transcription);
+                  if (utteranceRecord) {
+                    utteranceRecord.messageId = messageId;
+                  }
                   lastUtteranceRef.current = {
                     text: transcription,
                     messageId,
@@ -681,9 +689,9 @@ export function useSystemAudio() {
         if (responseToPersist && isCurrent()) {
           const timestamp = Date.now();
           const latestUtterance =
-            utteranceTimestampsRef.current[
-              utteranceTimestampsRef.current.length - 1
-            ];
+            [...utteranceRecordsRef.current]
+              .reverse()
+              .find((record) => record.messageId !== null) ?? null;
           const speaker = latestUtterance
             ? getSpeakerForUtterance(
                 latestUtterance.start,
@@ -1087,7 +1095,7 @@ export function useSystemAudio() {
             summarySeqRef.current++;
             setSessionSummary("");
             setIsSummarizing(false);
-            utteranceTimestampsRef.current = [];
+            utteranceRecordsRef.current = [];
             setSpeakerSegments([]);
             setIsLabelingSpeakers(false);
             setCurrentSpeaker(null);
@@ -1165,7 +1173,7 @@ export function useSystemAudio() {
             setSpeakerSegments(segments);
             labelMessagesWithSpeakersRef.current(
               segments,
-              utteranceTimestampsRef.current,
+              utteranceRecordsRef.current,
             );
           } catch (err) {
             console.warn("Diarization failed:", err);

@@ -1006,7 +1006,7 @@ export const useCompletion = () => {
         isProcessingScreenshotRef.current = false;
         await invoke("start_screen_capture");
       }
-    } catch (error) {
+    } catch {
       setState((prev) => ({
         ...prev,
         error: "Failed to capture screenshot. Please try again.",

@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { ChatConversation } from "@/types/completion";
+import { ChatConversation, ChatMessage } from "@/types/completion";
 
 export interface SpeakerSegment {
   speaker_id: string;
@@ -10,6 +10,12 @@ export interface SpeakerSegment {
 }
 
 export interface UtteranceWindow {
+  start: number;
+  end: number;
+}
+
+export interface UtteranceRecord {
+  messageId: string | null;
   start: number;
   end: number;
 }
@@ -48,6 +54,74 @@ export function getSpeakerForUtterance(
  * returned by diarization, which speaker is currently talking, and how
  * segments map onto transcript messages after a session ends.
  */
+export function applySpeakerLabels(
+  messages: ChatMessage[],
+  segments: SpeakerSegment[],
+  utterances: UtteranceRecord[],
+): ChatMessage[] {
+  if (utterances.length === 0 || segments.length === 0) {
+    return messages;
+  }
+  const updated = [...messages];
+  let changed = false;
+  for (const utterance of utterances) {
+    if (!utterance.messageId) {
+      continue;
+    }
+    const index = updated.findIndex(
+      (message) =>
+        message.id === utterance.messageId &&
+        message.role === "user" &&
+        !message.speaker,
+    );
+    if (index === -1) {
+      continue;
+    }
+    const speaker = resolveSpeakerFromSegments(
+      utterance.start,
+      utterance.end,
+      segments,
+    );
+    if (speaker) {
+      updated[index] = {
+        ...updated[index],
+        speaker,
+      };
+      changed = true;
+    }
+  }
+  return changed ? updated : messages;
+}
+
+function resolveSpeakerFromSegments(
+  startTime: number,
+  endTime: number,
+  segments: SpeakerSegment[],
+): string | null {
+  let bestSpeaker: string | null = null;
+  let bestOverlap = 0;
+  for (const segment of segments) {
+    if (
+      !segment.speaker_id ||
+      !Number.isFinite(segment.quality_score) ||
+      segment.quality_score <= 0 ||
+      !Number.isFinite(segment.start_time) ||
+      !Number.isFinite(segment.end_time) ||
+      segment.end_time <= segment.start_time
+    ) {
+      continue;
+    }
+    const overlap =
+      Math.min(endTime, segment.end_time) -
+      Math.max(startTime, segment.start_time);
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      bestSpeaker = segment.speaker_id;
+    }
+  }
+  return bestSpeaker;
+}
+
 export function useSpeakerLabels(
   setConversation: Dispatch<SetStateAction<ChatConversation>>
 ) {
@@ -58,38 +132,16 @@ export function useSpeakerLabels(
   const resolveSpeaker = useCallback(getSpeakerForUtterance, []);
 
   const labelMessagesWithSpeakers = useCallback(
-    (segments: SpeakerSegment[], timestamps: UtteranceWindow[]) => {
-      setConversation((prev) => {
-        if (timestamps.length === 0 || segments.length === 0) {
-          return prev;
-        }
-        const updated = [...prev.messages];
-        const userMessageIndices: number[] = [];
-        for (let i = updated.length - 1; i >= 0; i--) {
-          if (updated[i]?.role === "user" && !updated[i].speaker) {
-            userMessageIndices.push(i);
-            if (userMessageIndices.length >= timestamps.length) {
-              break;
-            }
-          }
-        }
-        timestamps.forEach((ts, index) => {
-          const userMsgIndex = userMessageIndices[index];
-          if (userMsgIndex === undefined) {
-            return;
-          }
-          const speaker = resolveSpeaker(ts.start, ts.end, segments);
-          if (speaker) {
-            updated[userMsgIndex] = {
-              ...updated[userMsgIndex],
-              speaker,
-            };
-          }
-        });
-        return { ...prev, messages: updated };
-      });
+    (
+      segments: SpeakerSegment[],
+      utterances: UtteranceRecord[],
+    ) => {
+      setConversation((prev) => ({
+        ...prev,
+        messages: applySpeakerLabels(prev.messages, segments, utterances),
+      }));
     },
-    [resolveSpeaker, setConversation]
+    [setConversation]
   );
 
   return {

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
   deriveBarNotice,
+  deriveDashboardView,
   deriveLiveAnswerDraft,
+  greetingForHour,
   LiveSessionSnapshot,
 } from "./live-session";
 import { ChatConversation } from "@/types/completion";
@@ -108,5 +110,50 @@ describe("deriveLiveAnswerDraft", () => {
         snapshot({ isAIProcessing: false, lastAIResponse: "Final answer" })
       )
     ).toBeNull();
+  });
+});
+
+describe("deriveDashboardView", () => {
+  test("is home when nothing is running and there is nothing to show", () => {
+    expect(deriveDashboardView(null)).toBe("home");
+    expect(deriveDashboardView(snapshot({}))).toBe("home");
+    // A setup or error notice belongs on the home screen, not a blank feed.
+    expect(deriveDashboardView(snapshot({ setupRequired: true }))).toBe("home");
+    expect(deriveDashboardView(snapshot({ error: "boom" }))).toBe("home");
+  });
+
+  test("is the session view while capturing, even before anything is heard", () => {
+    expect(deriveDashboardView(snapshot({ capturing: true }))).toBe("session");
+  });
+
+  test("stays on the session after capture stops, until it is cleared", () => {
+    const withMessages = {
+      ...emptyConversation,
+      messages: [{ id: "m1", role: "user", content: "hi", timestamp: 1 }],
+    } as unknown as ChatConversation;
+    expect(
+      deriveDashboardView(snapshot({ conversation: withMessages })),
+    ).toBe("session");
+  });
+
+  test("is the session view while a typed question is being answered", () => {
+    expect(deriveDashboardView(snapshot({ isAIProcessing: true }))).toBe(
+      "session",
+    );
+    expect(deriveDashboardView(snapshot({ isProcessing: true }))).toBe(
+      "session",
+    );
+  });
+});
+
+describe("greetingForHour", () => {
+  test("follows the time of day", () => {
+    expect(greetingForHour(5)).toBe("Good morning");
+    expect(greetingForHour(11)).toBe("Good morning");
+    expect(greetingForHour(12)).toBe("Good afternoon");
+    expect(greetingForHour(17)).toBe("Good afternoon");
+    expect(greetingForHour(18)).toBe("Good evening");
+    expect(greetingForHour(23)).toBe("Good evening");
+    expect(greetingForHour(2)).toBe("Good evening");
   });
 });

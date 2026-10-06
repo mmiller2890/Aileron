@@ -9,9 +9,6 @@ import {
   PictureInPicture2,
   SparklesIcon,
   RotateCcwIcon,
-  ShieldAlertIcon,
-  TriangleAlertIcon,
-  LoaderIcon,
 } from "lucide-react";
 import {
   LiveSessionSnapshot,
@@ -19,6 +16,7 @@ import {
   deriveSessionStatus,
   deriveBarNotice,
 } from "@/lib/live-session";
+import { SessionNotice } from "./SessionNotice";
 
 const formatElapsed = (startedAt: number, now: number): string => {
   const s = Math.max(0, Math.floor((now - startedAt) / 1000));
@@ -94,32 +92,12 @@ export const EmbeddedBar = ({
         </button>
       </div>
 
-      {!overlayVisible &&
-        notice &&
-        (notice.kind === "setup" ? (
-          <div className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 font-mono text-[11px] text-warn">
-            <ShieldAlertIcon className="size-3.5 shrink-0" />
-            <span className="min-w-0 flex-1">{notice.message}</span>
-            <button
-              onClick={() => sendCommand({ action: "setup" })}
-              className="shrink-0 rounded border border-warn/50 px-2 py-0.5 uppercase tracking-wide transition-colors hover:bg-warn/20"
-            >
-              grant permission
-            </button>
-          </div>
-        ) : notice.kind === "init" ? (
-          <div className="flex items-center gap-2 rounded-md border border-border bg-secondary px-3 py-2 font-mono text-[11px] text-muted-foreground">
-            <LoaderIcon className="size-3.5 shrink-0 animate-spin text-primary" />
-            <span className="min-w-0 flex-1">{notice.message}</span>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 font-mono text-[11px] text-destructive">
-            <TriangleAlertIcon className="size-3.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate" title={notice.message}>
-              {notice.message}
-            </span>
-          </div>
-        ))}
+      {!overlayVisible && notice && (
+        <SessionNotice
+          notice={notice}
+          onGrantPermission={() => sendCommand({ action: "setup" })}
+        />
+      )}
 
       {overlayVisible ? (
         <div className="flex h-9 items-center justify-between rounded-md border border-border bg-secondary px-3 font-mono text-xs text-meta">

@@ -110,6 +110,33 @@ export function deriveSessionStatus(snapshot: LiveSessionSnapshot | null): {
   return { word: "idle", cls: "text-meta", dot: "bg-meta" };
 }
 
+/**
+ * Which face the dashboard shows. "home" is the quiet starting screen; the
+ * transcript layout takes over as soon as there is a session to look at and
+ * stays until the conversation is cleared ("New session").
+ */
+export function deriveDashboardView(
+  snapshot: LiveSessionSnapshot | null,
+): "home" | "session" {
+  if (!snapshot) return "home";
+  if (
+    snapshot.capturing ||
+    snapshot.isProcessing ||
+    snapshot.isAIProcessing ||
+    snapshot.conversation.messages.length > 0
+  ) {
+    return "session";
+  }
+  return "home";
+}
+
+/** Time-of-day greeting for the dashboard home (hour is 0–23, local). */
+export function greetingForHour(hour: number): string {
+  if (hour >= 5 && hour < 12) return "Good morning";
+  if (hour >= 12 && hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
 /** A notice the embedded bar surfaces above its controls. */
 export type BarNotice =
   | { kind: "setup"; message: string }

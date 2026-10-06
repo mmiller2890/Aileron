@@ -1,7 +1,7 @@
 import { ChatConversation } from "@/types/completion";
 import { useNavigate } from "react-router-dom";
 
-const formatRelative = (ts: number): string => {
+export const formatRelative = (ts: number): string => {
   const diff = Date.now() - ts;
   const min = Math.floor(diff / 60000);
   if (min < 1) return "just now";

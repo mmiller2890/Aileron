@@ -6,9 +6,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatConversation } from "@/types/completion";
 import {
+  deriveDashboardView,
   deriveLiveAnswerDraft,
   TOGGLE_WINDOW_VISIBILITY,
 } from "@/lib/live-session";
+import { useApp } from "@/contexts";
 import { useLiveSession } from "@/hooks/useLiveSession";
 import { EmbeddedBar } from "./components/EmbeddedBar";
 import { TranscriptFeed } from "./components/TranscriptFeed";
@@ -16,11 +18,13 @@ import { SessionMetrics } from "./components/SessionMetrics";
 import { RecentSessions } from "./components/RecentSessions";
 import { SessionSummaryCard } from "./components/SessionSummaryCard";
 import { ProviderStatus } from "./components/ProviderStatus";
+import { DashboardHome } from "./components/DashboardHome";
 import { PanelRightCloseIcon, PanelRightOpenIcon } from "lucide-react";
 
 const Dashboard = () => {
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
   const { snapshot, sendCommand } = useLiveSession();
+  const { selectedAIProvider, selectedSttProvider } = useApp();
   const navigate = useNavigate();
   const [railCollapsed, setRailCollapsed] = useState(false);
 
@@ -81,8 +85,29 @@ const Dashboard = () => {
       ? snapshot.conversation
       : null;
   const isLive = Boolean(snapshot?.capturing || liveConversation);
-  const displayed = liveConversation ?? conversations[0] ?? null;
   const liveAnswerDraft = deriveLiveAnswerDraft(snapshot);
+
+  // Nothing running and nothing to show: the quiet starting screen. Past
+  // sessions live in Chats, not on the opening page.
+  if (deriveDashboardView(snapshot) === "home") {
+    return (
+      <div className="flex h-screen w-full flex-col overflow-hidden bg-background">
+        <DashboardHome
+          snapshot={snapshot}
+          sendCommand={sendCommand}
+          conversations={conversations}
+          providerLabel={`${selectedAIProvider.provider || "no model"} · ${
+            selectedSttProvider.provider || "no speech provider"
+          }`}
+          overlayVisible={overlayVisible}
+          onTogglePopOut={togglePopOut}
+          onOpenProviders={() => navigate("/dev-space")}
+          onOpenConversation={(id) => navigate(`/chats/view/${id}`)}
+          onOpenAllChats={() => navigate("/chats")}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-background">
@@ -106,7 +131,7 @@ const Dashboard = () => {
           }`}
         >
           <TranscriptFeed
-            conversation={displayed}
+            conversation={liveConversation}
             live={isLive}
             liveAnswerDraft={liveAnswerDraft}
             partialTranscription={snapshot?.partialTranscription ?? ""}
@@ -128,7 +153,7 @@ const Dashboard = () => {
         {!railCollapsed && (
           <div className="flex min-h-0 flex-col gap-4 overflow-y-auto p-4">
             <SessionMetrics
-              conversation={displayed}
+              conversation={liveConversation}
               liveStartedAt={
                 snapshot?.capturing ? snapshot.sessionStartedAt : null
               }

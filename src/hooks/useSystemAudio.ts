@@ -59,7 +59,10 @@ import {
   RecentSpeechEventFingerprints,
   type SpeechEventPayload,
 } from "@/lib/speech-event-dedupe";
-import { createCaptureSessionWork } from "@/lib/capture-session-work";
+import {
+  createCaptureSessionWork,
+  isStartCancelled,
+} from "@/lib/capture-session-work";
 import { completedStreamValue } from "@/lib/completed-stream";
 import { normalizeFluidAudioModel } from "@/lib/fluidaudio-model";
 
@@ -655,6 +658,7 @@ export function useSystemAudio() {
       });
       setIsContinuousMode(true);
     } catch (err) {
+      if (isStartCancelled(err)) return;
       console.error("Failed to start continuous recording:", err);
       setError(`Failed to start recording: ${err}`);
     }
@@ -1213,9 +1217,13 @@ export function useSystemAudio() {
         throw error;
       }
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      setError(errorMessage);
-      setIsPopoverOpen(true);
+      // A stop that arrived while the start was still setting up is the
+      // user's own cancel, not a failure.
+      if (!isStartCancelled(err)) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        setError(errorMessage);
+        setIsPopoverOpen(true);
+      }
     } finally {
       if (!started) {
         captureModelLeaseRef.current = false;
@@ -1533,6 +1541,7 @@ export function useSystemAudio() {
         }
         // Switching to manual: stay armed; the Record button starts a take.
       } catch (err) {
+        if (isStartCancelled(err)) return;
         console.error("Failed to apply capture mode change:", err);
         setError(`Failed to switch capture mode: ${err}`);
       }

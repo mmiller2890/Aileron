@@ -11,6 +11,10 @@ use std::time::Duration;
 
 /// About two seconds of capture hops (one message per ~21 ms hop).
 pub(crate) const LIVE_TEXT_QUEUE_MESSAGES: usize = 96;
+/// Hops are gathered into pieces of this size before the model sees them:
+/// 320 ms at 16 kHz, the size of the model's own chunks. Feeding every ~21 ms
+/// hop would cost about fifteen native calls for each chunk of new output.
+pub(crate) const LIVE_TEXT_BATCH_SAMPLES: usize = 5_120;
 
 pub(crate) trait LiveTextModel: Send {
     fn reset(&mut self) -> Result<(), String>;
@@ -49,6 +53,15 @@ impl LiveTextHandle {
         model: Box<dyn LiveTextModel>,
         emit: impl FnMut(LiveTextEvent) + Send + 'static,
     ) -> Self {
+        Self::spawn_batched(model, emit, LIVE_TEXT_BATCH_SAMPLES)
+    }
+
+    /// `spawn` with an explicit batch size, so tests can feed tiny buffers.
+    pub(crate) fn spawn_batched(
+        model: Box<dyn LiveTextModel>,
+        emit: impl FnMut(LiveTextEvent) + Send + 'static,
+        batch_samples: usize,
+    ) -> Self {
         let (tx, rx) = mpsc::sync_channel(LIVE_TEXT_QUEUE_MESSAGES);
         let (done_tx, done) = mpsc::channel();
         let active = Arc::new(AtomicBool::new(true));
@@ -56,7 +69,7 @@ impl LiveTextHandle {
         std::thread::Builder::new()
             .name("live-text".into())
             .spawn(move || {
-                run_worker(model, rx, worker_active, emit);
+                run_worker(model, rx, worker_active, batch_samples.max(1), emit);
                 let _ = done_tx.send(());
             })
             .expect("failed to spawn the live-text thread");
@@ -105,9 +118,12 @@ fn run_worker(
     mut model: Box<dyn LiveTextModel>,
     rx: Receiver<Message>,
     active: Arc<AtomicBool>,
+    batch_samples: usize,
     mut emit: impl FnMut(LiveTextEvent),
 ) {
     let mut current_turn: Option<u64> = None;
+    let mut needs_reset = false;
+    let mut batch: Vec<f32> = Vec::new();
     let mut last_text = String::new();
     let mut failed = false;
 
@@ -117,18 +133,32 @@ fn run_worker(
         }
         let (turn, samples) = match message {
             Message::End => {
+                // Whatever is still batched is dropped: the final
+                // transcription replaces the live text for this turn anyway.
                 current_turn = None;
+                batch.clear();
                 continue;
             }
             Message::Audio { turn, samples } => (turn, samples),
         };
 
-        let result = if current_turn != Some(turn) {
+        if current_turn != Some(turn) {
             current_turn = Some(turn);
+            needs_reset = true;
             last_text.clear();
-            model.reset().and_then(|()| model.feed(&samples))
+            batch.clear();
+        }
+        batch.extend_from_slice(&samples);
+        if batch.len() < batch_samples {
+            continue;
+        }
+        let input = std::mem::take(&mut batch);
+
+        let result = if needs_reset {
+            needs_reset = false;
+            model.reset().and_then(|()| model.feed(&input))
         } else {
-            model.feed(&samples)
+            model.feed(&input)
         };
 
         if !active.load(Ordering::Acquire) {
@@ -197,11 +227,13 @@ mod tests {
         gate: Option<mpsc::Receiver<()>>,
     ) -> (LiveTextHandle, mpsc::Receiver<LiveTextEvent>) {
         let (tx, rx) = mpsc::channel();
-        let handle = LiveTextHandle::spawn(
+        // Batch size 1: every message is fed on its own, as the tests expect.
+        let handle = LiveTextHandle::spawn_batched(
             Box::new(FakeModel { script, since_reset: 0, gate }),
             move |event| {
                 let _ = tx.send(event);
             },
+            1,
         );
         (handle, rx)
     }
@@ -225,6 +257,31 @@ mod tests {
         assert_eq!(next(&rx), partial(1, "t2"));
         assert!(handle.stop(Duration::from_secs(2)));
         assert_eq!(script.lock().unwrap().calls[0], "reset");
+    }
+
+    #[test]
+    fn hops_are_gathered_into_model_sized_pieces() {
+        let script = Arc::new(Mutex::new(Script::default()));
+        let (tx, rx) = mpsc::channel();
+        let handle = LiveTextHandle::spawn(
+            Box::new(FakeModel { script: script.clone(), since_reset: 0, gate: None }),
+            move |event| {
+                let _ = tx.send(event);
+            },
+        );
+
+        // 341 samples is one ~21 ms hop at 16 kHz; 16 of them pass 320 ms.
+        for _ in 0..16 {
+            handle.audio(1, vec![0.0; 341]);
+        }
+        assert_eq!(next(&rx), partial(1, "t1"));
+        // The remainder of an ended turn is not fed.
+        handle.audio(1, vec![0.0; 341]);
+        handle.end_turn();
+        assert!(handle.stop(Duration::from_secs(2)));
+        assert!(rx.try_recv().is_err());
+        let calls = script.lock().unwrap().calls.clone();
+        assert_eq!(calls, vec!["reset".to_string(), format!("feed:{}", 341 * 16)]);
     }
 
     #[test]

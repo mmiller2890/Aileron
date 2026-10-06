@@ -1,11 +1,19 @@
 //! One turn counter feeding the live-text and speaker-label workers.
 //! Turns are numbered whether or not either worker exists, so
 //! `speech-detected` always carries a turn.
+//!
+//! Turn numbers are unique for the life of the process, not per capture: the
+//! frontend keys labels and provisional text by turn, and a capture restarted
+//! mid-session (mode switch, device change) must not reuse an earlier turn's
+//! number.
 
 use super::live_speakers::LiveSpeakerHandle;
 use super::live_text::LiveTextHandle;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::warn;
+
+static NEXT_TURN: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct TurnFeeds {
     text: Option<LiveTextHandle>,
@@ -26,7 +34,7 @@ impl TurnFeeds {
 
     /// Start the next turn with the audio that preceded the detection.
     pub(crate) fn begin(&mut self, lead_in_16k: Vec<f32>) -> u64 {
-        self.turn += 1;
+        self.turn = NEXT_TURN.fetch_add(1, Ordering::Relaxed);
         self.in_turn = true;
         self.audio(lead_in_16k);
         self.turn
@@ -121,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn turns_number_from_one_and_reach_both_workers() {
+    fn turns_are_numbered_uniquely_and_reach_both_workers() {
         let (text_tx, text_rx) = mpsc::channel();
         let (speaker_tx, speaker_rx) = mpsc::channel();
         let text = LiveTextHandle::spawn(Box::new(CountingText(0)), move |event| {
@@ -131,26 +139,29 @@ mod tests {
             let _ = speaker_tx.send(event);
         });
         let mut feeds = TurnFeeds::new(Some(text), Some(speakers));
+        // Each buffer is larger than a worker batch, so each is fed at once.
+        let piece = || vec![0.0; 6_000];
 
         assert_eq!(feeds.current(), 0);
-        feeds.audio(vec![0.0; 9]); // before any turn: ignored
-        assert_eq!(feeds.begin(vec![0.0; 8]), 1);
-        feeds.audio(vec![0.0; 4]);
+        feeds.audio(piece()); // before any turn: ignored
+        let first = feeds.begin(piece());
+        assert_eq!(feeds.current(), first);
+        feeds.audio(piece());
         feeds.end();
         feeds.end(); // idempotent
-        feeds.audio(vec![0.0; 9]); // between turns: ignored
-        assert_eq!(feeds.begin(Vec::new()), 2);
-        feeds.audio(vec![0.0; 4]);
-        feeds.stop(Duration::from_secs(2)); // closes turn 2
+        feeds.audio(piece()); // between turns: ignored
+        let second = feeds.begin(Vec::new());
+        assert!(second > first);
+        feeds.audio(piece());
+        feeds.stop(Duration::from_secs(2)); // closes the second turn
 
         let texts: Vec<LiveTextEvent> = text_rx.try_iter().collect();
+        let partial = |turn, text: &str| {
+            LiveTextEvent::Partial(LiveTextPartial { turn, text: text.into() })
+        };
         assert_eq!(
             texts,
-            vec![
-                LiveTextEvent::Partial(LiveTextPartial { turn: 1, text: "t1".into() }),
-                LiveTextEvent::Partial(LiveTextPartial { turn: 1, text: "t2".into() }),
-                LiveTextEvent::Partial(LiveTextPartial { turn: 2, text: "t1".into() }),
-            ]
+            vec![partial(first, "t1"), partial(first, "t2"), partial(second, "t1")]
         );
         let finals: Vec<LiveSpeakerEvent> = speaker_rx.try_iter().collect();
         let expected = |turn| {
@@ -160,16 +171,27 @@ mod tests {
                 is_final: true,
             })
         };
-        assert_eq!(finals, vec![expected(1), expected(2)]);
+        assert_eq!(finals, vec![expected(first), expected(second)]);
+    }
+
+    #[test]
+    fn a_new_capture_never_reuses_an_earlier_turn_number() {
+        let mut earlier = TurnFeeds::new(None, None);
+        let last_of_earlier = earlier.begin(Vec::new());
+        earlier.stop(Duration::from_millis(10));
+
+        let mut restarted = TurnFeeds::new(None, None);
+        assert!(restarted.begin(Vec::new()) > last_of_earlier);
+        restarted.stop(Duration::from_millis(10));
     }
 
     #[test]
     fn turns_still_count_without_workers() {
         let mut feeds = TurnFeeds::new(None, None);
-        assert_eq!(feeds.begin(vec![0.0; 8]), 1);
+        let first = feeds.begin(vec![0.0; 8]);
         feeds.audio(vec![0.0; 4]);
         feeds.end();
-        assert_eq!(feeds.begin(Vec::new()), 2);
+        assert!(feeds.begin(Vec::new()) > first);
         feeds.stop(Duration::from_millis(10));
     }
 }

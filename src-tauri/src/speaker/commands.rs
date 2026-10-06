@@ -532,6 +532,11 @@ impl<T> Default for TaskSlot<T> {
     }
 }
 
+/// Returned by a start that a stop cancelled before it finished. The frontend
+/// matches this text (`isStartCancelled`) to tell a deliberate cancel from a
+/// failure; keep the two in step.
+const START_CANCELLED_ERROR: &str = "Capture stopped during startup";
+
 #[tauri::command]
 pub async fn start_system_audio_capture(
     app: AppHandle,
@@ -716,7 +721,10 @@ pub async fn start_system_audio_capture(
         Ok(TaskInstallOutcome::StopRequested) => {
             // A stop raced this start and found no task to take. Honor it
             // here: the stop flag may have been reset above, so set it again,
-            // then shut the task down exactly as the stop command would.
+            // then shut the task down exactly as the stop command would. The
+            // take is never wanted: it was stopped before it was announced,
+            // and any discard the stop latched was cleared above.
+            state.discard_take.store(true, Ordering::Release);
             state.stop_flag.store(true, Ordering::Release);
             if let Ok((Some(task), stop_reservation)) = state.stream_task.take_for_stop() {
                 await_capture_shutdown(task, Duration::from_secs(5)).await;
@@ -725,7 +733,7 @@ pub async fn start_system_audio_capture(
             if let Ok(mut is_capturing) = state.is_capturing.lock() {
                 *is_capturing = false;
             }
-            return Err("Capture stopped during startup".to_string());
+            return Err(START_CANCELLED_ERROR.to_string());
         }
         Err(error) => {
             if let Ok(mut is_capturing) = state.is_capturing.lock() {
@@ -1117,8 +1125,9 @@ async fn run_vad_capture(
         );
     }
 
-    // Bounded: a worker that will not stop is left behind and muted.
-    live_turns.stop(Duration::from_millis(500));
+    // Bounded: a worker that will not stop is left behind and muted. Off the
+    // async runtime, because waiting for the workers blocks the thread.
+    let _ = tokio::task::spawn_blocking(move || live_turns.stop(Duration::from_millis(500))).await;
 }
 
 /// What a finished manual take should do with the audio it collected.

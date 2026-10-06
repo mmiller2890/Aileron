@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createCaptureSessionWork } from "./capture-session-work";
+import {
+  createCaptureSessionWork,
+  isStartCancelled,
+} from "./capture-session-work";
 
 describe("createCaptureSessionWork", () => {
   it("invalidates results from a stopped or superseded session", () => {
@@ -54,5 +57,22 @@ describe("createCaptureSessionWork", () => {
 
     expect(sessions.isCurrent(current)).toBe(true);
     await expect(sessions.drain(current, 10)).resolves.toBe(true);
+  });
+});
+
+describe("isStartCancelled", () => {
+  it("recognises a start cancelled by a stop, however it is wrapped", () => {
+    expect(isStartCancelled("Capture stopped during startup")).toBe(true);
+    expect(isStartCancelled(new Error("Capture stopped during startup"))).toBe(
+      true,
+    );
+  });
+
+  it("treats every other failure as a real error", () => {
+    expect(isStartCancelled("Failed to access system audio: denied")).toBe(
+      false,
+    );
+    expect(isStartCancelled(new Error("Capture already running"))).toBe(false);
+    expect(isStartCancelled(undefined)).toBe(false);
   });
 });

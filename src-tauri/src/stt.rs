@@ -682,9 +682,11 @@ impl SttState {
     pub(crate) fn live_text_model(
         &self,
     ) -> Option<Box<dyn crate::speaker::live_text::LiveTextModel>> {
+        // try_lock: the first load holds this lock for the whole download,
+        // and a capture start must not wait behind it. Busy means not ready.
         let ready = self
             .live_text
-            .lock()
+            .try_lock()
             .map(|guard| guard.ready)
             .unwrap_or(false);
         ready.then(|| {
@@ -742,9 +744,10 @@ impl SttState {
     pub(crate) fn live_speaker_model(
         &self,
     ) -> Option<Box<dyn crate::speaker::live_speakers::LiveSpeakerModel>> {
+        // try_lock, for the same reason as `live_text_model`.
         let ready = self
             .live_speakers
-            .lock()
+            .try_lock()
             .map(|guard| guard.ready)
             .unwrap_or(false);
         ready.then(|| {

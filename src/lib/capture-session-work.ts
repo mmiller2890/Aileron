@@ -1,3 +1,13 @@
+/**
+ * True when a capture start was cancelled by a stop that arrived while it was
+ * still setting up. That is the user's own action, not a failure to report.
+ * The text is `START_CANCELLED_ERROR` in the Rust capture commands.
+ */
+export function isStartCancelled(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.includes("Capture stopped during startup");
+}
+
 export function createCaptureSessionWork() {
   let currentGeneration = 0;
   const pending = new Map<number, Set<Promise<unknown>>>();

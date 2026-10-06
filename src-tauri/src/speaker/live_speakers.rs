@@ -10,6 +10,9 @@ use std::time::Duration;
 
 /// About two seconds of capture hops, plus room for end-of-turn messages.
 pub(crate) const LIVE_SPEAKER_QUEUE_MESSAGES: usize = 96;
+/// Hops are gathered into pieces of this size before the model sees them
+/// (320 ms at 16 kHz); the rest of a turn is fed when it ends.
+pub(crate) const LIVE_SPEAKER_BATCH_SAMPLES: usize = 5_120;
 /// A slot must be active for this many 80 ms frames to name the turn.
 const MIN_SPEAKER_FRAMES: u32 = 3;
 
@@ -71,6 +74,15 @@ impl LiveSpeakerHandle {
         model: Box<dyn LiveSpeakerModel>,
         emit: impl FnMut(LiveSpeakerEvent) + Send + 'static,
     ) -> Self {
+        Self::spawn_batched(model, emit, LIVE_SPEAKER_BATCH_SAMPLES)
+    }
+
+    /// `spawn` with an explicit batch size, so tests can feed tiny buffers.
+    pub(crate) fn spawn_batched(
+        model: Box<dyn LiveSpeakerModel>,
+        emit: impl FnMut(LiveSpeakerEvent) + Send + 'static,
+        batch_samples: usize,
+    ) -> Self {
         let (tx, rx) = mpsc::sync_channel(LIVE_SPEAKER_QUEUE_MESSAGES);
         let (done_tx, done) = mpsc::channel();
         let active = Arc::new(AtomicBool::new(true));
@@ -78,7 +90,7 @@ impl LiveSpeakerHandle {
         std::thread::Builder::new()
             .name("live-speakers".into())
             .spawn(move || {
-                run_worker(model, rx, worker_active, emit);
+                run_worker(model, rx, worker_active, batch_samples.max(1), emit);
                 let _ = done_tx.send(());
             })
             .expect("failed to spawn the live-speakers thread");
@@ -120,10 +132,39 @@ impl LiveSpeakerHandle {
     }
 }
 
+/// Feed whatever is batched for the open turn; the counts so far, if any
+/// audio was pending.
+fn flush_batch(
+    model: &mut dyn LiveSpeakerModel,
+    batch: &mut Vec<f32>,
+) -> Result<Option<SlotCounts>, String> {
+    if batch.is_empty() {
+        return Ok(None);
+    }
+    let input = std::mem::take(batch);
+    model.feed(&input).map(Some)
+}
+
+/// Feed the rest of the turn, close it, and name its speaker.
+fn finish_turn(
+    model: &mut dyn LiveSpeakerModel,
+    batch: &mut Vec<f32>,
+    turn: u64,
+) -> Result<SpeakerUpdate, String> {
+    flush_batch(model, batch)?;
+    let counts = model.end_turn()?;
+    Ok(SpeakerUpdate {
+        turn,
+        speaker: dominant_slot(&counts).map(speaker_name),
+        is_final: true,
+    })
+}
+
 fn run_worker(
     mut model: Box<dyn LiveSpeakerModel>,
     rx: Receiver<Message>,
     active: Arc<AtomicBool>,
+    batch_samples: usize,
     mut emit: impl FnMut(LiveSpeakerEvent),
 ) {
     let mut failed = false;
@@ -133,77 +174,65 @@ fn run_worker(
     }
     let mut open_turn: Option<u64> = None;
     let mut provisional: Option<usize> = None;
-
-    // Close `turn` and report its speaker. Returns false after a model error.
-    let finish = |model: &mut Box<dyn LiveSpeakerModel>,
-                      emit: &mut dyn FnMut(LiveSpeakerEvent),
-                      turn: u64|
-     -> bool {
-        match model.end_turn() {
-            Ok(counts) => {
-                if active.load(Ordering::Acquire) {
-                    emit(LiveSpeakerEvent::Update(SpeakerUpdate {
-                        turn,
-                        speaker: dominant_slot(&counts).map(speaker_name),
-                        is_final: true,
-                    }));
-                }
-                true
-            }
-            Err(error) => {
-                if active.load(Ordering::Acquire) {
-                    emit(LiveSpeakerEvent::Error(error));
-                }
-                false
-            }
-        }
-    };
+    let mut batch: Vec<f32> = Vec::new();
 
     while let Ok(message) = rx.recv() {
         if failed || !active.load(Ordering::Acquire) {
             continue;
         }
-        match message {
+        // Each arm yields the events to emit, or the error that ends labelling.
+        let outcome: Result<Vec<SpeakerUpdate>, String> = match message {
             Message::End { turn } => {
                 if open_turn == Some(turn) {
                     open_turn = None;
                     provisional = None;
-                    failed = !finish(&mut model, &mut emit, turn);
+                    finish_turn(model.as_mut(), &mut batch, turn).map(|update| vec![update])
+                } else {
+                    Ok(Vec::new())
                 }
             }
-            Message::Audio { turn, samples } => {
+            Message::Audio { turn, samples } => (|| {
+                let mut updates = Vec::new();
                 if open_turn != Some(turn) {
                     // The previous turn's End was dropped: close it here so
                     // its label is still reported and its frames cannot be
                     // counted towards this turn.
                     if let Some(previous) = open_turn.take() {
-                        if !finish(&mut model, &mut emit, previous) {
-                            failed = true;
-                            continue;
-                        }
+                        updates.push(finish_turn(model.as_mut(), &mut batch, previous)?);
                     }
                     open_turn = Some(turn);
                     provisional = None;
                 }
-                match model.feed(&samples) {
-                    Ok(counts) => {
+                batch.extend_from_slice(&samples);
+                if batch.len() >= batch_samples {
+                    if let Some(counts) = flush_batch(model.as_mut(), &mut batch)? {
                         let leader = dominant_slot(&counts);
-                        if leader.is_some() && leader != provisional && active.load(Ordering::Acquire) {
+                        if leader.is_some() && leader != provisional {
                             provisional = leader;
-                            emit(LiveSpeakerEvent::Update(SpeakerUpdate {
+                            updates.push(SpeakerUpdate {
                                 turn,
                                 speaker: leader.map(speaker_name),
                                 is_final: false,
-                            }));
-                        }
-                    }
-                    Err(error) => {
-                        failed = true;
-                        if active.load(Ordering::Acquire) {
-                            emit(LiveSpeakerEvent::Error(error));
+                            });
                         }
                     }
                 }
+                Ok(updates)
+            })(),
+        };
+
+        if !active.load(Ordering::Acquire) {
+            continue;
+        }
+        match outcome {
+            Ok(updates) => {
+                for update in updates {
+                    emit(LiveSpeakerEvent::Update(update));
+                }
+            }
+            Err(error) => {
+                failed = true;
+                emit(LiveSpeakerEvent::Error(error));
             }
         }
     }
@@ -266,9 +295,14 @@ mod tests {
         gate: Option<mpsc::Receiver<()>>,
     ) -> (LiveSpeakerHandle, mpsc::Receiver<LiveSpeakerEvent>) {
         let (tx, rx) = mpsc::channel();
-        let handle = LiveSpeakerHandle::spawn(Box::new(FakeModel { script, gate }), move |event| {
-            let _ = tx.send(event);
-        });
+        // Batch size 1: every message is fed on its own, as the tests expect.
+        let handle = LiveSpeakerHandle::spawn_batched(
+            Box::new(FakeModel { script, gate }),
+            move |event| {
+                let _ = tx.send(event);
+            },
+            1,
+        );
         (handle, rx)
     }
 
@@ -324,6 +358,40 @@ mod tests {
         assert_eq!(next(&rx), update(1, Some("Speaker 2"), true));
         assert!(handle.stop(Duration::from_secs(2)));
         assert_eq!(script.lock().unwrap().calls[0], "reset");
+    }
+
+    #[test]
+    fn hops_are_gathered_and_the_remainder_is_fed_when_the_turn_ends() {
+        let script = Arc::new(Mutex::new(Script {
+            finals: vec![[9, 0, 0, 0]],
+            ..Script::default()
+        }));
+        let (tx, rx) = mpsc::channel();
+        let handle = LiveSpeakerHandle::spawn(
+            Box::new(FakeModel { script: script.clone(), gate: None }),
+            move |event| {
+                let _ = tx.send(event);
+            },
+        );
+
+        // 341 samples is one ~21 ms hop at 16 kHz; 16 of them pass 320 ms.
+        for _ in 0..17 {
+            handle.audio(1, vec![0.0; 341]);
+        }
+        handle.end_turn(1);
+
+        assert_eq!(next(&rx), update(1, Some("Speaker 1"), true));
+        assert!(handle.stop(Duration::from_secs(2)));
+        let calls = script.lock().unwrap().calls.clone();
+        assert_eq!(
+            calls,
+            vec![
+                "reset".to_string(),
+                format!("feed:{}", 341 * 16),
+                "feed:341".to_string(),
+                "end".to_string(),
+            ]
+        );
     }
 
     #[test]

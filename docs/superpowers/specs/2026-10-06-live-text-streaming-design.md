@@ -1,7 +1,7 @@
 # Live Text (Streaming Transcription) — Design
 
 **Date:** 2026-10-06
-**Status:** Design approved in conversation; spec awaiting user review
+**Status:** Implemented on dev; awaiting live validation
 **Branch:** dev
 **Goal:** Show the words of the turn in progress while the person is still speaking, and start the AI response after a shorter pause, without changing where saved transcripts and AI input come from.
 

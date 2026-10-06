@@ -12,7 +12,7 @@ export function createCaptureSessionWork() {
   let currentGeneration = 0;
   const pending = new Map<number, Set<Promise<unknown>>>();
 
-  return {
+  const api = {
     begin(): number {
       currentGeneration += 1;
       return currentGeneration;
@@ -59,5 +59,18 @@ export function createCaptureSessionWork() {
         currentGeneration += 1;
       }
     },
+    /**
+     * Keep `generation` current until its pending work has settled (or
+     * `timeoutMs` passes), then invalidate it. For work that outlives a stop:
+     * its result should still land, but nothing new may join the session.
+     */
+    async invalidateWhenSettled(
+      generation: number,
+      timeoutMs: number,
+    ): Promise<void> {
+      await api.drain(generation, timeoutMs);
+      api.invalidate(generation);
+    },
   };
+  return api;
 }

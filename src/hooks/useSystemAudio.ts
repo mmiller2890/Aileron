@@ -527,7 +527,10 @@ export function useSystemAudio() {
 
                   if (
                     isLikelyQuestion(transcription) &&
-                    !captureStoppingRef.current
+                    !captureStoppingRef.current &&
+                    // A transcription that lands after stop joins the
+                    // transcript but does not start a new answer.
+                    capturingRef.current
                   ) {
                     const effectiveSystemPrompt = getEffectiveSystemPrompt();
 
@@ -645,16 +648,11 @@ export function useSystemAudio() {
           ? null
           : selectedAudioDevices.output.id;
 
-      const providerConfig = allSttProviders.find(
-        (p) => p.id === selectedSttProvider.provider,
-      );
-
       // The record button always means a manual take, regardless of which
       // mode the current session was started in.
       await invoke<string>("start_system_audio_capture", {
         vadConfig: { ...vadConfig, enabled: false },
         deviceId: deviceId,
-        streaming: providerConfig?.streaming === true,
       });
       setIsContinuousMode(true);
     } catch (err) {
@@ -1043,13 +1041,9 @@ export function useSystemAudio() {
                   await invoke("stop_system_audio_capture");
                 },
                 start: async () => {
-                  const providerConfig = allSttProvidersRef.current.find(
-                    (p) => p.id === selectedSttProviderRef.current.provider,
-                  );
                   await invoke<string>("start_system_audio_capture", {
                     vadConfig: vadConfigRef.current,
                     deviceId: null,
-                    streaming: providerConfig?.streaming === true,
                   });
                 },
               });
@@ -1079,7 +1073,25 @@ export function useSystemAudio() {
       setError("");
 
       if (selectedSttProvider.provider === "local-fluidaudio") {
-        if (!isSupported) {
+        // Ask the backend now rather than trusting the hook's last reading:
+        // only a status that actually says "unsupported" may change the
+        // user's provider. A failed check is reported and changes nothing.
+        let status: {
+          asr_ready: boolean;
+          model_version: "v3" | null;
+          live_text_ready?: boolean;
+          is_supported: boolean;
+        };
+        try {
+          status = await invoke("stt_get_status");
+        } catch (err) {
+          setError(
+            `Couldn't check the local speech engine (${err}). Your provider is unchanged — try starting again.`,
+          );
+          setIsPopoverOpen(true);
+          return;
+        }
+        if (!status.is_supported) {
           onSetSelectedSttProvider({ provider: "groq", variables: {} });
           setError(
             "Local STT requires macOS Apple Silicon — switched to cloud STT",
@@ -1090,11 +1102,6 @@ export function useSystemAudio() {
         const requestedModel = normalizeFluidAudioModel(
           selectedSttProvider.variables.MODEL,
         );
-        const status = await invoke<{
-          asr_ready: boolean;
-          model_version: "v3" | null;
-          live_text_ready?: boolean;
-        }>("stt_get_status");
 
         if (!status.asr_ready || status.model_version !== requestedModel) {
           await initStt(requestedModel);
@@ -1144,12 +1151,13 @@ export function useSystemAudio() {
       // Speaker labels do not depend on which model transcribes, so this runs
       // for every provider. Optional: a failed load leaves capture working
       // without labels.
-      if (isSupported && vadConfig.enabled && vadConfig.live_speakers) {
+      if (vadConfig.enabled && vadConfig.live_speakers) {
         try {
           const speakerStatus = await invoke<{
             live_speakers_ready?: boolean;
+            is_supported: boolean;
           }>("stt_get_status");
-          if (!speakerStatus.live_speakers_ready) {
+          if (speakerStatus.is_supported && !speakerStatus.live_speakers_ready) {
             await initLiveSpeakers();
           }
         } catch (err) {
@@ -1163,10 +1171,6 @@ export function useSystemAudio() {
           ? null
           : selectedAudioDevices.output.id;
 
-      const providerConfig = allSttProviders.find(
-        (p) => p.id === selectedSttProvider.provider,
-      );
-
       captureStoppingRef.current = false;
       const generation = captureSessionWorkRef.current.begin();
       captureGenerationRef.current = generation;
@@ -1178,7 +1182,6 @@ export function useSystemAudio() {
             await invoke<string>("start_system_audio_capture", {
               vadConfig: vadConfig,
               deviceId: deviceId,
-              streaming: providerConfig?.streaming === true,
             });
           },
           commitStarted: () => {
@@ -1257,8 +1260,21 @@ export function useSystemAudio() {
       await invoke("stop_system_audio_capture");
 
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      await captureSessionWorkRef.current.drain(generation, 10_000);
-      captureSessionWorkRef.current.invalidate(generation);
+      const drained = await captureSessionWorkRef.current.drain(
+        generation,
+        10_000,
+      );
+      if (drained) {
+        captureSessionWorkRef.current.invalidate(generation);
+      } else {
+        // A transcription is still running; each is allowed 30 s. Finish
+        // stopping now, but keep its session current until it lands so the
+        // last words spoken are not thrown away.
+        void captureSessionWorkRef.current.invalidateWhenSettled(
+          generation,
+          30_000,
+        );
+      }
       capturingRef.current = false;
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -1500,10 +1516,19 @@ export function useSystemAudio() {
   // toggle only changed a setting: switching to manual left the VAD session
   // listening, and switching to VAD left the session armed-but-idle while
   // the UI claimed to be listening.
+  //
+  // The same goes for the output device: the running tap is bound to the
+  // device it started on, so picking another one in settings has to restart
+  // a listening session. (An armed manual session has no task to restart;
+  // its next take starts on the newly selected device.)
   const prevVadEnabledRef = useRef(vadConfig.enabled);
+  const prevOutputDeviceRef = useRef(selectedAudioDevices.output.id);
   useEffect(() => {
     const modeChanged = prevVadEnabledRef.current !== vadConfig.enabled;
     prevVadEnabledRef.current = vadConfig.enabled;
+    const deviceChanged =
+      prevOutputDeviceRef.current !== selectedAudioDevices.output.id;
+    prevOutputDeviceRef.current = selectedAudioDevices.output.id;
 
     if (!capturing) {
       return;
@@ -1514,7 +1539,7 @@ export function useSystemAudio() {
       setIsRecordingInContinuousMode(false);
     }
 
-    if (!modeChanged) {
+    if (!modeChanged && !(deviceChanged && vadConfig.enabled)) {
       return;
     }
 
@@ -1530,20 +1555,20 @@ export function useSystemAudio() {
             selectedAudioDevices.output.id === "default"
               ? null
               : selectedAudioDevices.output.id;
-          const providerConfig = allSttProvidersRef.current.find(
-            (p) => p.id === selectedSttProviderRef.current.provider,
-          );
           await invoke<string>("start_system_audio_capture", {
             vadConfig: vadConfig,
             deviceId: deviceId,
-            streaming: providerConfig?.streaming === true,
           });
         }
         // Switching to manual: stay armed; the Record button starts a take.
       } catch (err) {
         if (isStartCancelled(err)) return;
-        console.error("Failed to apply capture mode change:", err);
-        setError(`Failed to switch capture mode: ${err}`);
+        console.error("Failed to restart capture after a settings change:", err);
+        setError(
+          modeChanged
+            ? `Failed to switch capture mode: ${err}`
+            : `Failed to switch audio device: ${err}`,
+        );
       }
     })();
   }, [vadConfig, capturing, selectedAudioDevices.output.id]);

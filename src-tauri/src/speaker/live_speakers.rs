@@ -236,6 +236,17 @@ fn run_worker(
             }
         }
     }
+
+    // The capture ended with a turn still open: its End was dropped by a full
+    // queue, or never sent. Close it so the last line still gets its label.
+    if let Some(turn) = open_turn {
+        if !failed && active.load(Ordering::Acquire) {
+            match finish_turn(model.as_mut(), &mut batch, turn) {
+                Ok(update) => emit(LiveSpeakerEvent::Update(update)),
+                Err(error) => emit(LiveSpeakerEvent::Error(error)),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -448,6 +459,22 @@ mod tests {
         handle.end_turn(1);
         assert!(handle.stop(Duration::from_secs(2)));
         assert_eq!(next(&rx), update(1, Some("Speaker 1"), true));
+    }
+
+    #[test]
+    fn a_turn_left_open_when_the_capture_ends_still_gets_its_label() {
+        let script = Arc::new(Mutex::new(Script {
+            finals: vec![[0, 0, 7, 0]],
+            ..Script::default()
+        }));
+        let (handle, rx) = spawn_with(script.clone(), None);
+
+        handle.audio(4, vec![0.0; 4]);
+        // No end_turn(4): the capture stops with the turn open.
+        assert!(handle.stop(Duration::from_secs(2)));
+
+        assert_eq!(next(&rx), update(4, Some("Speaker 3"), true));
+        assert_eq!(script.lock().unwrap().ended, 1);
     }
 
     #[test]

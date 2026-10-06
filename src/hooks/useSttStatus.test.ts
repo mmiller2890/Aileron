@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { advanceSttProgress, formatSttProgressPhase } from "./useSttStatus";
+import {
+  advanceSttProgress,
+  formatSttProgressPhase,
+  statusAfterFailedRefresh,
+  type SttStatus,
+} from "./useSttStatus";
 
 describe("FluidAudio initialization progress", () => {
   it("keeps progress monotonic and clamps invalid fractions", () => {
@@ -32,5 +37,25 @@ describe("FluidAudio initialization progress", () => {
       phase: "compiling",
       modelName: "Encoder",
     })).toBe("Compiling Encoder for CoreML");
+  });
+});
+
+describe("statusAfterFailedRefresh", () => {
+  const known: SttStatus = {
+    asrReady: true,
+    modelVersion: "v3",
+    vadReady: true,
+    liveTextReady: true,
+    liveSpeakersReady: false,
+    isSupported: true,
+    isInitializing: false,
+    error: null,
+  };
+
+  it("records the error without forgetting that local speech is supported", () => {
+    const next = statusAfterFailedRefresh(known, "ipc channel closed");
+    expect(next.isSupported).toBe(true);
+    expect(next.asrReady).toBe(true);
+    expect(next.error).toBe("ipc channel closed");
   });
 });

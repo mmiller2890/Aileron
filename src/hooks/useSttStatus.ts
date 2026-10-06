@@ -57,6 +57,19 @@ export function formatSttProgressPhase(progress: SttModelProgress): string {
   return "Downloading speech models";
 }
 
+/**
+ * A status check that failed says nothing about the machine. Keep what is
+ * already known (in particular `isSupported`) and only record the error:
+ * treating a transient failure as "unsupported" once switched the user's
+ * speech provider to a cloud one.
+ */
+export function statusAfterFailedRefresh(
+  previous: SttStatus,
+  error: unknown,
+): SttStatus {
+  return { ...previous, error: String(error) };
+}
+
 export function useSttStatus() {
   const [progress, setProgress] = useState<SttModelProgress | null>(null);
   const [initStage, setInitStage] = useState<SttInitStage | null>(null);
@@ -93,11 +106,7 @@ export function useSttStatus() {
       }));
       return result.is_supported;
     } catch (e) {
-      setStatus((prev) => ({
-        ...prev,
-        isSupported: false,
-        error: String(e),
-      }));
+      setStatus((prev) => statusAfterFailedRefresh(prev, e));
       return false;
     }
   }, []);

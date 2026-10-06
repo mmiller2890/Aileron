@@ -12,8 +12,6 @@ export interface VadConfig {
   pre_speech_chunks: number;
   noise_gate_threshold: number;
   max_recording_duration_secs: number;
-  emit_chunks?: boolean;
-  chunk_interval_ms?: number;
   compare_preprocessing: boolean;
   /** Show provisional text for the turn in progress (macOS, local model). */
   live_text: boolean;
@@ -35,8 +33,6 @@ export const DEFAULT_VAD_CONFIG: VadConfig = {
   pre_speech_chunks: 30,
   noise_gate_threshold: 0.0015,
   max_recording_duration_secs: 180,
-  emit_chunks: false,
-  chunk_interval_ms: 1000,
   compare_preprocessing: false,
   live_text: true,
   live_speakers: true,

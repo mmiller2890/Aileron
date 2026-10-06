@@ -60,6 +60,41 @@ describe("createCaptureSessionWork", () => {
   });
 });
 
+describe("invalidateWhenSettled", () => {
+  it("keeps the session current until slow work lands, then ends it", async () => {
+    const sessions = createCaptureSessionWork();
+    const generation = sessions.begin();
+    let finish: () => void = () => {};
+    const slow = sessions.track(
+      generation,
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+
+    const settled = sessions.invalidateWhenSettled(generation, 1_000);
+    expect(sessions.isCurrent(generation)).toBe(true);
+
+    finish();
+    await slow;
+    await settled;
+    expect(sessions.isCurrent(generation)).toBe(false);
+  });
+
+  it("gives up at the timeout and never ends a newer session", async () => {
+    const sessions = createCaptureSessionWork();
+    const first = sessions.begin();
+    void sessions.track(first, new Promise<void>(() => {}));
+
+    const settled = sessions.invalidateWhenSettled(first, 10);
+    const second = sessions.begin();
+    await settled;
+
+    expect(sessions.isCurrent(first)).toBe(false);
+    expect(sessions.isCurrent(second)).toBe(true);
+  });
+});
+
 describe("isStartCancelled", () => {
   it("recognises a start cancelled by a stop, however it is wrapped", () => {
     expect(isStartCancelled("Capture stopped during startup")).toBe(true);

@@ -2,7 +2,6 @@
 use crate::speaker::preprocessing::{apply_noise_gate, prepare_utterance, PreparedUtterance};
 use crate::speaker::live_text;
 use crate::speaker::{live_speakers, turn_feeds};
-use crate::speaker::session_recording;
 use crate::speaker::{AudioDevice, SpeakerInput};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -659,7 +658,7 @@ pub async fn start_system_audio_capture(
     let live_speakers: Option<live_speakers::LiveSpeakerHandle> = None;
 
     let task = tokio::spawn(async move {
-        let session_path = if vad_config.enabled {
+        if vad_config.enabled {
             run_vad_capture(
                 app_clone.clone(),
                 stream,
@@ -670,7 +669,7 @@ pub async fn start_system_audio_capture(
                 live_text,
                 live_speakers,
             )
-            .await
+            .await;
         } else {
             run_continuous_capture(
                 app_clone.clone(),
@@ -681,8 +680,7 @@ pub async fn start_system_audio_capture(
                 discard_flag,
             )
             .await;
-            None
-        };
+        }
 
         // Release the task slot, but only while it still holds this task:
         // a newer capture may have claimed the slot since (never clobber a
@@ -699,13 +697,8 @@ pub async fn start_system_audio_capture(
             if let Ok(mut is_capturing) = state.is_capturing.lock() {
                 *is_capturing = false;
             }
-            if let Ok(mut orphaned) = state.orphaned_session_path.lock() {
-                *orphaned = session_path.clone();
-            }
             let _ = app_clone.emit("capture-ended-unexpectedly", ());
         }
-
-        session_path
     });
 
     match reservation.install(task) {
@@ -722,18 +715,8 @@ pub async fn start_system_audio_capture(
             // then shut the task down exactly as the stop command would.
             state.stop_flag.store(true, Ordering::Release);
             if let Ok((Some(task), stop_reservation)) = state.stream_task.take_for_stop() {
-                let session_path = await_capture_shutdown(task, Duration::from_secs(5)).await;
+                await_capture_shutdown(task, Duration::from_secs(5)).await;
                 drop(stop_reservation);
-                // Nobody is left to diarize a take that was stopped before
-                // it was announced.
-                #[cfg(target_os = "macos")]
-                if let (Some(path), Some(stt_state)) =
-                    (session_path, app.try_state::<crate::stt::SttState>())
-                {
-                    let _ = stt_state.discard_session_wav_path(&path.to_string_lossy());
-                }
-                #[cfg(not(target_os = "macos"))]
-                let _ = session_path;
             }
             if let Ok(mut is_capturing) = state.is_capturing.lock() {
                 *is_capturing = false;
@@ -793,7 +776,7 @@ async fn run_vad_capture(
     stop_flag: Arc<AtomicBool>,
     live_text: Option<live_text::LiveTextHandle>,
     live_speakers: Option<live_speakers::LiveSpeakerHandle>,
-) -> Option<std::path::PathBuf> {
+) {
     let mut stream = stream;
     let mut live_turns = turn_feeds::TurnFeeds::new(live_text, live_speakers);
     let mut last_device_check = Instant::now();
@@ -824,12 +807,6 @@ async fn run_vad_capture(
     };
     #[cfg(target_os = "macos")]
     let mut last_hop_end = session_start;
-    #[cfg(target_os = "macos")]
-    let mut session_recording: Option<
-        session_recording::SessionRecording<std::io::BufWriter<std::fs::File>>,
-    > = None;
-    #[cfg(target_os = "macos")]
-    let mut session_recording_issue_reported = false;
     let mut vad_accumulator = VadFrameAccumulator::default();
     let mut vad_resample_error_reported = false;
     let mut vad_processing_error_reported = false;
@@ -843,8 +820,7 @@ async fn run_vad_capture(
     let mut utterance_start_time: f32 = 0.0;
     // Utterance times are positions in the captured audio, not wall-clock
     // readings: after a processing stall the loop catches up on buffered
-    // audio, and the clock would stamp those utterances late and misalign
-    // them with the session WAV that diarization reads.
+    // audio, and the clock would stamp those utterances late.
     let mut samples_processed: u64 = 0;
     let audio_position_secs = |samples: u64| (samples as f64 / sr as f64) as f32;
 
@@ -914,54 +890,6 @@ async fn run_vad_capture(
                 warn!("No system audio detected 8s into capture — likely a permission or output-device issue");
                 let _ = app.emit("audio-silent", ());
                 silent_warned = true;
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                if session_recording.is_none() && !session_recording_issue_reported {
-                    let temp_path = std::env::temp_dir()
-                        .join(format!("assistant-session-{}.wav", uuid::Uuid::new_v4()));
-                    match session_recording::SessionRecording::create_file(
-                        temp_path,
-                        sr,
-                        sr as usize * session_recording::SESSION_RECORDING_MAX_SECS as usize,
-                    ) {
-                        Ok(recording) => session_recording = Some(recording),
-                        Err(e) => {
-                            session_recording_issue_reported = true;
-                            error!("Failed to open session recording: {}", e);
-                            let _ = app.emit(
-                                "stt-error",
-                                "Speaker labels are unavailable for this session.",
-                            );
-                        }
-                    }
-                }
-                if let Some(recording) = session_recording.as_mut() {
-                    match recording.append(&raw_mono) {
-                        Ok(session_recording::AppendOutcome::Appended) => {}
-                        Ok(session_recording::AppendOutcome::Full) => {
-                            session_recording = None;
-                            if !session_recording_issue_reported {
-                                session_recording_issue_reported = true;
-                                let message = "Speaker labels cover the first hour of a session.";
-                                error!("{}", message);
-                                let _ = app.emit("stt-error", message);
-                            }
-                        }
-                        Err(e) => {
-                            session_recording = None;
-                            if !session_recording_issue_reported {
-                                session_recording_issue_reported = true;
-                                error!("Session recording failed: {}", e);
-                                let _ = app.emit(
-                                    "stt-error",
-                                    "Speaker labels are unavailable for this session.",
-                                );
-                            }
-                        }
-                    }
-                }
             }
 
             #[cfg(target_os = "macos")]
@@ -1187,47 +1115,6 @@ async fn run_vad_capture(
 
     // Bounded: a worker that will not stop is left behind and muted.
     live_turns.stop(Duration::from_millis(500));
-
-    // Finalize the session WAV for diarization before its path is returned.
-    #[cfg(target_os = "macos")]
-    let session_path: Option<std::path::PathBuf> = match session_recording {
-        Some(recording) => {
-            let path = recording.path().to_path_buf();
-            match recording.finalize() {
-                Ok(()) => {
-                    match app
-                        .try_state::<crate::stt::SttState>()
-                        .map(|state| state.set_session_wav_path(path.clone()))
-                    {
-                        Some(Ok(())) => Some(path),
-                        Some(Err(e)) => {
-                            error!("Failed to manage session WAV: {}", e);
-                            let _ = std::fs::remove_file(&path);
-                            None
-                        }
-                        None => {
-                            let _ = std::fs::remove_file(&path);
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to finalize session recording: {}", e);
-                    let _ = app.emit(
-                        "stt-error",
-                        "Speaker labels are unavailable for this session.",
-                    );
-                    None
-                }
-            }
-        }
-        None => None,
-    };
-
-    #[cfg(not(target_os = "macos"))]
-    let session_path: Option<std::path::PathBuf> = None;
-
-    session_path
 }
 
 /// What a finished manual take should do with the audio it collected.
@@ -1457,40 +1344,10 @@ fn samples_to_wav_b64(sample_rate: u32, mono_f32: &[f32]) -> Result<String, Stri
     Ok(B64.encode(cursor.into_inner()))
 }
 
-fn write_f32_samples_to_wav(
-    sample_rate: u32,
-    samples: &[f32],
-    path: &std::path::Path,
-) -> Result<(), String> {
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    // Session WAVs live in the world-readable temp dir; create them
-    // owner-only so other local users cannot read captured audio.
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options.open(path).map_err(|e| e.to_string())?;
-    let mut writer = WavWriter::new(file, spec).map_err(|e| e.to_string())?;
-    for &s in samples {
-        let clamped = s.clamp(-1.0, 1.0);
-        writer
-            .write_sample((clamped * i16::MAX as f32) as i16)
-            .map_err(|e| e.to_string())?;
-    }
-    writer.finalize().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// Remove `assistant-session-*.wav` files older than `older_than` from `dir`.
-/// Startup crash recovery: sessions abandoned before diarization would
-/// otherwise accumulate in the temp dir forever. Returns the number removed.
+/// Nothing writes these any more; this clears the ones left in the temp dir by
+/// versions that recorded each session for offline speaker labelling.
+/// Returns the number removed.
 pub fn sweep_stale_session_wavs(dir: &std::path::Path, older_than: Duration) -> usize {
     let now = std::time::SystemTime::now();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1534,21 +1391,16 @@ fn samples_to_raw_f32_b64(mono_f32: &[f32]) -> Result<String, String> {
     Ok(B64.encode(&bytes))
 }
 
-async fn await_capture_shutdown(
-    mut task: tokio::task::JoinHandle<Option<std::path::PathBuf>>,
-    deadline: Duration,
-) -> Option<std::path::PathBuf> {
+async fn await_capture_shutdown(mut task: tokio::task::JoinHandle<()>, deadline: Duration) {
     match tokio::time::timeout(deadline, &mut task).await {
-        Ok(Ok(path)) => path,
+        Ok(Ok(())) => {}
         Ok(Err(error)) => {
             error!("Capture task ended before cleanup completed: {}", error);
-            None
         }
         Err(_) => {
             error!("Capture task did not finish within the shutdown deadline");
             task.abort();
             let _ = task.await;
-            None
         }
     }
 }
@@ -1557,7 +1409,7 @@ async fn await_capture_shutdown(
 pub async fn stop_system_audio_capture(
     app: AppHandle,
     discard: Option<bool>,
-) -> Result<Option<std::path::PathBuf>, String> {
+) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
     // Store the intent BEFORE the stop flag: the capture loop breaks on the
     // stop flag and then reads this, so ordering it this way is what makes the
@@ -1569,7 +1421,7 @@ pub async fn stop_system_audio_capture(
     // sees the request when it installs its task and stops the capture itself
     // without ever announcing it.
     if state.stream_task.request_stop_during_start()? {
-        return Ok(None);
+        return Ok(());
     }
 
     // Hold the stop reservation until the capture task has joined and its
@@ -1577,23 +1429,10 @@ pub async fn stop_system_audio_capture(
     // overlap claim it while the previous capture is still shutting down.
     let (task, stop_reservation) = state.stream_task.take_for_stop()?;
 
-    // Drain unconditionally: a live task supersedes anything a previous
-    // unexpected end left behind, and `sweep_stale_session_wavs` reclaims the
-    // superseded file.
-    let orphaned_session_path = state
-        .orphaned_session_path
-        .lock()
-        .map_err(|e| format!("Failed to read session audio path: {}", e))?
-        .take();
-
-    let session_path = if let Some(task) = task {
-        let joined = await_capture_shutdown(task, Duration::from_secs(5)).await;
-        drop(stop_reservation);
-        joined
-    } else {
-        drop(stop_reservation);
-        orphaned_session_path
-    };
+    if let Some(task) = task {
+        await_capture_shutdown(task, Duration::from_secs(5)).await;
+    }
+    drop(stop_reservation);
 
     // Mark as not capturing
     *state
@@ -1603,7 +1442,7 @@ pub async fn stop_system_audio_capture(
 
     // Emit stopped event
     let _ = app.emit("capture-stopped", ());
-    Ok(session_path)
+    Ok(())
 }
 
 fn latch_discard_intent(discard: &AtomicBool, requested: bool) {
@@ -2023,29 +1862,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_shutdown_waits_for_cleanup_result() {
-        let expected = std::env::temp_dir().join("capture-cleanup.wav");
-        let task_path = expected.clone();
+    async fn capture_shutdown_waits_for_the_task_to_finish() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let task_finished = finished.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            Some(task_path)
+            task_finished.store(true, Ordering::Release);
         });
 
-        let result = await_capture_shutdown(task, Duration::from_secs(1)).await;
+        await_capture_shutdown(task, Duration::from_secs(1)).await;
 
-        assert_eq!(result, Some(expected));
+        assert!(finished.load(Ordering::Acquire));
     }
 
     #[tokio::test]
     async fn capture_shutdown_times_out_without_hanging() {
-        let task = tokio::spawn(async {
-            std::future::pending::<()>().await;
-            None
-        });
+        let task = tokio::spawn(std::future::pending::<()>());
 
-        let result = await_capture_shutdown(task, Duration::from_millis(1)).await;
+        let started = Instant::now();
+        await_capture_shutdown(task, Duration::from_millis(1)).await;
 
-        assert_eq!(result, None);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[tokio::test]
@@ -2376,25 +2213,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn session_wav_is_written_with_restrictive_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = std::env::temp_dir().join(format!("aileron-perms-{}.wav", uuid::Uuid::new_v4()));
-        let samples = vec![0.1f32, -0.2, 0.3];
-
-        write_f32_samples_to_wav(16_000, &samples, &path).unwrap();
-
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode & 0o077,
-            0,
-            "session WAV must not be readable by group or others (got mode {mode:o})"
-        );
-
-        let _ = std::fs::remove_file(&path);
-    }
 }
 
 // ---- Mic dictation (native path for the mic button; macOS v1) ----

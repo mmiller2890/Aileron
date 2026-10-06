@@ -1,7 +1,7 @@
 # Live Speaker Labels — Design
 
 **Date:** 2026-10-06
-**Status:** Design approved in conversation; spec awaiting user review
+**Status:** Implemented on dev; awaiting live validation
 **Branch:** dev
 **Goal:** Label each transcript line with its speaker as the line lands, show who is speaking on the provisional line, and remove the post-stop offline labelling run and the session recording it needs.
 
@@ -75,9 +75,10 @@ Structured like the live-text worker: dedicated thread, bounded `sync_channel`, 
 Done as the last tasks, after live labels work:
 
 - Frontend: the `stt_diarize_file` call at stop, `isLabelingSpeakers`, the session-audio stop action, `discardSessionAudio` and its call sites, `speakerSegments` and segment-overlap labelling (`applySpeakerLabels`, `getSpeakerForUtterance`) where nothing else uses them, the `stt_init_diarization` call.
-- Rust: session recording in `run_vad_capture`, `session_recording.rs`, the session path returned from the capture task and from `stop_system_audio_capture`, `orphaned_session_path`, the stale-WAV sweep, `stt_diarize_file`, `stt_discard_session_audio`, `stt_init_diarization`, and the bridge's offline diarization functions if nothing else calls them.
+- Rust: session recording in `run_vad_capture`, `session_recording.rs`, the session path returned from the capture task and from `stop_system_audio_capture`, `orphaned_session_path`, `stt_diarize_file`, `stt_discard_session_audio`, `stt_init_diarization`, and the bridge's offline diarization functions if nothing else calls them.
 - Tests for the deleted code are deleted with it.
 - `stop_system_audio_capture` returns `()`.
+- The startup sweep for stale `assistant-session-*.wav` files is kept: nothing writes them any more, but it clears the ones earlier versions left in the temp directory.
 
 Each removal task must leave all gates passing. Anything found to have another consumer stays, and the plan records it.
 

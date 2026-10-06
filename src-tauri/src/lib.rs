@@ -17,17 +17,13 @@ use speaker::{TaskSlot, VadConfig};
 use tauri_nspanel::{cocoa::appkit::NSWindowCollectionBehavior, panel_delegate, WebviewWindowExt};
 
 pub struct AudioState {
-    stream_task: TaskSlot<Option<std::path::PathBuf>>,
+    stream_task: TaskSlot<()>,
     vad_config: Arc<Mutex<VadConfig>>,
     is_capturing: Arc<Mutex<bool>>,
     stop_flag: Arc<AtomicBool>,
     /// Set alongside `stop_flag` when the user discards a manual take, so the
     /// capture task drops the audio instead of emitting it for transcription.
     discard_take: Arc<AtomicBool>,
-    /// Session WAV left behind by a capture that ended without a stop request.
-    /// That task's `JoinHandle` is already gone, so its return value can no
-    /// longer carry the path to `stop_system_audio_capture`.
-    orphaned_session_path: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 impl Default for AudioState {
@@ -38,7 +34,6 @@ impl Default for AudioState {
             is_capturing: Arc::new(Mutex::new(false)),
             stop_flag: Arc::new(AtomicBool::new(false)),
             discard_take: Arc::new(AtomicBool::new(false)),
-            orphaned_session_path: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -111,16 +106,13 @@ pub fn run() {
             stt::stt_init_vad,
             stt::stt_init_live_text,
             stt::stt_init_live_speakers,
-            stt::stt_init_diarization,
             stt::stt_transcribe_speech,
             stt::stt_transcribe_utterance,
-            stt::stt_diarize_file,
-            stt::stt_discard_session_audio,
             stt::stt_get_status,
             db::db_save_conversation,
         ])
         .setup(|app| {
-            // Crash recovery: drop session WAVs abandoned before diarization.
+            // Clear session WAVs left behind by versions that recorded them.
             speaker::sweep_stale_session_wavs(
                 &std::env::temp_dir(),
                 std::time::Duration::from_secs(24 * 3600),

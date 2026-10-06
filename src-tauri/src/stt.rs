@@ -13,23 +13,6 @@ const MAX_CACHED_UTTERANCES: usize = 4;
 const CACHED_UTTERANCE_TTL: Duration = Duration::from_secs(60);
 const UTTERANCE_CACHE_MISS_PREFIX: &str = "UTTERANCE_CACHE_MISS:";
 
-#[cfg(target_os = "macos")]
-fn cleanup_session_file_after<T>(
-    path: &std::path::Path,
-    result: Result<T, String>,
-) -> Result<T, String> {
-    let cleanup_result = std::fs::remove_file(path).map_err(|error| error.to_string());
-    match (result, cleanup_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(cleanup_error)) => Err(format!(
-            "Failed to remove session audio after processing: {cleanup_error}"
-        )),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(cleanup_error)) => Err(format!(
-            "{error}; failed to remove session audio: {cleanup_error}"
-        )),
-    }
-}
 
 pub(crate) struct CachedUtterance {
     id: String,
@@ -231,11 +214,11 @@ mod utterance_store_tests {
     use super::AsrModelVersion;
     #[cfg(target_os = "macos")]
     use super::{
-        build_local_transcription_result, cleanup_session_file_after, resolve_transcription_model,
+        build_local_transcription_result, resolve_transcription_model,
         LocalTranscriptionContext, TranscriptionVariant,
     };
     use super::{try_lock_stt_inner, SttInner, SttState, UtteranceStore, MAX_CACHED_UTTERANCES};
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     #[cfg(target_os = "macos")]
@@ -509,103 +492,6 @@ mod utterance_store_tests {
 
         assert!(state.streaming_vad.try_lock().is_ok());
     }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn session_path_update_does_not_wait_for_asr_lock() {
-        let state = Arc::new(SttState::default());
-        let held = state.inner.lock().unwrap();
-        let worker_state = state.clone();
-        let (sent, received) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let result = worker_state.set_session_wav_path(std::path::PathBuf::from(
-                "/tmp/aileron-session-lock-test.wav",
-            ));
-            sent.send(result).unwrap();
-        });
-
-        let update = received.recv_timeout(Duration::from_millis(50));
-        drop(held);
-        worker.join().unwrap();
-
-        assert!(update.is_ok());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn discarding_session_audio_removes_the_managed_file() {
-        let state = SttState::default();
-        let path = std::env::temp_dir().join(format!(
-            "aileron-discard-session-{}.wav",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::write(&path, b"wav").unwrap();
-        state.set_session_wav_path(path.clone()).unwrap();
-
-        state
-            .discard_session_wav_path(path.to_string_lossy().as_ref())
-            .unwrap();
-
-        assert!(!path.exists());
-        assert!(state.take_session_wav_path().is_none());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn replacing_session_audio_removes_the_previous_file() {
-        let state = SttState::default();
-        let previous_path = std::env::temp_dir().join(format!(
-            "aileron-replaced-session-{}.wav",
-            uuid::Uuid::new_v4()
-        ));
-        let current_path = std::env::temp_dir().join(format!(
-            "aileron-current-session-{}.wav",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::write(&previous_path, b"previous").unwrap();
-        std::fs::write(&current_path, b"current").unwrap();
-
-        state.set_session_wav_path(previous_path.clone()).unwrap();
-        state.set_session_wav_path(current_path.clone()).unwrap();
-
-        assert!(!previous_path.exists());
-        assert_eq!(state.take_session_wav_path(), Some(current_path.clone()));
-        std::fs::remove_file(current_path).unwrap();
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn mismatched_discard_keeps_the_managed_session() {
-        let state = SttState::default();
-        let managed_path = std::env::temp_dir().join(format!(
-            "aileron-managed-session-{}.wav",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::write(&managed_path, b"managed").unwrap();
-        state.set_session_wav_path(managed_path.clone()).unwrap();
-
-        assert!(state
-            .discard_session_wav_path("/tmp/not-the-managed-session.wav")
-            .is_err());
-        assert_eq!(state.take_session_wav_path(), Some(managed_path.clone()));
-        std::fs::remove_file(managed_path).unwrap();
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn failed_session_processing_still_removes_the_audio_file() {
-        let path = std::env::temp_dir().join(format!(
-            "aileron-failed-diarization-{}.wav",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::write(&path, b"sensitive audio").unwrap();
-
-        let result: Result<(), String> =
-            cleanup_session_file_after(&path, Err("diarization failed".to_string()));
-
-        assert_eq!(result.unwrap_err(), "diarization failed");
-        assert!(!path.exists());
-    }
 }
 
 #[derive(Default)]
@@ -615,7 +501,6 @@ pub struct SttInner {
     #[cfg(target_os = "macos")]
     model_version: Option<AsrModelVersion>,
     asr_ready: bool,
-    diarization_ready: bool,
 }
 
 #[derive(Default)]
@@ -646,7 +531,6 @@ pub struct SttState {
     mic_vad: Arc<Mutex<VadInner>>,
     live_text: Arc<Mutex<LiveTextInner>>,
     live_speakers: Arc<Mutex<LiveSpeakersInner>>,
-    session_wav_path: Arc<Mutex<Option<std::path::PathBuf>>>,
     last_status: Mutex<Option<serde_json::Value>>,
 }
 
@@ -871,26 +755,6 @@ impl SttState {
     }
 
     #[cfg(target_os = "macos")]
-    fn init_diarization_inner(
-        inner: Arc<Mutex<SttInner>>,
-        app: AppHandle,
-        threshold: f64,
-    ) -> Result<(), String> {
-        let mut guard = inner.lock().map_err(|e| e.to_string())?;
-        if guard.diarization_ready {
-            return Ok(());
-        }
-        let audio = guard.audio.as_ref().ok_or("STT not initialized")?;
-        if let Err(e) = audio.init_diarization(threshold) {
-            let msg = e.to_string();
-            emit_error(&app, format!("Failed to initialize diarization: {}", msg));
-            return Err(msg);
-        }
-        guard.diarization_ready = true;
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
     pub fn mic_vad_process_streaming_samples(&self, samples: &[f32]) -> Result<f32, String> {
         let guard = self.mic_vad.try_lock().map_err(|error| match error {
             TryLockError::WouldBlock => "VAD temporarily unavailable".to_string(),
@@ -958,50 +822,6 @@ impl SttState {
             .ok_or("VAD not initialized")?
             .vad_reset_stream()
             .map_err(|e| e.to_string())
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn diarize_file(
-        &self,
-        path: &str,
-    ) -> Result<Vec<fluidaudio_rs::DiarizationSegment>, String> {
-        let guard = self.inner.lock().map_err(|e| e.to_string())?;
-        if !guard.diarization_ready {
-            return Err("Diarization not initialized".to_string());
-        }
-        let audio = guard.audio.as_ref().ok_or("STT not initialized")?;
-        audio.diarize_file(path).map_err(|e| e.to_string())
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn set_session_wav_path(&self, path: std::path::PathBuf) -> Result<(), String> {
-        let mut guard = self.session_wav_path.lock().map_err(|e| e.to_string())?;
-        if let Some(previous_path) = guard.as_ref().filter(|previous| *previous != &path) {
-            std::fs::remove_file(previous_path).map_err(|error| error.to_string())?;
-        }
-        *guard = Some(path);
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn take_session_wav_path(&self) -> Option<std::path::PathBuf> {
-        self.session_wav_path.lock().ok()?.take()
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn discard_session_wav_path(&self, path: &str) -> Result<(), String> {
-        let mut guard = self.session_wav_path.lock().map_err(|e| e.to_string())?;
-        let is_managed = guard
-            .as_ref()
-            .is_some_and(|managed| managed.to_string_lossy() == path);
-        if !is_managed {
-            return Err("Path is not the managed session audio file".to_string());
-        }
-        let managed_path = guard
-            .take()
-            .ok_or("Path is not the managed session audio file")?;
-        drop(guard);
-        std::fs::remove_file(managed_path).map_err(|error| error.to_string())
     }
 
     #[cfg(target_os = "macos")]
@@ -1130,7 +950,6 @@ impl SttState {
             "asr_ready": false,
             "model_version": serde_json::Value::Null,
             "vad_ready": false,
-            "diarization_ready": false,
             "live_text_ready": false,
             "live_speakers_ready": false,
             "is_apple_silicon": is_apple_silicon,
@@ -1146,7 +965,6 @@ impl SttState {
                 "asr_ready": false,
                 "model_version": serde_json::Value::Null,
                 "vad_ready": false,
-                "diarization_ready": false,
                 "live_text_ready": false,
                 "live_speakers_ready": false,
                 "is_apple_silicon": false,
@@ -1197,7 +1015,6 @@ impl SttState {
                 "asr_ready": guard.asr_ready,
                 "model_version": guard.model_version.map(AsrModelVersion::as_str),
                 "vad_ready": streaming_vad_guard.ready && mic_vad_guard.ready,
-                "diarization_ready": guard.diarization_ready,
                 "live_text_ready": live_text_guard.ready,
                 "live_speakers_ready": live_speakers_guard.ready,
                 "is_apple_silicon": is_apple_silicon,
@@ -1278,16 +1095,6 @@ impl crate::speaker::live_speakers::LiveSpeakerModel for FluidLiveSpeakerModel {
 
     fn end_turn(&mut self) -> Result<crate::speaker::live_speakers::SlotCounts, String> {
         self.with_audio(|audio| audio.live_diarizer_end_turn())
-    }
-}
-
-impl Drop for SttState {
-    fn drop(&mut self) {
-        if let Ok(guard) = self.session_wav_path.lock() {
-            if let Some(path) = guard.as_ref() {
-                let _ = std::fs::remove_file(path);
-            }
-        }
     }
 }
 
@@ -1436,87 +1243,4 @@ pub async fn stt_init_live_speakers(
             .await
             .map_err(|e| e.to_string())?
     }
-}
-
-#[tauri::command]
-pub async fn stt_init_diarization(
-    state: State<'_, SttState>,
-    app: AppHandle,
-    threshold: f64,
-) -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
-    return Err(not_supported());
-
-    #[cfg(target_os = "macos")]
-    {
-        let inner = state.inner.clone();
-        tokio::task::spawn_blocking(move || SttState::init_diarization_inner(inner, app, threshold))
-            .await
-            .map_err(|e| e.to_string())?
-    }
-}
-
-#[tauri::command]
-pub async fn stt_diarize_file(
-    state: State<'_, SttState>,
-    path: String,
-) -> Result<serde_json::Value, String> {
-    #[cfg(not(target_os = "macos"))]
-    return Ok(serde_json::json!([]));
-
-    #[cfg(target_os = "macos")]
-    {
-        let managed_path = state
-            .take_session_wav_path()
-            .map(|p| p.to_string_lossy().to_string());
-
-        let path_for_diarization = managed_path
-            .filter(|managed| managed == &path)
-            .ok_or("Path is not the managed session audio file")?;
-        let path_for_cleanup = path_for_diarization.clone();
-
-        let inner = state.inner.clone();
-        let segments_result = tokio::task::spawn_blocking(move || {
-            let state = SttState {
-                inner,
-                streaming_vad: Arc::default(),
-                mic_vad: Arc::default(),
-                live_text: Arc::default(),
-                live_speakers: Arc::default(),
-                session_wav_path: Arc::default(),
-                last_status: Mutex::default(),
-            };
-            state.diarize_file(&path_for_diarization)
-        })
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|result| result);
-        let segments_result =
-            cleanup_session_file_after(std::path::Path::new(&path_for_cleanup), segments_result);
-        if segments_result.is_err() && std::path::Path::new(&path_for_cleanup).exists() {
-            let _ = state.set_session_wav_path(std::path::PathBuf::from(&path_for_cleanup));
-        }
-        let segments = segments_result?;
-
-        Ok(serde_json::json!(segments
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "speaker_id": s.speaker_id,
-                    "start_time": s.start_time,
-                    "end_time": s.end_time,
-                    "quality_score": s.quality_score,
-                })
-            })
-            .collect::<Vec<_>>()))
-    }
-}
-
-#[tauri::command]
-pub fn stt_discard_session_audio(state: State<'_, SttState>, path: String) -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
-    return Ok(());
-
-    #[cfg(target_os = "macos")]
-    state.discard_session_wav_path(&path)
 }

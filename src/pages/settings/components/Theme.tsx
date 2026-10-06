@@ -8,12 +8,12 @@ export const Theme = () => {
   return (
     <div id="theme" className="relative space-y-3">
       <Header
-        title={`Appearance ${
+        title="Appearance"
+        description={
           hasActiveLicense
-            ? ""
-            : " (You need an active license to use this feature)"
-        }`}
-        description="Adjust the transparency level of the application window"
+            ? "Adjust the transparency level of the application window"
+            : "Adjusting window transparency needs an active license"
+        }
         isMainTitle
       />
 

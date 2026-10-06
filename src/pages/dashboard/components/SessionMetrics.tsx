@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { ChatConversation } from "@/types/completion";
 
 const formatDuration = (ms: number): string => {
@@ -28,8 +29,18 @@ export const SessionMetrics = ({
     conversation?.messages.filter((m) => m.role === "user").length ?? 0;
   const answers =
     conversation?.messages.filter((m) => m.role === "assistant").length ?? 0;
+  // The live duration has to move on its own: snapshots only arrive when
+  // something happens, so a quiet stretch would freeze the clock.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!liveStartedAt) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [liveStartedAt]);
+
   const duration = liveStartedAt
-    ? formatDuration(Date.now() - liveStartedAt)
+    ? formatDuration(now - liveStartedAt)
     : conversation
       ? formatDuration(conversation.updatedAt - conversation.createdAt)
       : "—";

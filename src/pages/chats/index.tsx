@@ -8,8 +8,17 @@ import { useNavigate } from "react-router-dom";
 const Dashboard = () => {
   const conversations = useHistory();
   const navigate = useNavigate();
+  // Search narrows the list itself; grouping happens on what is left, so a
+  // day never shows conversations that do not match.
+  const query = conversations.search.trim().toLowerCase();
+  const visibleConversations = query
+    ? conversations.conversations.filter((doc) =>
+        (doc.title || "").toLowerCase().includes(query),
+      )
+    : conversations.conversations;
+
   // Group conversations by date
-  const groupedConversations = conversations.conversations.reduce(
+  const groupedConversations = visibleConversations.reduce(
     (acc, doc) => {
       const dateKey = moment(doc.updatedAt).format("YYYY-MM-DD");
       if (!acc[dateKey]) {
@@ -29,7 +38,7 @@ const Dashboard = () => {
   return (
     <PageLayout
       title="All conversations"
-      description="View all your conversations"
+      description="Every captured session and chat, newest first"
     >
       <>
         {conversations.conversations.length === 0 ? (
@@ -51,17 +60,12 @@ const Dashboard = () => {
                 onChange={(e) => conversations.setSearch(e.target.value)}
               />
             </div>
-            {sortedDates
-              .filter((dateKey) =>
-                conversations?.search?.length === 0
-                  ? true
-                  : groupedConversations?.[dateKey]?.some((doc) =>
-                      doc?.title
-                        .toLowerCase()
-                        .includes(conversations?.search?.toLowerCase() || "")
-                    )
-              )
-              .map((dateKey) => (
+            {sortedDates.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No conversations match “{conversations.search.trim()}”.
+              </p>
+            )}
+            {sortedDates.map((dateKey) => (
                 <div key={dateKey} className="flex flex-col gap-3">
                   <p className="text-xs text-muted-foreground select-none font-medium">
                     {moment(dateKey).format("ddd, MMM D")}
@@ -75,11 +79,14 @@ const Dashboard = () => {
                       >
                         <div className="flex items-center justify-between">
                           <p className="line-clamp-1 text-sm mr-8">
-                            {doc.title}
+                            {doc.title || "Untitled conversation"}
                           </p>
                           <div className="flex items-center gap-1">
                             <Badge variant="outline" className="text-xs">
-                              {doc.messages.length} messages
+                              {doc.messages.length}{" "}
+                              {doc.messages.length === 1
+                                ? "message"
+                                : "messages"}
                             </Badge>
                             <Badge variant="outline" className="text-xs">
                               {moment(doc.updatedAt).format("hh:mm A")}

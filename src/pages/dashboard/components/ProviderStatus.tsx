@@ -43,7 +43,11 @@ export const ProviderStatus = () => {
     <div className="space-y-2 border-t border-border pt-3">
       <div className="font-mono text-[11px] text-meta">status</div>
       <Row
-        label="on-device stt"
+        label={
+          selectedSttProvider.provider === "local-fluidaudio"
+            ? "on-device speech"
+            : "speech"
+        }
         value={selectedSttProvider.provider || "none"}
         ready={sttReady}
       />

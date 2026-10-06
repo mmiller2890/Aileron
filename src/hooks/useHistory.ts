@@ -194,7 +194,11 @@ export function useHistory(): UseHistoryReturn {
     markdown += `**Messages:** ${conversation.messages.length}\n\n---\n\n`;
 
     conversation.messages.forEach((message, index) => {
-      const roleLabel = message.role.toUpperCase();
+      // Captured lines carry who said them; fall back to the role.
+      const roleLabel = (
+        (message.role === "user" && message.speaker) ||
+        message.role
+      ).toUpperCase();
       markdown += `## ${roleLabel}: ${message.content}\n`;
 
       if (index < conversation.messages.length - 1) {

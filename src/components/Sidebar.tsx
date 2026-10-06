@@ -66,6 +66,7 @@ export const Sidebar = ({ onCollapse }: { onCollapse?: () => void }) => {
           <button
             onClick={() => navigate(item.href)}
             key={`${item.label}-${index}`}
+            aria-current={activeRoute.includes(item.href) ? "page" : undefined}
             className={cn(
               "flex w-full items-center justify-between gap-3 border-l-2 border-transparent px-3 py-2 text-[12px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:text-foreground",
               activeRoute.includes(item.href)
@@ -103,17 +104,19 @@ export const Sidebar = ({ onCollapse }: { onCollapse?: () => void }) => {
         </div>
 
         {footerItems.map((item, index) => (
-          <a
-            href={item.href}
-            onClick={item.action}
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            type="button"
+            onClick={() => {
+              void Promise.resolve(item.action()).catch((error) =>
+                console.error(`${item.label} failed:`, error),
+              );
+            }}
             key={`${item.label}-${index}`}
             className="flex w-full items-center gap-3 px-3 py-2 text-[12px] uppercase tracking-[0.16em] text-muted-foreground transition-colors hover:text-foreground"
           >
             <item.icon className="size-3.5 transition-all duration-300" />
             {item.label}
-          </a>
+          </button>
         ))}
       </div>
     </aside>

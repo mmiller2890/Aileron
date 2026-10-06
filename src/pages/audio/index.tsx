@@ -8,8 +8,8 @@ const getOsInstructions = () => {
   switch (platform) {
     case "macos":
       return {
-        mic: "System Preferences → Sound → Input",
-        audio: "System Preferences → Sound → Output",
+        mic: "System Settings → Sound → Input",
+        audio: "System Settings → Sound → Output",
       };
     case "windows":
       return {
@@ -41,7 +41,7 @@ const Audio = () => {
 
       <div className="text-xs text-warn bg-warn/10 p-3 rounded-md mb-4 space-y-2">
         <p>
-          <strong>⚠️ If selected devices don't work:</strong> Please verify your
+          <strong>If selected devices don't work:</strong> Please verify your
           default system audio settings. Go to{" "}
           <strong>{osInstructions.mic}</strong> for microphone and{" "}
           <strong>{osInstructions.audio}</strong> for speakers/headphones.

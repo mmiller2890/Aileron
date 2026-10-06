@@ -12,7 +12,7 @@ const Settings = () => {
   const settings = useSettings();
 
   return (
-    <PageLayout title="Settings" description="Manage your settings">
+    <PageLayout title="Settings" description="Window appearance, startup behaviour, and stored history">
       {/* Theme */}
       <Theme />
 

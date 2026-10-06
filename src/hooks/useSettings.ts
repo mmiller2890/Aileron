@@ -85,12 +85,17 @@ export const useSettings = () => {
     }
   }, [selectedSttProvider.provider]);
 
-  const handleDeleteAllChatsConfirm = async () => {
+  // Resolves true once the history is gone, false if the delete failed, so
+  // the caller reports what actually happened.
+  const handleDeleteAllChatsConfirm = async (): Promise<boolean> => {
     try {
       await deleteAllConversations();
-      setShowDeleteConfirmDialog(false);
+      return true;
     } catch (error) {
       console.error("Failed to delete all conversations:", error);
+      return false;
+    } finally {
+      setShowDeleteConfirmDialog(false);
     }
   };
 

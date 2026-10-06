@@ -106,7 +106,7 @@ export const CreateEditProvider = ({
               <div className="bg-muted/50 p-4 rounded-lg space-y-4">
                 <div className="bg-card border p-3 rounded-lg">
                   <p className="text-sm font-medium text-primary mb-2">
-                    💡 Important: You can add custom variables or directly
+                    Important: You can add custom variables or directly
                     include your API keys/values
                   </p>
                   <p className="text-xs text-muted-foreground">
@@ -121,7 +121,7 @@ export const CreateEditProvider = ({
                 </div>
 
                 <h4 className="text-sm font-semibold text-foreground">
-                  ⚠️ Required Variables for STT Providers:
+                  Required Variables for STT Providers:
                 </h4>
                 <div className="grid grid-cols-1 gap-3 text-sm">
                   <div className="flex items-center gap-3 p-3 bg-card border rounded-lg">
@@ -157,7 +157,7 @@ export const CreateEditProvider = ({
                     select this provider.
                   </p>
                   <p className="text-xs text-muted-foreground italic">
-                    💡 Tip: The{" "}
+                    Tip: The{" "}
                     <code className="bg-muted px-1 rounded text-xs">
                       {"{{AUDIO}}"}
                     </code>{" "}

@@ -92,7 +92,7 @@ export const CreateEditDialog = ({
               disabled={isSaving}
             />
             <p className="text-xs text-muted-foreground/70">
-              💡 Tip: Be specific about tone, expertise level, and response
+              Tip: Be specific about tone, expertise level, and response
               format
             </p>
           </div>

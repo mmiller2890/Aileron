@@ -300,7 +300,7 @@ export const ShortcutManager = () => {
 
       {/* Footer Note */}
       <p className="text-xs text-muted-foreground text-center pt-2">
-        💡 Shortcuts work globally, even when the app is hidden
+        Shortcuts work globally, even when the app is hidden
       </p>
     </div>
   );

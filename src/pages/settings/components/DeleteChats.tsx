@@ -18,13 +18,14 @@ export const DeleteChats = ({
   setShowDeleteConfirmDialog,
 }: UseSettingsReturn) => {
   const [isDeleting, setIsDeleting] = useState(false);
+  const [outcome, setOutcome] = useState<"deleted" | "failed" | null>(null);
 
-  const deleteAllChats = () => {
+  const deleteAllChats = async () => {
     setIsDeleting(true);
-    handleDeleteAllChatsConfirm();
-    setTimeout(() => {
-      setIsDeleting(false);
-    }, 2000);
+    setOutcome(null);
+    const deleted = await handleDeleteAllChatsConfirm();
+    setIsDeleting(false);
+    setOutcome(deleted ? "deleted" : "failed");
   };
 
   return (
@@ -36,10 +37,18 @@ export const DeleteChats = ({
       />
 
       <div className="space-y-2">
-        {isDeleting && (
+        {outcome === "deleted" && (
           <div className="p-3 bg-ok/10 border border-ok/30 rounded-md">
             <p className="text-xs text-ok font-medium">
-              ✅ All chat history has been successfully deleted.
+              All chat history has been deleted.
+            </p>
+          </div>
+        )}
+        {outcome === "failed" && (
+          <div className="p-3 bg-destructive/10 border border-destructive/30 rounded-md">
+            <p className="text-xs text-destructive font-medium">
+              The chat history could not be deleted. Nothing was removed; try
+              again.
             </p>
           </div>
         )}

@@ -12,6 +12,7 @@ import {
   MessageSquareTextIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export const useMenuItems = () => {
   const menu: {
@@ -68,11 +69,17 @@ export const useMenuItems = () => {
     },
   ];
 
-  const footerItems = [
+  const footerItems: {
+    icon: React.ElementType;
+    label: string;
+    action: () => void | Promise<void>;
+  }[] = [
     {
       icon: BugIcon,
       label: "Report a bug",
-      href: "https://github.com/mmiller2890/Assistant-/issues/new",
+      // A plain target="_blank" link does not leave the app's webview.
+      action: () =>
+        openUrl("https://github.com/mmiller2890/Assistant-/issues/new"),
     },
     {
       icon: PowerIcon,

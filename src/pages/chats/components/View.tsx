@@ -26,6 +26,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { PageLayout } from "@/layouts";
 import { useHistory, useChatCompletion } from "@/hooks";
 import { useApp } from "@/contexts";
+import { SpeakerTag } from "@/components/SpeakerTag";
 import {
   DeleteConfirmationDialog,
   ChatAudio,
@@ -39,6 +40,9 @@ const View = () => {
   const { hasActiveLicense, supportsImages } = useApp();
   const navigate = useNavigate();
   const [messages, setMessages] = useState<ChatConversation | null>(null);
+  // Separate from `messages === null`: a conversation that does not exist
+  // must end in "not found", not an endless spinner.
+  const [isLoadingConversation, setIsLoadingConversation] = useState(true);
 
   const {
     handleDeleteConfirm,
@@ -58,11 +62,18 @@ const View = () => {
   );
 
   useEffect(() => {
+    let cancelled = false;
     const getMessages = async () => {
+      setIsLoadingConversation(true);
       const conversation = await getConversationById(conversationId as string);
+      if (cancelled) return;
       setMessages(conversation || null);
+      setIsLoadingConversation(false);
     };
     getMessages();
+    return () => {
+      cancelled = true;
+    };
   }, [conversationId]);
 
   useEffect(() => {
@@ -85,11 +96,18 @@ const View = () => {
     <PageLayout
       isMainTitle={false}
       allowBackButton={true}
-      title={messages?.title || ""}
+      title={
+        messages?.title ||
+        (isLoadingConversation ? "" : messages ? "Untitled conversation" : "Conversation not found")
+      }
       description={
         messages
-          ? `${messages.messages.length} messages in this conversation`
-          : "Loading conversation..."
+          ? `${messages.messages.length} ${
+              messages.messages.length === 1 ? "message" : "messages"
+            } in this conversation`
+          : isLoadingConversation
+            ? "Loading conversation..."
+            : "It may have been deleted."
       }
       rightSlot={
         <div className="flex flex-row items-center gap-2">
@@ -147,10 +165,14 @@ const View = () => {
     >
       {messages === null || messages.messages.length === 0 ? (
         <Empty
-          isLoading={messages === null}
+          isLoading={isLoadingConversation}
           icon={MessageCircleIcon}
-          title="No messages found"
-          description="Start a new message to get started"
+          title={messages ? "No messages yet" : "Conversation not found"}
+          description={
+            messages
+              ? "Type a message below to start"
+              : "It may have been deleted. Go back to see all conversations."
+          }
         />
       ) : (
         <div className="flex flex-col gap-4 pb-24 px-2">
@@ -194,6 +216,13 @@ const View = () => {
                       isUser ? "items-end" : "items-start"
                     }`}
                   >
+                    {isUser && message.speaker && (
+                      <SpeakerTag
+                        speaker={message.speaker}
+                        fallback=""
+                        className="text-[10px] lg:text-xs"
+                      />
+                    )}
                     <Card
                       className={`p-3 text-xs lg:text-sm transition-all shadow-none ${
                         isUser

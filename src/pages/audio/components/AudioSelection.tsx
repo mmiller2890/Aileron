@@ -199,7 +199,7 @@ export const AudioSelection = () => {
           {/* Success message */}
           {showSuccess.input && (
             <div className="text-xs text-ok bg-ok/10 p-3 rounded-md">
-              <strong>✓ Microphone changed successfully!</strong>
+              <strong>Microphone changed successfully!</strong>
               <br />
               Using: {selectedAudioDevices.input.name || "Unknown device"}
             </div>
@@ -209,7 +209,7 @@ export const AudioSelection = () => {
           {devices?.input?.length === 0 && !isLoadingDevices && (
             <div className="text-xs text-warn bg-warn/10 p-3 rounded-md">
               <strong>
-                ⚠️ Click the refresh button to load your microphone devices.
+                Click the refresh button to load your microphone devices.
               </strong>{" "}
               If this doesn't work, try changing your default microphone in your
               system settings.
@@ -220,7 +220,7 @@ export const AudioSelection = () => {
         {/* Tips */}
         <div className="text-xs text-muted-foreground/70">
           <p>
-            💡 <strong>Tip:</strong> When you select a microphone, the app will
+            <strong>Tip:</strong> When you select a microphone, the app will
             immediately switch to that device. You can verify by hovering over
             the microphone button in the main interface - it will show the
             active device name.
@@ -298,7 +298,7 @@ export const AudioSelection = () => {
           {/* Success message */}
           {showSuccess.output && (
             <div className="text-xs text-ok bg-ok/10 p-3 rounded-md">
-              <strong>✓ Output device changed successfully!</strong>
+              <strong>Output device changed successfully!</strong>
               <br />
               Using: {selectedAudioDevices.output.name || "Unknown device"}
             </div>
@@ -308,7 +308,7 @@ export const AudioSelection = () => {
           {devices?.output?.length === 0 && !isLoadingDevices && (
             <div className="text-xs text-warn bg-warn/10 p-3 rounded-md">
               <strong>
-                ⚠️ Click the refresh button to load your system audio devices.
+                Click the refresh button to load your system audio devices.
               </strong>{" "}
               If this doesn't work, try changing your default system audio
               output in your system settings.
@@ -319,7 +319,7 @@ export const AudioSelection = () => {
         {/* Tips */}
         <div className="text-xs text-muted-foreground/70">
           <p>
-            💡 <strong>Tip:</strong> System audio capture allows you to record
+            <strong>Tip:</strong> System audio capture allows you to record
             audio playing through your speakers or headphones. This is useful
             for capturing conversation audio or system sounds along with your
             voice.

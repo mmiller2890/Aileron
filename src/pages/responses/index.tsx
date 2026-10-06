@@ -18,7 +18,7 @@ const Responses = () => {
       {!hasActiveLicense && (
         <div className="p-4 bg-primary/10 border border-primary/20 rounded-lg">
           <p className="text-[10px] lg:text-sm text-foreground font-medium mb-2">
-            🔒 Premium Features
+            Premium Features
           </p>
           <p className="text-[10px] lg:text-sm text-muted-foreground">
             Response customization features (Response Length, Language

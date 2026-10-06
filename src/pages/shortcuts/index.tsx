@@ -5,7 +5,7 @@ const Shortcuts = () => {
   return (
     <PageLayout
       title="Cursor & Keyboard Shortcuts"
-      description="Manage your cursor and keyboard shortcuts"
+      description="Global keyboard shortcuts and the cursor shown over the app"
     >
       <div className="flex flex-col gap-6 pb-8">
         {/* Cursor Selection */}

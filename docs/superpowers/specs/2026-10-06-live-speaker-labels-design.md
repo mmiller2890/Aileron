@@ -34,7 +34,7 @@ Not in scope: naming speakers, recognising a person across sessions, more than f
 - `isLiveDiarizerAvailable()`.
 - `liveDiarizerReset()` — `reset()`; clears the bridge's per-turn counters.
 - `liveDiarizerFeed(samples, outCounts[4])` — `addAudio` + `process()`. For every finalized frame in the update, each speaker slot whose probability is at least 0.5 gets one count in the bridge's finalized per-turn counters. The latest tentative frames are counted separately and replaced on every call. Writes finalized + tentative counts for the turn so far.
-- `liveDiarizerEndTurn(outCounts[4])` — feeds 0.56 s of silence (the model's right context: 7 frames of 80 ms) so the turn's remaining frames finalize, writes the finalized counts for the turn, and zeroes the counters.
+- `liveDiarizerEndTurn(outCounts[4])` — feeds 1.04 s of silence (one full chunk of 6 frames plus the right context of 7, at 80 ms per frame) so the turn's remaining frames finalize, writes the finalized counts for the turn, and zeroes the counters.
 
 Counts are in model frames (80 ms each). Matching C entry points, Rust FFI and safe wrappers; vendored crate version bumped.
 
@@ -110,7 +110,7 @@ If it fails, implementation stops and the result is reported. Synthetic voices a
 
 ## Risks
 
-- **Silence-cut audio.** The model was designed for a continuous timeline. Feeding speech with silences removed (plus 0.56 s of silence per turn) should work because identity is carried in its speaker cache, but it is unverified until the probe runs.
+- **Silence-cut audio.** The model was designed for a continuous timeline. Feeding speech with silences removed (plus 1.04 s of silence per turn) should work because identity is carried in its speaker cache, but it is unverified until the probe runs.
 - **Three models during speech** (VAD, live text, speakers). Each worker is isolated; contention degrades live features only. The drain-stall diagnostic will show if the capture loop is affected.
 - **No fallback.** With the offline pass gone, a session where the live model underperforms has poor labels and no way to recompute them.
 - **Removal breadth.** The deleted code touches stop, start, and unmount paths. Staging it after the feature works, one consumer at a time, limits the blast radius.

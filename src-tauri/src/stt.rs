@@ -444,6 +444,29 @@ mod utterance_store_tests {
     }
 
     #[test]
+    fn live_speakers_lock_is_independent_of_asr_and_live_text() {
+        let state = SttState::default();
+        let _asr = state.inner.lock().unwrap();
+        let _text = state.live_text.lock().unwrap();
+        assert!(state.live_speakers.try_lock().is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_speaker_model_is_absent_until_initialised() {
+        let state = SttState::default();
+        assert!(state.live_speaker_model().is_none());
+    }
+
+    #[test]
+    fn status_reports_live_speakers_as_not_ready_by_default() {
+        let state = SttState::default();
+        let _asr = state.inner.lock().unwrap();
+        let status = state.get_status().unwrap();
+        assert_eq!(status["live_speakers_ready"], serde_json::json!(false));
+    }
+
+    #[test]
     fn live_text_lock_is_independent_of_asr_and_vad() {
         let state = SttState::default();
         let _asr = state.inner.lock().unwrap();
@@ -610,11 +633,19 @@ struct LiveTextInner {
 }
 
 #[derive(Default)]
+struct LiveSpeakersInner {
+    #[cfg(target_os = "macos")]
+    audio: Option<FluidAudio>,
+    ready: bool,
+}
+
+#[derive(Default)]
 pub struct SttState {
     pub inner: Arc<Mutex<SttInner>>,
     streaming_vad: Arc<Mutex<VadInner>>,
     mic_vad: Arc<Mutex<VadInner>>,
     live_text: Arc<Mutex<LiveTextInner>>,
+    live_speakers: Arc<Mutex<LiveSpeakersInner>>,
     session_wav_path: Arc<Mutex<Option<std::path::PathBuf>>>,
     last_status: Mutex<Option<serde_json::Value>>,
 }
@@ -776,6 +807,66 @@ impl SttState {
             Box::new(FluidLiveTextModel {
                 inner: self.live_text.clone(),
             }) as Box<dyn crate::speaker::live_text::LiveTextModel>
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn init_live_speakers_inner(
+        inner: Arc<Mutex<LiveSpeakersInner>>,
+        app: AppHandle,
+    ) -> Result<(), String> {
+        let mut guard = inner.lock().map_err(|e| e.to_string())?;
+        if guard.ready {
+            return Ok(());
+        }
+        if guard.audio.is_none() {
+            let audio = FluidAudio::new().map_err(|e| e.to_string())?;
+            if audio.is_intel_mac() {
+                return Err(not_supported());
+            }
+            guard.audio = Some(audio);
+        }
+        let audio = guard
+            .audio
+            .as_ref()
+            .ok_or("Speaker labels not initialized")?;
+        let progress_app = app.clone();
+        audio
+            .init_live_diarizer_with_progress(move |progress| {
+                let _ = progress_app.emit(
+                    "stt-model-progress",
+                    serde_json::json!({
+                        "fraction_completed": progress.fraction_completed,
+                        "phase": progress.phase,
+                        "model_name": progress.model_name,
+                    }),
+                );
+            })
+            .map_err(|e| e.to_string())?;
+        // The model's first inference after loading stalls for seconds. Pay
+        // that here, during setup, not in the first spoken turn.
+        audio
+            .live_diarizer_feed(&[0.0; 16_000])
+            .and_then(|_| audio.live_diarizer_reset())
+            .map_err(|e| e.to_string())?;
+        guard.ready = true;
+        Ok(())
+    }
+
+    /// The live diarizer for one capture session, if it is loaded.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn live_speaker_model(
+        &self,
+    ) -> Option<Box<dyn crate::speaker::live_speakers::LiveSpeakerModel>> {
+        let ready = self
+            .live_speakers
+            .lock()
+            .map(|guard| guard.ready)
+            .unwrap_or(false);
+        ready.then(|| {
+            Box::new(FluidLiveSpeakerModel {
+                inner: self.live_speakers.clone(),
+            }) as Box<dyn crate::speaker::live_speakers::LiveSpeakerModel>
         })
     }
 
@@ -1041,6 +1132,7 @@ impl SttState {
             "vad_ready": false,
             "diarization_ready": false,
             "live_text_ready": false,
+            "live_speakers_ready": false,
             "is_apple_silicon": is_apple_silicon,
             "is_intel": is_intel,
             "is_supported": is_apple_silicon && !is_intel,
@@ -1056,6 +1148,7 @@ impl SttState {
                 "vad_ready": false,
                 "diarization_ready": false,
                 "live_text_ready": false,
+                "live_speakers_ready": false,
                 "is_apple_silicon": false,
                 "is_intel": false,
                 "is_supported": false,
@@ -1086,6 +1179,10 @@ impl SttState {
                 Ok(guard) => guard,
                 Err(_) => return self.cached_status(),
             };
+            let live_speakers_guard = match self.live_speakers.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return self.cached_status(),
+            };
 
             let (is_apple_silicon, is_intel) = if let Some(audio) = guard.audio.as_ref() {
                 (audio.is_apple_silicon(), audio.is_intel_mac())
@@ -1102,6 +1199,7 @@ impl SttState {
                 "vad_ready": streaming_vad_guard.ready && mic_vad_guard.ready,
                 "diarization_ready": guard.diarization_ready,
                 "live_text_ready": live_text_guard.ready,
+                "live_speakers_ready": live_speakers_guard.ready,
                 "is_apple_silicon": is_apple_silicon,
                 "is_intel": is_intel,
                 "is_supported": is_apple_silicon && !is_intel,
@@ -1141,6 +1239,45 @@ impl crate::speaker::live_text::LiveTextModel for FluidLiveTextModel {
             .ok_or("Live text not initialized")?
             .streaming_asr_feed(samples_16k)
             .map_err(|e| e.to_string())
+    }
+}
+
+/// Adapter that lets the speaker-label worker drive the live diarizer.
+#[cfg(target_os = "macos")]
+struct FluidLiveSpeakerModel {
+    inner: Arc<Mutex<LiveSpeakersInner>>,
+}
+
+#[cfg(target_os = "macos")]
+impl FluidLiveSpeakerModel {
+    fn with_audio<T>(
+        &self,
+        call: impl FnOnce(&FluidAudio) -> Result<T, fluidaudio_rs::FluidAudioError>,
+    ) -> Result<T, String> {
+        let guard = self.inner.lock().map_err(|e| e.to_string())?;
+        let audio = guard
+            .audio
+            .as_ref()
+            .ok_or("Speaker labels not initialized")?;
+        call(audio).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl crate::speaker::live_speakers::LiveSpeakerModel for FluidLiveSpeakerModel {
+    fn reset(&mut self) -> Result<(), String> {
+        self.with_audio(|audio| audio.live_diarizer_reset())
+    }
+
+    fn feed(
+        &mut self,
+        samples_16k: &[f32],
+    ) -> Result<crate::speaker::live_speakers::SlotCounts, String> {
+        self.with_audio(|audio| audio.live_diarizer_feed(samples_16k))
+    }
+
+    fn end_turn(&mut self) -> Result<crate::speaker::live_speakers::SlotCounts, String> {
+        self.with_audio(|audio| audio.live_diarizer_end_turn())
     }
 }
 
@@ -1282,6 +1419,26 @@ pub async fn stt_init_live_text(state: State<'_, SttState>, app: AppHandle) -> R
 }
 
 #[tauri::command]
+pub async fn stt_init_live_speakers(
+    state: State<'_, SttState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (state, app);
+        return Err(not_supported());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let inner = state.live_speakers.clone();
+        tokio::task::spawn_blocking(move || SttState::init_live_speakers_inner(inner, app))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+}
+
+#[tauri::command]
 pub async fn stt_init_diarization(
     state: State<'_, SttState>,
     app: AppHandle,
@@ -1325,6 +1482,7 @@ pub async fn stt_diarize_file(
                 streaming_vad: Arc::default(),
                 mic_vad: Arc::default(),
                 live_text: Arc::default(),
+                live_speakers: Arc::default(),
                 session_wav_path: Arc::default(),
                 last_status: Mutex::default(),
             };

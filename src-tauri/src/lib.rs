@@ -110,6 +110,7 @@ pub fn run() {
             stt::stt_init,
             stt::stt_init_vad,
             stt::stt_init_live_text,
+            stt::stt_init_live_speakers,
             stt::stt_init_diarization,
             stt::stt_transcribe_speech,
             stt::stt_transcribe_utterance,

@@ -1,5 +1,6 @@
 // Assistant AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
 use crate::speaker::preprocessing::{apply_noise_gate, prepare_utterance, PreparedUtterance};
+use crate::speaker::live_text;
 use crate::speaker::session_recording;
 use crate::speaker::{AudioDevice, SpeakerInput};
 use anyhow::Result;
@@ -29,9 +30,10 @@ fn resampled_vad_frames(
     accumulator: &mut VadFrameAccumulator,
     samples: &[f32],
     sample_rate: u32,
-) -> Result<Vec<[f32; SILERO_CHUNK_SAMPLES]>, String> {
+) -> Result<(Vec<f32>, Vec<[f32; SILERO_CHUNK_SAMPLES]>), String> {
     let samples_16k = samples_for_local_asr(samples, sample_rate)?;
-    Ok(accumulator.push(&samples_16k))
+    let frames = accumulator.push(&samples_16k);
+    Ok((samples_16k, frames))
 }
 
 /// Hysteresis thresholds mirroring the microphone path (@ricky0123/vad-react
@@ -179,6 +181,7 @@ fn emit_speech_detected(
     compare_preprocessing: bool,
     start_time: f32,
     end_time: f32,
+    turn: u64,
 ) {
     let PreparedUtterance { raw, processed } =
         prepare_utterance(samples, noise_gate_threshold, compare_preprocessing);
@@ -238,6 +241,7 @@ fn emit_speech_detected(
             "utterance_id": utterance_id,
             "start_time": start_time,
             "end_time": end_time,
+            "turn": turn,
         }),
     );
 }
@@ -258,8 +262,15 @@ pub struct VadConfig {
     pub emit_chunks: bool,
     #[serde(default)]
     pub compare_preprocessing: bool,
+    /// Show provisional text for the turn in progress (macOS, local model).
+    #[serde(default = "default_live_text")]
+    pub live_text: bool,
     #[serde(default = "default_chunk_interval")]
     pub chunk_interval_ms: u64,
+}
+
+fn default_live_text() -> bool {
+    true
 }
 
 fn default_chunk_interval() -> u64 {
@@ -315,6 +326,7 @@ impl Default for VadConfig {
             max_recording_duration_secs: 180, // 3 minutes default
             emit_chunks: false,
             compare_preprocessing: false,
+            live_text: true,
             chunk_interval_ms: 1000,
         }
     }
@@ -599,6 +611,27 @@ pub async fn start_system_audio_capture(
         .lock()
         .map_err(|e| format!("Failed to set capturing state: {}", e))? = true;
 
+    #[cfg(target_os = "macos")]
+    let live_text = if vad_config.enabled && vad_config.live_text {
+        app.try_state::<crate::stt::SttState>()
+            .and_then(|stt_state| stt_state.live_text_model())
+            .map(|model| {
+                let emit_app = app.clone();
+                live_text::LiveTextHandle::spawn(model, move |event| match event {
+                    live_text::LiveTextEvent::Partial(partial) => {
+                        let _ = emit_app.emit("speech-partial", partial);
+                    }
+                    live_text::LiveTextEvent::Error(error) => {
+                        let _ = emit_app.emit("stt-error", format!("Live text stopped: {error}"));
+                    }
+                })
+            })
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "macos"))]
+    let live_text: Option<live_text::LiveTextHandle> = None;
+
     let task = tokio::spawn(async move {
         let session_path = if vad_config.enabled {
             run_vad_capture(
@@ -608,6 +641,7 @@ pub async fn start_system_audio_capture(
                 vad_config,
                 monitor_output_uid,
                 stop_flag,
+                live_text,
             )
             .await
         } else {
@@ -730,8 +764,10 @@ async fn run_vad_capture(
     // the old one.
     monitor_output_uid: Option<String>,
     stop_flag: Arc<AtomicBool>,
+    live_text: Option<live_text::LiveTextHandle>,
 ) -> Option<std::path::PathBuf> {
     let mut stream = stream;
+    let mut live_turns = live_text::LiveTextTurns::new(live_text);
     let mut last_device_check = Instant::now();
     // Input-level metering + no-audio detection (see the emit sites below).
     let mut last_level_emit = Instant::now();
@@ -901,9 +937,15 @@ async fn run_vad_capture(
             }
 
             #[cfg(target_os = "macos")]
-            let (resample_duration, vad_duration) = {
+            let (resample_duration, vad_duration, hop_16k) = {
                 let resample_started = Instant::now();
-                let frames = resampled_vad_frames(&mut vad_accumulator, &raw_mono, sr);
+                // The 16 kHz samples are kept for live text; VAD only needs
+                // the complete frames.
+                let (hop_16k, frames) =
+                    match resampled_vad_frames(&mut vad_accumulator, &raw_mono, sr) {
+                        Ok((samples_16k, frames)) => (samples_16k, Ok(frames)),
+                        Err(error) => (Vec::new(), Err(error)),
+                    };
                 let resample_duration = resample_started.elapsed();
                 let vad_started = Instant::now();
                 match frames {
@@ -932,8 +974,10 @@ async fn run_vad_capture(
                         pending_silero_prob = None;
                     }
                 }
-                (resample_duration, vad_started.elapsed())
+                (resample_duration, vad_started.elapsed(), hop_16k)
             };
+            #[cfg(not(target_os = "macos"))]
+            let hop_16k: Vec<f32> = Vec::new();
 
             let is_speech = match pending_silero_prob {
                 // Mic-style hysteresis on the raw probability.
@@ -947,6 +991,19 @@ async fn run_vad_capture(
                     in_speech = true;
                     speech_chunks = 0;
 
+                    // Live text starts from the same lead-in the utterance
+                    // gets, so its first word is not clipped.
+                    #[cfg(target_os = "macos")]
+                    let lead_in_16k = if hop_16k.is_empty() {
+                        Vec::new()
+                    } else {
+                        let lead_in: Vec<f32> = pre_speech.iter().copied().collect();
+                        samples_for_local_asr(&lead_in, sr).unwrap_or_default()
+                    };
+                    #[cfg(not(target_os = "macos"))]
+                    let lead_in_16k = Vec::new();
+                    live_turns.begin(lead_in_16k);
+
                     // Include pre-speech buffer for natural sound
                     speech_buffer.extend(pre_speech.drain(..));
 
@@ -959,6 +1016,7 @@ async fn run_vad_capture(
 
                 speech_chunks += 1;
                 speech_buffer.extend_from_slice(&raw_mono);
+                live_turns.audio(hop_16k);
                 silence_chunks = 0; // Reset silence counter on any speech
 
                 if config.emit_chunks {
@@ -989,7 +1047,9 @@ async fn run_vad_capture(
                         config.compare_preprocessing,
                         utterance_start_time,
                         utterance_end_time,
+                        live_turns.current(),
                     );
+                    live_turns.end();
                     speech_buffer.clear();
                     in_speech = false;
                     speech_chunks = 0;
@@ -1003,6 +1063,7 @@ async fn run_vad_capture(
 
                     // Continue collecting during silence (important for natural speech)
                     speech_buffer.extend_from_slice(&raw_mono);
+                    live_turns.audio(hop_16k);
 
                     // Check if silence duration exceeds threshold
                     if silence_chunks >= config.silence_chunks {
@@ -1026,6 +1087,7 @@ async fn run_vad_capture(
                                 config.compare_preprocessing,
                                 utterance_start_time,
                                 utterance_end_time,
+                                live_turns.current(),
                             );
                         } else {
                             let _ = app.emit(
@@ -1034,6 +1096,7 @@ async fn run_vad_capture(
                             );
                         }
 
+                        live_turns.end();
                         // Reset for next speech detection
                         speech_buffer.clear();
                         in_speech = false;
@@ -1090,8 +1153,12 @@ async fn run_vad_capture(
             config.compare_preprocessing,
             utterance_start_time,
             utterance_end_time,
+            live_turns.current(),
         );
     }
+
+    // Bounded: a worker that will not stop is left behind and muted.
+    live_turns.stop(Duration::from_millis(500));
 
     // Finalize the session WAV for diarization before its path is returned.
     #[cfg(target_os = "macos")]
@@ -1286,6 +1353,7 @@ async fn run_continuous_capture(
                 config.compare_preprocessing,
                 0.0,
                 0.0,
+                0,
             );
         }
         TakeAction::Drop => {
@@ -1641,6 +1709,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn live_text_defaults_on_and_survives_configs_saved_without_it() {
+        assert!(VadConfig::default().live_text);
+        let mut saved = serde_json::to_value(VadConfig::default()).unwrap();
+        saved.as_object_mut().unwrap().remove("live_text");
+        let parsed: VadConfig = serde_json::from_value(saved).unwrap();
+        assert!(parsed.live_text);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vad_resampling_also_returns_the_16k_samples() {
+        let mut accumulator = VadFrameAccumulator::default();
+        let (samples_16k, frames) =
+            resampled_vad_frames(&mut accumulator, &[0.0; 1024], 16_000).unwrap();
+        assert_eq!(samples_16k.len(), 1024);
+        assert!(frames.is_empty());
+    }
+
+    #[test]
     fn capture_drain_monitor_reports_stalls_without_flooding_logs() {
         let start = Instant::now();
         let mut monitor = CaptureDrainMonitor {
@@ -1844,7 +1931,7 @@ mod tests {
     fn system_vad_resampling_emits_exact_frames_at_supported_device_rates() {
         for sample_rate in [44_100, 48_000, 96_000] {
             let mut accumulator = VadFrameAccumulator::default();
-            let frames = resampled_vad_frames(
+            let (_, frames) = resampled_vad_frames(
                 &mut accumulator,
                 &vec![0.25; sample_rate as usize],
                 sample_rate,
@@ -2440,7 +2527,7 @@ async fn run_mic_dictation(
             let hop_chunk: Vec<f32> = pending.drain(..hop).collect();
             #[cfg(target_os = "macos")]
             match resampled_vad_frames(&mut vad_accumulator, &hop_chunk, sr) {
-                Ok(frames) => {
+                Ok((_, frames)) => {
                     for frame in frames {
                         let (probability, error) = consume_vad_probability(
                             get_silero_vad_probability_mic(&app, &frame),

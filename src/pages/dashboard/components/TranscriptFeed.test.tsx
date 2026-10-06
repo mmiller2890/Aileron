@@ -62,6 +62,17 @@ describe("TranscriptFeed live text", () => {
     expect(text).not.toContain("listening · say something");
   });
 
+  it("names the speaker on the provisional line when known", () => {
+    const text = renderFeed({
+      conversation,
+      live: true,
+      partialTranscription: "and the second one is",
+      partialSpeaker: "Speaker 2",
+    });
+    expect(text).toContain("speaker 2");
+    expect(text).not.toContain("hearing");
+  });
+
   it("hides provisional text when the feed is not live", () => {
     const text = renderFeed({ conversation, partialTranscription: "stale" });
     expect(text).not.toContain("stale");

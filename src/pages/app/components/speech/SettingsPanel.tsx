@@ -390,6 +390,26 @@ export const SettingsPanel = ({
                 <div className="flex items-start justify-between gap-3 rounded-md border border-border/50 p-2.5">
                   <div className="space-y-1">
                     <Label className="text-xs font-medium">
+                      Live speaker labels
+                    </Label>
+                    <p className="text-[10px] text-muted-foreground">
+                      Labels each line with who said it, up to four speakers. Applies to the next capture.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={vadConfig.live_speakers}
+                    onCheckedChange={(checked) =>
+                      onUpdateVadConfig({
+                        ...vadConfig,
+                        live_speakers: checked,
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-start justify-between gap-3 rounded-md border border-border/50 p-2.5">
+                  <div className="space-y-1">
+                    <Label className="text-xs font-medium">
                       Compare raw preprocessing
                     </Label>
                     <p className="text-[10px] text-muted-foreground">

@@ -11,10 +11,11 @@ type Props = {
   conversation: ChatConversation;
   conversationMode: boolean;
   setConversationMode: (mode: boolean) => void;
-  isLabelingSpeakers?: boolean;
   currentSpeaker?: string | null;
   /** Provisional text for the turn in progress. */
   partialTranscription?: string;
+  /** Who is speaking in the turn in progress, when known. */
+  partialSpeaker?: string | null;
 };
 
 export const ResultsSection = ({
@@ -24,11 +25,14 @@ export const ResultsSection = ({
   conversation,
   conversationMode,
   setConversationMode,
-  isLabelingSpeakers = false,
   currentSpeaker = null,
   partialTranscription = "",
+  partialSpeaker = null,
 }: Props) => {
   const provisional = partialTranscription.trim();
+  // The badge follows the text beside it: the provisional line's speaker
+  // while someone is talking, the last settled line's speaker otherwise.
+  const shownSpeaker = provisional ? partialSpeaker : currentSpeaker;
   const hasResponse = lastAIResponse || isAIProcessing;
   const hasHistory = conversation.messages.length > 2;
 
@@ -72,14 +76,9 @@ export const ResultsSection = ({
           {transcriptionText && (
             <p className="text-[11px]">
               <span className="font-mono text-meta">system</span>{" "}
-              {currentSpeaker && (
+              {shownSpeaker && (
                 <span className="font-mono text-[9px] text-muted-foreground mr-1">
-                  {currentSpeaker}
-                </span>
-              )}
-              {isLabelingSpeakers && !currentSpeaker && (
-                <span className="font-mono text-[9px] text-meta italic mr-1">
-                  labeling speakers…
+                  {shownSpeaker}
                 </span>
               )}
               <span
@@ -151,14 +150,9 @@ export const ResultsSection = ({
                 <span className="font-mono text-[9px] text-meta">
                   system
                 </span>
-                {currentSpeaker && (
+                {shownSpeaker && (
                   <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wide">
-                    {currentSpeaker}
-                  </span>
-                )}
-                {isLabelingSpeakers && !currentSpeaker && (
-                  <span className="text-[9px] text-muted-foreground italic">
-                    Labeling speakers…
+                    {shownSpeaker}
                   </span>
                 )}
               </div>

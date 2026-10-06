@@ -15,12 +15,15 @@ export const TranscriptFeed = ({
   live = false,
   liveAnswerDraft = null,
   partialTranscription = "",
+  partialSpeaker = null,
 }: {
   conversation: ChatConversation | null;
   live?: boolean;
   liveAnswerDraft?: string | null;
   /** Provisional text for the turn in progress; shown only while live. */
   partialTranscription?: string;
+  /** Who is speaking in the turn in progress, when known. */
+  partialSpeaker?: string | null;
 }) => {
   const provisional = live ? partialTranscription.trim() : "";
   // Live conversation state is newest-first; DB reads are chronological.
@@ -105,7 +108,7 @@ export const TranscriptFeed = ({
               </span>
               <div className="min-w-0 flex-1">
                 <div className="mb-1 font-mono text-[11px] text-muted-foreground">
-                  hearing
+                  {(partialSpeaker || "hearing").toLowerCase()}
                 </div>
                 <div className="text-sm italic leading-relaxed text-muted-foreground">
                   {provisional}

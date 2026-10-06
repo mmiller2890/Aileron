@@ -70,9 +70,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
     scrollAreaRef,
     isSttInitializing,
     sttModelProgress,
-    isLabelingSpeakers,
     currentSpeaker,
     partialTranscription,
+    partialSpeaker,
     audioLevel,
     captureSampleRate,
     noAudioDetected,
@@ -424,9 +424,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       conversation={conversation}
                       conversationMode={conversationMode}
                       setConversationMode={setConversationMode}
-                      isLabelingSpeakers={isLabelingSpeakers}
                       currentSpeaker={currentSpeaker}
                       partialTranscription={partialTranscription}
+                      partialSpeaker={partialSpeaker}
                     />
 
                     {/* Session Summary (post-capture) */}

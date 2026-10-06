@@ -110,6 +110,7 @@ const Dashboard = () => {
             live={isLive}
             liveAnswerDraft={liveAnswerDraft}
             partialTranscription={snapshot?.partialTranscription ?? ""}
+            partialSpeaker={snapshot?.partialSpeaker ?? null}
           />
           <button
             onClick={() => setRailCollapsed((v) => !v)}

@@ -8,6 +8,7 @@ export interface SttStatus {
   modelVersion: FluidAudioModel | null;
   vadReady: boolean;
   diarizationReady: boolean;
+  liveTextReady: boolean;
   isSupported: boolean;
   isInitializing: boolean;
   error: string | null;
@@ -60,6 +61,7 @@ export function useSttStatus() {
     modelVersion: null,
     vadReady: false,
     diarizationReady: false,
+    liveTextReady: false,
     isSupported: false,
     isInitializing: false,
     error: null,
@@ -72,6 +74,7 @@ export function useSttStatus() {
         model_version: FluidAudioModel | null;
         vad_ready: boolean;
         diarization_ready: boolean;
+        live_text_ready?: boolean;
         is_supported: boolean;
       }>("stt_get_status");
       setStatus((prev) => ({
@@ -80,6 +83,7 @@ export function useSttStatus() {
         modelVersion: result.model_version,
         vadReady: result.vad_ready,
         diarizationReady: result.diarization_ready,
+        liveTextReady: result.live_text_ready ?? false,
         isSupported: result.is_supported,
         error: null,
       }));
@@ -113,6 +117,23 @@ export function useSttStatus() {
       }));
       setProgress(null);
       return false;
+    }
+  }, [refresh]);
+
+  // Live text is optional: a failed download must not block capture, so this
+  // reports failure by return value and leaves `status.error` alone.
+  const initLiveText = useCallback(async () => {
+    setStatus((prev) => ({ ...prev, isInitializing: true }));
+    try {
+      await invoke("stt_init_live_text");
+      await refresh();
+      return true;
+    } catch (e) {
+      console.warn("Live text is unavailable:", e);
+      return false;
+    } finally {
+      setStatus((prev) => ({ ...prev, isInitializing: false }));
+      setProgress(null);
     }
   }, [refresh]);
 
@@ -157,5 +178,5 @@ export function useSttStatus() {
     };
   }, [refresh]);
 
-  return { ...status, progress, refresh, init };
+  return { ...status, progress, refresh, init, initLiveText };
 }

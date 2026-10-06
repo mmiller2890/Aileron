@@ -13,6 +13,12 @@ import {
 } from "@/lib/functions";
 import { useSttStatus } from "./useSttStatus";
 import {
+  applyPartial,
+  clearThroughTurn,
+  LiveTextPartial,
+  LiveTextState,
+} from "@/lib/live-text";
+import {
   generateConversationTitle,
   saveConversation,
   CONVERSATION_SAVE_DEBOUNCE_MS,
@@ -73,6 +79,14 @@ export function useSystemAudio() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isAIProcessing, setIsAIProcessing] = useState(false);
   const [lastTranscription, setLastTranscription] = useState<string>("");
+  // Provisional text for the turn in progress; display only. The batch
+  // transcription of the finished turn replaces it.
+  const [partialTranscription, setPartialTranscription] = useState("");
+  const liveTextRef = useRef<LiveTextState>(null);
+  const setLiveText = useCallback((next: LiveTextState) => {
+    liveTextRef.current = next;
+    setPartialTranscription(next?.text ?? "");
+  }, []);
   const [lastAIResponse, setLastAIResponse] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [setupRequired, setSetupRequired] = useState<boolean>(false);
@@ -146,6 +160,7 @@ export function useSystemAudio() {
     isInitializing: isSttInitializing,
     progress: sttModelProgress,
     init: initStt,
+    initLiveText,
   } = useSttStatus();
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeAiBatcherRef = useRef<ReturnType<
@@ -295,7 +310,9 @@ export function useSystemAudio() {
       scope.add(
         listen(
           "speech-discarded",
-          scope.guard(() => {}),
+          scope.guard(() => {
+            setLiveText(null);
+          }),
         ),
       ),
     ]).catch((err) => {
@@ -312,9 +329,28 @@ export function useSystemAudio() {
     void Promise.all([
       scope.add(
         listen(
+          "speech-partial",
+          scope.guard((event) => {
+            if (!capturingRef.current) return;
+            setLiveText(
+              applyPartial(
+                liveTextRef.current,
+                event.payload as LiveTextPartial,
+              ),
+            );
+          }),
+        ),
+      ),
+      scope.add(
+        listen(
           "speech-detected",
           scope.guard(async (event) => {
             const generation = captureGenerationRef.current;
+            // Set once this handler owns the turn, so its provisional text is
+            // cleared however the handler exits (final landed, backchannel,
+            // empty, error).
+            let settledTurn: number | null | undefined;
+            let ownsTurn = false;
             try {
               if (!capturingRef.current) return;
               if (!captureSessionWorkRef.current.isCurrent(generation)) {
@@ -329,6 +365,8 @@ export function useSystemAudio() {
               if (!recentSpeechEventsRef.current.claim(payload)) {
                 return;
               }
+              ownsTurn = true;
+              settledTurn = payload.turn;
 
               const utteranceRecord: {
                 messageId: string | null;
@@ -471,6 +509,9 @@ export function useSystemAudio() {
                 setError("Failed to process speech");
               }
             } finally {
+              if (ownsTurn) {
+                setLiveText(clearThroughTurn(liveTextRef.current, settledTurn));
+              }
               if (captureSessionWorkRef.current.isCurrent(generation)) {
                 setIsProcessing(false);
               }
@@ -1025,10 +1066,15 @@ export function useSystemAudio() {
         const status = await invoke<{
           asr_ready: boolean;
           model_version: "v3" | null;
+          live_text_ready?: boolean;
         }>("stt_get_status");
 
         if (!status.asr_ready || status.model_version !== requestedModel) {
           await initStt(requestedModel);
+        }
+        // Optional: a failed live-text load leaves capture working without it.
+        if (vadConfig.enabled && vadConfig.live_text && !status.live_text_ready) {
+          await initLiveText();
         }
 
         const statusAfter = await invoke<{
@@ -1111,6 +1157,7 @@ export function useSystemAudio() {
               createdAt: 0,
               updatedAt: 0,
             });
+            setLiveText(null);
             setCapturing(true);
             capturingRef.current = true;
             setSessionStartedAt(Date.now());
@@ -1154,6 +1201,7 @@ export function useSystemAudio() {
     asrReady,
     isSttInitializing,
     initStt,
+    initLiveText,
     onSetSelectedSttProvider,
   ]);
 
@@ -1222,6 +1270,7 @@ export function useSystemAudio() {
       generateSummaryRef.current();
 
       setCapturing(false);
+      setLiveText(null);
       setSessionStartedAt(null);
       setIsProcessing(false);
       setIsAIProcessing(false);
@@ -1529,6 +1578,7 @@ export function useSystemAudio() {
       setupRequired,
       isSttInitializing,
       lastAIResponse,
+      partialTranscription,
       conversation:
         conversation.messages.length > LIVE_SNAPSHOT_MAX_MESSAGES
           ? {
@@ -1557,6 +1607,7 @@ export function useSystemAudio() {
       setupRequired,
       isSttInitializing,
       lastAIResponse,
+      partialTranscription,
       conversation,
       sessionStartedAt,
       currentSpeaker,
@@ -1704,5 +1755,6 @@ export function useSystemAudio() {
     speakerSegments,
     isLabelingSpeakers,
     currentSpeaker,
+    partialTranscription,
   };
 }

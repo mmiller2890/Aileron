@@ -37,6 +37,7 @@ export interface LiveSessionSnapshot {
   setupRequired: boolean;
   isSttInitializing: boolean;
   lastAIResponse: string;
+  partialTranscription: string;
   conversation: ChatConversation;
   sessionStartedAt: number | null;
   currentSpeaker: string | null;

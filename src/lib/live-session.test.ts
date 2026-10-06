@@ -23,6 +23,7 @@ const snapshot = (
   setupRequired: false,
   isSttInitializing: false,
   lastAIResponse: "",
+  partialTranscription: "",
   conversation: emptyConversation,
   sessionStartedAt: null,
   currentSpeaker: null,

@@ -7,6 +7,8 @@ export interface SpeechEventPayload {
    * loop. Absent if the cache couldn't be written; callers must cope.
    */
   utterance_id?: string | null;
+  /** Turn number within the capture; matches `speech-partial` events. */
+  turn?: number;
 }
 
 const DEFAULT_TTL_MS = 60_000;

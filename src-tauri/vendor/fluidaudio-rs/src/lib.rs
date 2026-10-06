@@ -304,6 +304,42 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
+    // ========== Live diarization (speaker labels) ==========
+
+    /// Download and load the Sortformer streaming diarizer.
+    pub fn init_live_diarizer_with_progress<F>(&self, progress_callback: F) -> Result<(), FluidAudioError>
+    where
+        F: Fn(ModelProgress) + Send + Sync,
+    {
+        self.bridge
+            .initialize_live_diarizer_with_progress(progress_callback)
+            .map_err(FluidAudioError::from)
+    }
+
+    pub fn is_live_diarizer_available(&self) -> bool {
+        self.bridge.is_live_diarizer_available()
+    }
+
+    /// Start a new session: forgets every speaker.
+    pub fn live_diarizer_reset(&self) -> Result<(), FluidAudioError> {
+        self.bridge.live_diarizer_reset().map_err(FluidAudioError::from)
+    }
+
+    /// Feed 16 kHz mono samples of the current turn; returns how many 80 ms
+    /// frames each speaker slot has been active in the turn so far.
+    pub fn live_diarizer_feed(&self, samples_16k: &[f32]) -> Result<[u32; 4], FluidAudioError> {
+        self.bridge
+            .live_diarizer_feed(samples_16k)
+            .map_err(FluidAudioError::from)
+    }
+
+    /// Close the current turn and return its final per-slot frame counts.
+    pub fn live_diarizer_end_turn(&self) -> Result<[u32; 4], FluidAudioError> {
+        self.bridge
+            .live_diarizer_end_turn()
+            .map_err(FluidAudioError::from)
+    }
+
     // ========== Diarization Methods ==========
 
     /// Initialize the speaker diarization engine

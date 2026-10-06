@@ -44,6 +44,9 @@ class FluidAudioBridgeInternal {
     private var vadManager: VadManager?
     private var vadStreamState: VadStreamState?
     private var streamingAsrManager: StreamingEouAsrManager?
+    private var liveDiarizer: SortformerDiarizer?
+    private var liveTurnFinalized = [Int32](repeating: 0, count: 4)
+    private var liveTurnTentative = [Int32](repeating: 0, count: 4)
     private var diarizerManager: OfflineDiarizerManager?
     private var lastErrorMessage: String?
 
@@ -516,6 +519,101 @@ class FluidAudioBridgeInternal {
         semaphore.wait()
     }
 
+    // MARK: - Live diarization (speaker labels)
+
+    /// Silence fed at the end of a turn so its last frames finalize: one full
+    /// chunk (6 frames) plus the right context (7 frames) at 80 ms per frame.
+    private static let liveTurnFlushSamples = 16_640
+
+    func initializeLiveDiarizer(
+        progressCallback: FluidAudioProgressCallback? = nil,
+        progressContext: UnsafeMutableRawPointer? = nil
+    ) throws {
+        let semaphore = DispatchSemaphore(value: 0)
+        var initError: Error?
+
+        Task {
+            do {
+                let models = try await SortformerModels.loadFromHuggingFace(
+                    config: .default,
+                    progressHandler: Self.makeProgressHandler(progressCallback, progressContext)
+                )
+                let diarizer = SortformerDiarizer(config: .default)
+                diarizer.initialize(models: models)
+                self.liveDiarizer = diarizer
+            } catch {
+                initError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+        if let error = initError {
+            throw error
+        }
+    }
+
+    func isLiveDiarizerAvailable() -> Bool {
+        return liveDiarizer != nil
+    }
+
+    func resetLiveDiarizer() throws {
+        guard let diarizer = liveDiarizer else {
+            throw BridgeError.notInitialized
+        }
+        diarizer.reset()
+        liveTurnFinalized = [Int32](repeating: 0, count: 4)
+        liveTurnTentative = [Int32](repeating: 0, count: 4)
+    }
+
+    private func liveDiarizerIngest(_ samples: [Float]) throws {
+        guard let diarizer = liveDiarizer else {
+            throw BridgeError.notInitialized
+        }
+        guard !samples.isEmpty else { return }
+        let speakers = min(diarizer.numSpeakers ?? 4, 4)
+        let stride = diarizer.numSpeakers ?? 4
+        diarizer.addAudio(samples)
+        var iterations = 0
+        while iterations < 64, let update = try diarizer.process() {
+            iterations += 1
+            let chunk = update.chunkResult
+            if chunk.finalizedFrameCount == 0 && chunk.tentativeFrameCount == 0 {
+                break
+            }
+            for frame in 0..<chunk.finalizedFrameCount {
+                for speaker in 0..<speakers
+                where chunk.finalizedPredictions[frame * stride + speaker] >= 0.5 {
+                    liveTurnFinalized[speaker] += 1
+                }
+            }
+            var tentative = [Int32](repeating: 0, count: 4)
+            for frame in 0..<chunk.tentativeFrameCount {
+                for speaker in 0..<speakers
+                where chunk.tentativePredictions[frame * stride + speaker] >= 0.5 {
+                    tentative[speaker] += 1
+                }
+            }
+            liveTurnTentative = tentative
+        }
+    }
+
+    /// Feed a turn's audio; returns active-frame counts per slot so far.
+    func liveDiarizerFeed(_ samples: [Float]) throws -> [Int32] {
+        try liveDiarizerIngest(samples)
+        return zip(liveTurnFinalized, liveTurnTentative).map { $0 + $1 }
+    }
+
+    /// Close the turn: flush with silence, return its finalized counts, and
+    /// start counting afresh. Speaker identity carries over to the next turn.
+    func liveDiarizerEndTurn() throws -> [Int32] {
+        try liveDiarizerIngest([Float](repeating: 0, count: Self.liveTurnFlushSamples))
+        let counts = liveTurnFinalized
+        liveTurnFinalized = [Int32](repeating: 0, count: 4)
+        liveTurnTentative = [Int32](repeating: 0, count: 4)
+        return counts
+    }
+
     // MARK: - ITN (Inverse Text Normalization)
 
     func itnNormalize(_ input: String) -> String {
@@ -540,6 +638,9 @@ class FluidAudioBridgeInternal {
         vadManager = nil
         vadStreamState = nil
         streamingAsrManager = nil
+        liveDiarizer = nil
+        liveTurnFinalized = [Int32](repeating: 0, count: 4)
+        liveTurnTentative = [Int32](repeating: 0, count: 4)
         diarizerManager = nil
         lastErrorMessage = nil
     }
@@ -786,6 +887,95 @@ public func fluidaudio_streaming_asr_reset(_ ptr: UnsafeMutableRawPointer?) -> I
     let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
     do {
         try bridge.resetStreamingAsr()
+        return 0
+    } catch {
+        bridge.recordError(error)
+        return -1
+    }
+}
+
+// MARK: - Live diarization FFI
+
+@_cdecl("fluidaudio_initialize_live_diarizer")
+public func fluidaudio_initialize_live_diarizer(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ progressCallback: FluidAudioProgressCallback?,
+    _ progressContext: UnsafeMutableRawPointer?
+) -> Int32 {
+    guard let ptr = ptr else { return -1 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+    do {
+        try bridge.initializeLiveDiarizer(
+            progressCallback: progressCallback,
+            progressContext: progressContext
+        )
+        return 0
+    } catch {
+        bridge.recordError(error)
+        print("Live diarizer init error: \(error)")
+        return -1
+    }
+}
+
+@_cdecl("fluidaudio_is_live_diarizer_available")
+public func fluidaudio_is_live_diarizer_available(_ ptr: UnsafeMutableRawPointer?) -> Int32 {
+    guard let ptr = ptr else { return 0 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+    return bridge.isLiveDiarizerAvailable() ? 1 : 0
+}
+
+@_cdecl("fluidaudio_live_diarizer_reset")
+public func fluidaudio_live_diarizer_reset(_ ptr: UnsafeMutableRawPointer?) -> Int32 {
+    guard let ptr = ptr else { return -1 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+    do {
+        try bridge.resetLiveDiarizer()
+        return 0
+    } catch {
+        bridge.recordError(error)
+        return -1
+    }
+}
+
+private func writeLiveCounts(_ counts: [Int32], _ out: UnsafeMutablePointer<Int32>) {
+    for index in 0..<4 {
+        out[index] = index < counts.count ? counts[index] : 0
+    }
+}
+
+@_cdecl("fluidaudio_live_diarizer_feed")
+public func fluidaudio_live_diarizer_feed(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ samples: UnsafePointer<Float>?,
+    _ count: UInt32,
+    _ outCounts: UnsafeMutablePointer<Int32>?
+) -> Int32 {
+    guard let ptr = ptr, let outCounts = outCounts else { return -1 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+    let input: [Float]
+    if let samples = samples, count > 0 {
+        input = Array(UnsafeBufferPointer(start: samples, count: Int(count)))
+    } else {
+        input = []
+    }
+    do {
+        writeLiveCounts(try bridge.liveDiarizerFeed(input), outCounts)
+        return 0
+    } catch {
+        bridge.recordError(error)
+        return -1
+    }
+}
+
+@_cdecl("fluidaudio_live_diarizer_end_turn")
+public func fluidaudio_live_diarizer_end_turn(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ outCounts: UnsafeMutablePointer<Int32>?
+) -> Int32 {
+    guard let ptr = ptr, let outCounts = outCounts else { return -1 }
+    let bridge = Unmanaged<FluidAudioBridgeInternal>.fromOpaque(ptr).takeUnretainedValue()
+    do {
+        writeLiveCounts(try bridge.liveDiarizerEndTurn(), outCounts)
         return 0
     } catch {
         bridge.recordError(error)

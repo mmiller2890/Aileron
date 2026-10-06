@@ -141,6 +141,21 @@ extern "C" {
         out_text: *mut *mut i8,
     ) -> i32;
     fn fluidaudio_streaming_asr_reset(bridge: *mut std::ffi::c_void) -> i32;
+
+    fn fluidaudio_initialize_live_diarizer(
+        bridge: *mut std::ffi::c_void,
+        progress_callback: Option<ProgressCallback>,
+        progress_context: *mut std::ffi::c_void,
+    ) -> i32;
+    fn fluidaudio_is_live_diarizer_available(bridge: *mut std::ffi::c_void) -> i32;
+    fn fluidaudio_live_diarizer_reset(bridge: *mut std::ffi::c_void) -> i32;
+    fn fluidaudio_live_diarizer_feed(
+        bridge: *mut std::ffi::c_void,
+        samples: *const f32,
+        count: u32,
+        out_counts: *mut i32,
+    ) -> i32;
+    fn fluidaudio_live_diarizer_end_turn(bridge: *mut std::ffi::c_void, out_counts: *mut i32) -> i32;
     fn fluidaudio_resample_samples(
         samples: *const f32,
         count: u32,
@@ -520,6 +535,64 @@ impl FluidAudioBridge {
             Ok(())
         } else {
             Err(self.last_error_message("Failed to reset streaming ASR"))
+        }
+    }
+
+    pub fn initialize_live_diarizer_with_progress<F>(&self, progress_callback: F) -> Result<(), String>
+    where
+        F: Fn(ModelProgress) + Send + Sync,
+    {
+        let context = &progress_callback as *const F as *mut std::ffi::c_void;
+        let result = unsafe {
+            fluidaudio_initialize_live_diarizer(self.ptr, Some(progress_trampoline::<F>), context)
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(self.last_error_message("Failed to initialize live diarizer"))
+        }
+    }
+
+    pub fn is_live_diarizer_available(&self) -> bool {
+        unsafe { fluidaudio_is_live_diarizer_available(self.ptr) != 0 }
+    }
+
+    pub fn live_diarizer_reset(&self) -> Result<(), String> {
+        if unsafe { fluidaudio_live_diarizer_reset(self.ptr) } == 0 {
+            Ok(())
+        } else {
+            Err(self.last_error_message("Failed to reset live diarizer"))
+        }
+    }
+
+    fn live_counts(raw: [i32; 4]) -> [u32; 4] {
+        raw.map(|count| count.max(0) as u32)
+    }
+
+    pub fn live_diarizer_feed(&self, samples: &[f32]) -> Result<[u32; 4], String> {
+        let mut raw = [0_i32; 4];
+        let result = unsafe {
+            fluidaudio_live_diarizer_feed(
+                self.ptr,
+                samples.as_ptr(),
+                samples.len() as u32,
+                raw.as_mut_ptr(),
+            )
+        };
+        if result == 0 {
+            Ok(Self::live_counts(raw))
+        } else {
+            Err(self.last_error_message("Failed to process live diarizer audio"))
+        }
+    }
+
+    pub fn live_diarizer_end_turn(&self) -> Result<[u32; 4], String> {
+        let mut raw = [0_i32; 4];
+        let result = unsafe { fluidaudio_live_diarizer_end_turn(self.ptr, raw.as_mut_ptr()) };
+        if result == 0 {
+            Ok(Self::live_counts(raw))
+        } else {
+            Err(self.last_error_message("Failed to close live diarizer turn"))
         }
     }
 

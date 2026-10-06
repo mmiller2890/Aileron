@@ -1,6 +1,6 @@
 [package]
 name = "fluidaudio-rs"
-version = "0.17.4-assistant.2"
+version = "0.17.4-assistant.3"
 edition = "2021"
 description = "Assistant-owned Rust bindings for FluidAudio ASR, VAD, and speaker diarization on Apple platforms"
 license = "MIT"

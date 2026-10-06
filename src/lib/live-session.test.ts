@@ -28,7 +28,6 @@ const snapshot = (
   conversation: emptyConversation,
   sessionStartedAt: null,
   currentSpeaker: null,
-  isLabelingSpeakers: false,
   sessionSummary: "",
   isSummarizing: false,
   audioLevel: 0,

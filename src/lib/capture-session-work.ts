@@ -1,30 +1,3 @@
-export type SessionAudioStopAction = "none" | "diarize" | "discard";
-
-export function getSessionAudioStopAction(
-  provider: string,
-  sessionPath: string | null,
-  sttDrained: boolean,
-  options: { modeChange?: boolean } = {}
-): SessionAudioStopAction {
-  if (!sessionPath) return "none";
-  // A mode-change stop (VAD ↔ manual switch) hands back a WAV path whose
-  // diarization would span two capture sessions: always discard it.
-  if (options.modeChange) return "discard";
-  if (provider === "local-fluidaudio" && sttDrained) return "diarize";
-  return "discard";
-}
-
-export async function discardSessionAudio(
-  invokeCommand: (
-    command: string,
-    args: Record<string, unknown>
-  ) => Promise<unknown>,
-  sessionPath: string | null
-): Promise<void> {
-  if (!sessionPath) return;
-  await invokeCommand("stt_discard_session_audio", { path: sessionPath });
-}
-
 export function createCaptureSessionWork() {
   let currentGeneration = 0;
   const pending = new Map<number, Set<Promise<unknown>>>();

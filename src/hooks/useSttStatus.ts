@@ -7,7 +7,6 @@ export interface SttStatus {
   asrReady: boolean;
   modelVersion: FluidAudioModel | null;
   vadReady: boolean;
-  diarizationReady: boolean;
   liveTextReady: boolean;
   liveSpeakersReady: boolean;
   isSupported: boolean;
@@ -61,7 +60,6 @@ export function useSttStatus() {
     asrReady: false,
     modelVersion: null,
     vadReady: false,
-    diarizationReady: false,
     liveTextReady: false,
     liveSpeakersReady: false,
     isSupported: false,
@@ -75,7 +73,6 @@ export function useSttStatus() {
         asr_ready: boolean;
         model_version: FluidAudioModel | null;
         vad_ready: boolean;
-        diarization_ready: boolean;
         live_text_ready?: boolean;
         live_speakers_ready?: boolean;
         is_supported: boolean;
@@ -85,7 +82,6 @@ export function useSttStatus() {
         asrReady: result.asr_ready,
         modelVersion: result.model_version,
         vadReady: result.vad_ready,
-        diarizationReady: result.diarization_ready,
         liveTextReady: result.live_text_ready ?? false,
         liveSpeakersReady: result.live_speakers_ready ?? false,
         isSupported: result.is_supported,

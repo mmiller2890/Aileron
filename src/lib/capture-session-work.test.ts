@@ -1,9 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import {
-  createCaptureSessionWork,
-  discardSessionAudio,
-  getSessionAudioStopAction,
-} from "./capture-session-work";
+import { describe, expect, it } from "vitest";
+import { createCaptureSessionWork } from "./capture-session-work";
 
 describe("createCaptureSessionWork", () => {
   it("invalidates results from a stopped or superseded session", () => {
@@ -58,65 +54,5 @@ describe("createCaptureSessionWork", () => {
 
     expect(sessions.isCurrent(current)).toBe(true);
     await expect(sessions.drain(current, 10)).resolves.toBe(true);
-  });
-});
-
-describe("getSessionAudioStopAction", () => {
-  it("discards remote-STT session audio", () => {
-    expect(
-      getSessionAudioStopAction("deepgram", "/tmp/session.wav", true)
-    ).toBe("discard");
-  });
-
-  it("discards local session audio when STT does not drain", () => {
-    expect(
-      getSessionAudioStopAction(
-        "local-fluidaudio",
-        "/tmp/session.wav",
-        false
-      )
-    ).toBe("discard");
-  });
-
-  it("diarizes only drained local Fluidaudio session audio", () => {
-    expect(
-      getSessionAudioStopAction(
-        "local-fluidaudio",
-        "/tmp/session.wav",
-        true
-      )
-    ).toBe("diarize");
-  });
-
-  it("does nothing when capture produced no session audio", () => {
-    expect(getSessionAudioStopAction("deepgram", null, true)).toBe("none");
-  });
-
-  it("discards the WAV path a mode-change stop returns", () => {
-    expect(
-      getSessionAudioStopAction("local-fluidaudio", "/tmp/session.wav", true, {
-        modeChange: true,
-      })
-    ).toBe("discard");
-  });
-});
-
-describe("discardSessionAudio", () => {
-  it("discards a returned session WAV path", async () => {
-    const invokeCommand = vi.fn().mockResolvedValue(undefined);
-
-    await discardSessionAudio(invokeCommand, "/tmp/session.wav");
-
-    expect(invokeCommand).toHaveBeenCalledWith("stt_discard_session_audio", {
-      path: "/tmp/session.wav",
-    });
-  });
-
-  it("does nothing without a session WAV", async () => {
-    const invokeCommand = vi.fn().mockResolvedValue(undefined);
-
-    await discardSessionAudio(invokeCommand, null);
-
-    expect(invokeCommand).not.toHaveBeenCalled();
   });
 });

@@ -42,7 +42,6 @@ export interface LiveSessionSnapshot {
   conversation: ChatConversation;
   sessionStartedAt: number | null;
   currentSpeaker: string | null;
-  isLabelingSpeakers: boolean;
   sessionSummary: string;
   isSummarizing: boolean;
   audioLevel: number;

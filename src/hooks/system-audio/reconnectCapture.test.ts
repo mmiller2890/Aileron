@@ -5,7 +5,7 @@ import {
 } from "./reconnectCapture";
 
 describe("reconnectCapture", () => {
-  it("ends a FluidAudio session on device change to preserve diarization timing", () => {
+  it("ends a FluidAudio session on device change instead of reconnecting", () => {
     expect(requiresSessionBoundaryOnDeviceChange("local-fluidaudio")).toBe(true);
     expect(requiresSessionBoundaryOnDeviceChange("local-whisper")).toBe(false);
     expect(requiresSessionBoundaryOnDeviceChange("groq")).toBe(false);

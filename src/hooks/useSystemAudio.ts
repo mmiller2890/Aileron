@@ -37,7 +37,6 @@ import {
   createTokenBatcher,
 } from "@/lib";
 import { ChatConversation, Message } from "@/types/completion";
-import { useSpeakerLabels } from "./system-audio/useSpeakerLabels";
 import { useVadConfig, type VadConfig } from "./system-audio/useVadConfig";
 import { useLiveStatePublisher } from "./system-audio/useLiveStatePublisher";
 import {
@@ -60,11 +59,7 @@ import {
   RecentSpeechEventFingerprints,
   type SpeechEventPayload,
 } from "@/lib/speech-event-dedupe";
-import {
-  createCaptureSessionWork,
-  discardSessionAudio,
-  getSessionAudioStopAction,
-} from "@/lib/capture-session-work";
+import { createCaptureSessionWork } from "@/lib/capture-session-work";
 import { completedStreamValue } from "@/lib/completed-stream";
 import { normalizeFluidAudioModel } from "@/lib/fluidaudio-model";
 
@@ -142,16 +137,8 @@ export function useSystemAudio() {
     updatedAt: 0,
   });
 
-  const {
-    speakerSegments,
-    setSpeakerSegments,
-    isLabelingSpeakers,
-    setIsLabelingSpeakers,
-    currentSpeaker,
-    setCurrentSpeaker,
-    getSpeakerForUtterance,
-    labelMessagesWithSpeakers,
-  } = useSpeakerLabels(setConversation);
+  // Speaker shown beside the last settled line; set by the live label path.
+  const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
 
   const {
     selectedSttProvider,
@@ -213,9 +200,6 @@ export function useSystemAudio() {
   const isSavingRef = useRef<boolean>(false);
   const pendingSaveConversationRef = useRef<ChatConversation | null>(null);
   const inFlightSaveRef = useRef<Promise<unknown> | null>(null);
-  const utteranceRecordsRef = useRef<
-    Array<{ messageId: string | null; start: number; end: number }>
-  >([]);
   const recentSpeechEventsRef = useRef(new RecentSpeechEventFingerprints());
   const captureSessionWorkRef = useRef(createCaptureSessionWork());
   const captureGenerationRef = useRef(0);
@@ -227,7 +211,6 @@ export function useSystemAudio() {
   const allSttProvidersRef = useRef(allSttProviders);
   const conversationMessagesRef = useRef(conversation.messages);
   const vadConfigRef = useRef(vadConfig);
-  const labelMessagesWithSpeakersRef = useRef(labelMessagesWithSpeakers);
   // `processWithAI` is invoked from the `speech-detected` listener, registered
   // once with empty/stable deps. It captures its closure on the first render —
   // when `selectedAIProvider` is still the initial empty value (the context
@@ -249,7 +232,6 @@ export function useSystemAudio() {
   allSttProvidersRef.current = allSttProviders;
   conversationMessagesRef.current = conversation.messages;
   vadConfigRef.current = vadConfig;
-  labelMessagesWithSpeakersRef.current = labelMessagesWithSpeakers;
 
   useEffect(() => {
     const scope = createAsyncListenerScope();
@@ -414,22 +396,6 @@ export function useSystemAudio() {
               ownsTurn = true;
               settledTurn = payload.turn;
 
-              const utteranceRecord: {
-                messageId: string | null;
-                start: number;
-                end: number;
-              } | null =
-                payload.start_time !== 0 || payload.end_time !== 0
-                  ? {
-                      messageId: null,
-                      start: payload.start_time,
-                      end: payload.end_time,
-                    }
-                  : null;
-              if (utteranceRecord) {
-                utteranceRecordsRef.current.push(utteranceRecord);
-              }
-
               // Deferred: the local provider transcribes by handle (below) and
               // never needs the decoded WAV, and this loop runs over every byte
               // of the utterance on the UI thread.
@@ -524,9 +490,6 @@ export function useSystemAudio() {
                       }));
                       setCurrentSpeaker(speaker);
                     }
-                  }
-                  if (utteranceRecord) {
-                    utteranceRecord.messageId = messageId;
                   }
                   lastUtteranceRef.current = {
                     text: transcription,
@@ -645,19 +608,7 @@ export function useSystemAudio() {
       // first — otherwise the start below is rejected with "Capture already
       // running" and the VAD session keeps picking up audio.
       if (capturingRef.current) {
-        const stoppedPath = await invoke<string | null>(
-          "stop_system_audio_capture",
-        );
-        const action = getSessionAudioStopAction(
-          selectedSttProviderRef.current.provider,
-          stoppedPath,
-          false,
-          { modeChange: true },
-        );
-        await discardSessionAudio(
-          invoke,
-          action === "discard" ? stoppedPath : null,
-        );
+        await invoke("stop_system_audio_capture");
       }
 
       const deviceId =
@@ -820,17 +771,6 @@ export function useSystemAudio() {
         );
         if (responseToPersist && isCurrent()) {
           const timestamp = Date.now();
-          const latestUtterance =
-            [...utteranceRecordsRef.current]
-              .reverse()
-              .find((record) => record.messageId !== null) ?? null;
-          const speaker = latestUtterance
-            ? getSpeakerForUtterance(
-                latestUtterance.start,
-                latestUtterance.end,
-                speakerSegments,
-              )
-            : null;
           setConversation((prev) => {
             const assistantMessage = {
               id: generateMessageId("assistant", timestamp + 1),
@@ -851,7 +791,6 @@ export function useSystemAudio() {
                     role: "user" as const,
                     content: transcription,
                     timestamp,
-                    speaker: speaker || undefined,
                   },
                   assistantMessage,
                   ...prev.messages,
@@ -863,9 +802,6 @@ export function useSystemAudio() {
               title: prev.title || generateConversationTitle(transcription),
             };
           });
-          if (speaker) {
-            setCurrentSpeaker(speaker);
-          }
         }
       } catch {
         if (isCurrent() && !signal.aborted) {
@@ -882,8 +818,6 @@ export function useSystemAudio() {
       selectedAIProvider,
       allAiProviders,
       conversation.messages,
-      speakerSegments,
-      getSpeakerForUtterance,
     ],
   );
 
@@ -915,7 +849,7 @@ export function useSystemAudio() {
 
   // Generate a concise, speaker-attributed summary of the just-ended session
   // (key questions, main points, action items). This is the payoff for the
-  // transcript + diarization work — most of a meeting's value lands after it
+  // transcript + speaker-label work — most of a meeting's value lands after it
   // ends. Best-effort: skipped silently if there's nothing to summarize or no
   // AI provider is configured.
   const generateSessionSummary = useCallback(async () => {
@@ -1045,8 +979,8 @@ export function useSystemAudio() {
 
   // The Rust VAD capture emits `audio-device-changed` when the default output
   // device switches mid-session (e.g. AirPods plugged in) — the tap would
-  // otherwise keep capturing silence. FluidAudio ends the session so its WAV
-  // and utterance timestamps remain aligned; other providers can reconnect.
+  // otherwise keep capturing silence. FluidAudio ends the session at that
+  // boundary; other providers reconnect in place.
   // Registered once; reads everything through refs.
   useEffect(() => {
     const scope = createAsyncListenerScope();
@@ -1076,18 +1010,7 @@ export function useSystemAudio() {
                 },
                 stop: async () => {
                   setError("Audio device changed — reconnecting…");
-                  const stoppedPath = await invoke<string | null>(
-                    "stop_system_audio_capture",
-                  );
-                  const action = getSessionAudioStopAction(
-                    selectedSttProviderRef.current.provider,
-                    stoppedPath,
-                    false,
-                    { modeChange: true },
-                  );
-                  if (action === "discard") {
-                    await discardSessionAudio(invoke, stoppedPath);
-                  }
+                  await invoke("stop_system_audio_capture");
                 },
                 start: async () => {
                   const providerConfig = allSttProvidersRef.current.find(
@@ -1155,7 +1078,6 @@ export function useSystemAudio() {
           asr_ready: boolean;
           model_version: "v3" | null;
           vad_ready: boolean;
-          diarization_ready: boolean;
         }>("stt_get_status");
         if (
           !statusAfter.asr_ready ||
@@ -1178,14 +1100,6 @@ export function useSystemAudio() {
               "Silero VAD init failed, falling back to threshold VAD:",
               err,
             );
-          }
-        }
-
-        if (!statusAfter.diarization_ready) {
-          try {
-            await invoke("stt_init_diarization", { threshold: 0.6 });
-          } catch (err) {
-            console.warn("Diarization init failed:", err);
           }
         }
       }
@@ -1261,9 +1175,6 @@ export function useSystemAudio() {
             summarySeqRef.current++;
             setSessionSummary("");
             setIsSummarizing(false);
-            utteranceRecordsRef.current = [];
-            setSpeakerSegments([]);
-            setIsLabelingSpeakers(false);
             setCurrentSpeaker(null);
             if (isContinuous) {
               setIsRecordingInContinuousMode(false);
@@ -1308,54 +1219,13 @@ export function useSystemAudio() {
         abortControllerRef.current = null;
       }
 
-      const sessionPath = await invoke<string | null>(
-        "stop_system_audio_capture",
-      );
+      await invoke("stop_system_audio_capture");
 
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      const sttDrained = await captureSessionWorkRef.current.drain(
-        generation,
-        10_000,
-      );
+      await captureSessionWorkRef.current.drain(generation, 10_000);
       captureSessionWorkRef.current.invalidate(generation);
       capturingRef.current = false;
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-      const sessionAudioStopAction = getSessionAudioStopAction(
-        selectedSttProviderRef.current.provider,
-        sessionPath,
-        sttDrained,
-      );
-      if (sessionPath) {
-        if (sessionAudioStopAction === "diarize") {
-          try {
-            setIsLabelingSpeakers(true);
-            const segments = await invoke<
-              Array<{
-                speaker_id: string;
-                start_time: number;
-                end_time: number;
-                quality_score: number;
-              }>
-            >("stt_diarize_file", { path: sessionPath });
-            setSpeakerSegments(segments);
-            labelMessagesWithSpeakersRef.current(
-              segments,
-              utteranceRecordsRef.current,
-            );
-          } catch (err) {
-            console.warn("Diarization failed:", err);
-          } finally {
-            setIsLabelingSpeakers(false);
-          }
-        } else if (sessionAudioStopAction === "discard") {
-          try {
-            await discardSessionAudio(invoke, sessionPath);
-          } catch (err) {
-            console.warn("Failed to discard session audio:", err);
-          }
-        }
-      }
 
       // Summarize the just-ended session (fire-and-forget). Kept out of the
       // reset below so the summary survives and shows in the popover.
@@ -1475,13 +1345,7 @@ export function useSystemAudio() {
         abortControllerRef.current.abort();
       }
       summaryAbortRef.current?.abort();
-      invoke<string | null>("stop_system_audio_capture")
-        .then((sessionPath) => {
-          // Nothing can diarize after unmount, so the returned session WAV is
-          // discarded instead of orphaning it for the startup sweep.
-          return discardSessionAudio(invoke, sessionPath);
-        })
-        .catch(() => {});
+      invoke("stop_system_audio_capture").catch(() => {});
     };
   }, []);
 
@@ -1623,19 +1487,7 @@ export function useSystemAudio() {
       try {
         // Stop whatever session is running (no-op if manual mode was armed
         // with no active task).
-        const stoppedPath = await invoke<string | null>(
-          "stop_system_audio_capture",
-        );
-        const action = getSessionAudioStopAction(
-          selectedSttProviderRef.current.provider,
-          stoppedPath,
-          false,
-          { modeChange: true },
-        );
-        await discardSessionAudio(
-          invoke,
-          action === "discard" ? stoppedPath : null,
-        );
+        await invoke("stop_system_audio_capture");
 
         if (vadConfig.enabled) {
           // Switching to VAD: start listening immediately.
@@ -1688,7 +1540,6 @@ export function useSystemAudio() {
           : conversation,
       sessionStartedAt,
       currentSpeaker,
-      isLabelingSpeakers,
       sessionSummary,
       isSummarizing,
       audioLevel,
@@ -1709,7 +1560,6 @@ export function useSystemAudio() {
       conversation,
       sessionStartedAt,
       currentSpeaker,
-      isLabelingSpeakers,
       sessionSummary,
       isSummarizing,
       audioLevel,
@@ -1850,8 +1700,6 @@ export function useSystemAudio() {
     startContinuousRecording,
     ignoreContinuousRecording,
     scrollAreaRef,
-    speakerSegments,
-    isLabelingSpeakers,
     currentSpeaker,
     partialTranscription,
     partialSpeaker,

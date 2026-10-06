@@ -365,8 +365,11 @@ export function useSystemAudio() {
             );
             setLiveSpeakers(state);
             if (label) {
+              // `updatedAt` moves so the autosave picks the label up: it does
+              // not watch individual message fields.
               setConversation((prev) => ({
                 ...prev,
+                updatedAt: Date.now(),
                 messages: prev.messages.map((message) =>
                   message.id === label.messageId
                     ? { ...message, speaker: label.speaker }

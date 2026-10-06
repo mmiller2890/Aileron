@@ -17,5 +17,12 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/chat-history.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 3: Persist the speaker label of captured lines
+        Migration {
+            version: 3,
+            description: "add_message_speaker",
+            sql: include_str!("migrations/chat-history-speaker.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

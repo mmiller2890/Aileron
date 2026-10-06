@@ -22,6 +22,8 @@ export interface DbMessage {
   content: string;
   timestamp: number;
   attached_files: string | null; // JSON string
+  /** Absent on rows read before the speaker migration ran. */
+  speaker?: string | null;
 }
 
 /** Safely parse a JSON column, returning `fallback` on null/invalid input. */
@@ -65,6 +67,7 @@ export function rowsToConversations(
         content: msg.content,
         timestamp: msg.timestamp,
         attachedFiles: safeJsonParse(msg.attached_files, undefined),
+        ...(msg.speaker ? { speaker: msg.speaker } : {}),
       })) || [],
   }));
 }

@@ -22,6 +22,7 @@ type NativeConversationPayload = {
     content: string;
     timestamp: number;
     attachedFiles: unknown;
+    speaker: string | null;
   }[];
 };
 
@@ -41,6 +42,7 @@ function toNativePayload(
         content: message.content,
         timestamp: message.timestamp,
         attachedFiles: message.attachedFiles ? message.attachedFiles : null,
+        speaker: message.speaker || null,
       })),
   };
 }
@@ -235,6 +237,7 @@ export async function getConversationById(
         content: msg.content,
         timestamp: msg.timestamp,
         attachedFiles: safeJsonParse(msg.attached_files, undefined),
+        ...(msg.speaker ? { speaker: msg.speaker } : {}),
       })),
     };
   } catch (error) {

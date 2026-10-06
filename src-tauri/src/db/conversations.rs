@@ -42,6 +42,8 @@ pub(crate) struct MessageInput {
     content: String,
     timestamp: i64,
     attached_files: Option<serde_json::Value>,
+    #[serde(default)]
+    speaker: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -160,7 +162,7 @@ pub(crate) async fn apply_conversation(
                 ConversationError::Invalid(format!("attached files: {error}"))
             })?;
         sqlx::query(
-            "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files, speaker) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&message.id)
         .bind(&conversation.id)
@@ -168,6 +170,7 @@ pub(crate) async fn apply_conversation(
         .bind(&message.content)
         .bind(message.timestamp)
         .bind(attached_files)
+        .bind(message.speaker.as_deref().filter(|speaker| !speaker.is_empty()))
         .execute(&mut *tx)
         .await
         .map_err(ConversationError::Database)?;
@@ -225,6 +228,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("migrations/chat-history-speaker.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
         (pool, path)
     }
 
@@ -241,6 +248,7 @@ mod tests {
             content: content.to_string(),
             timestamp,
             attached_files: None,
+            speaker: None,
         }
     }
 
@@ -373,6 +381,7 @@ mod tests {
                 content: "hello".to_string(),
                 timestamp: 5,
                 attached_files: Some(attached.clone()),
+                speaker: Some("Speaker 2".to_string()),
             }],
             created_at: 1,
             updated_at: 2,
@@ -394,15 +403,16 @@ mod tests {
         assert_eq!(created_at, 1);
         assert_eq!(updated_at, 5);
 
-        let (attached_files, timestamp): (Option<String>, i64) =
+        let (attached_files, timestamp, speaker): (Option<String>, i64, Option<String>) =
             sqlx::query_as(
-                "SELECT attached_files, timestamp FROM messages WHERE id = ?",
+                "SELECT attached_files, timestamp, speaker FROM messages WHERE id = ?",
             )
             .bind("m1")
             .fetch_one(&pool)
             .await
             .unwrap();
         assert_eq!(timestamp, 5);
+        assert_eq!(speaker.as_deref(), Some("Speaker 2"));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&attached_files.unwrap())
                 .unwrap(),

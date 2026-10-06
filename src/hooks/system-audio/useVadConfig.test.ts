@@ -8,6 +8,7 @@ describe("VAD defaults and durations", () => {
   it("keeps the tuned reset values canonical", () => {
     expect(DEFAULT_VAD_CONFIG.silence_chunks).toBe(45);
     expect(DEFAULT_VAD_CONFIG.live_text).toBe(true);
+    expect(DEFAULT_VAD_CONFIG.live_speakers).toBe(true);
     expect(DEFAULT_VAD_CONFIG.pre_speech_chunks).toBe(30);
     expect(DEFAULT_VAD_CONFIG.compare_preprocessing).toBe(false);
   });

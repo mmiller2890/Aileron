@@ -19,6 +19,14 @@ import {
   LiveTextState,
 } from "@/lib/live-text";
 import {
+  applySpeakerEvent,
+  clearProvisionalThroughTurn,
+  emptyLiveSpeakerState,
+  LiveSpeakerState,
+  registerTurnMessage,
+  SpeakerEvent,
+} from "@/lib/live-speakers";
+import {
   generateConversationTitle,
   saveConversation,
   CONVERSATION_SAVE_DEBOUNCE_MS,
@@ -86,6 +94,14 @@ export function useSystemAudio() {
   const setLiveText = useCallback((next: LiveTextState) => {
     liveTextRef.current = next;
     setPartialTranscription(next?.text ?? "");
+  }, []);
+  // Turn → speaker bookkeeping for the capture; `partialSpeaker` is who is
+  // speaking in the turn in progress.
+  const [partialSpeaker, setPartialSpeaker] = useState<string | null>(null);
+  const liveSpeakersRef = useRef<LiveSpeakerState>(emptyLiveSpeakerState);
+  const setLiveSpeakers = useCallback((next: LiveSpeakerState) => {
+    liveSpeakersRef.current = next;
+    setPartialSpeaker(next.provisional?.speaker ?? null);
   }, []);
   const [lastAIResponse, setLastAIResponse] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -161,6 +177,7 @@ export function useSystemAudio() {
     progress: sttModelProgress,
     init: initStt,
     initLiveText,
+    initLiveSpeakers,
   } = useSttStatus();
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeAiBatcherRef = useRef<ReturnType<
@@ -312,6 +329,9 @@ export function useSystemAudio() {
           "speech-discarded",
           scope.guard(() => {
             setLiveText(null);
+            setLiveSpeakers(
+              clearProvisionalThroughTurn(liveSpeakersRef.current, null),
+            );
           }),
         ),
       ),
@@ -327,6 +347,32 @@ export function useSystemAudio() {
   useEffect(() => {
     const scope = createAsyncListenerScope();
     void Promise.all([
+      scope.add(
+        listen(
+          "speech-speaker",
+          scope.guard((event) => {
+            // Allowed while stopping: the last turn's label is emitted as
+            // the worker drains.
+            if (!capturingRef.current && !captureStoppingRef.current) return;
+            const { state, label } = applySpeakerEvent(
+              liveSpeakersRef.current,
+              event.payload as SpeakerEvent,
+            );
+            setLiveSpeakers(state);
+            if (label) {
+              setConversation((prev) => ({
+                ...prev,
+                messages: prev.messages.map((message) =>
+                  message.id === label.messageId
+                    ? { ...message, speaker: label.speaker }
+                    : message,
+                ),
+              }));
+              setCurrentSpeaker(label.speaker);
+            }
+          }),
+        ),
+      ),
       scope.add(
         listen(
           "speech-partial",
@@ -457,6 +503,28 @@ export function useSystemAudio() {
                   // questions earn an automatic answer. The rest can be
                   // answered on demand via the answer-last shortcut.
                   const messageId = appendUtteranceMessage(transcription);
+                  if (payload.turn !== undefined) {
+                    // The label for this turn may already have arrived; if
+                    // not, the speech-speaker listener patches the message.
+                    const registered = registerTurnMessage(
+                      liveSpeakersRef.current,
+                      payload.turn,
+                      messageId,
+                    );
+                    setLiveSpeakers(registered.state);
+                    const speaker = registered.speaker;
+                    if (speaker) {
+                      setConversation((prev) => ({
+                        ...prev,
+                        messages: prev.messages.map((message) =>
+                          message.id === messageId
+                            ? { ...message, speaker }
+                            : message,
+                        ),
+                      }));
+                      setCurrentSpeaker(speaker);
+                    }
+                  }
                   if (utteranceRecord) {
                     utteranceRecord.messageId = messageId;
                   }
@@ -511,6 +579,12 @@ export function useSystemAudio() {
             } finally {
               if (ownsTurn) {
                 setLiveText(clearThroughTurn(liveTextRef.current, settledTurn));
+                setLiveSpeakers(
+                  clearProvisionalThroughTurn(
+                    liveSpeakersRef.current,
+                    settledTurn,
+                  ),
+                );
               }
               if (captureSessionWorkRef.current.isCurrent(generation)) {
                 setIsProcessing(false);
@@ -1123,6 +1197,22 @@ export function useSystemAudio() {
         return;
       }
 
+      // Speaker labels do not depend on which model transcribes, so this runs
+      // for every provider. Optional: a failed load leaves capture working
+      // without labels.
+      if (isSupported && vadConfig.enabled && vadConfig.live_speakers) {
+        try {
+          const speakerStatus = await invoke<{
+            live_speakers_ready?: boolean;
+          }>("stt_get_status");
+          if (!speakerStatus.live_speakers_ready) {
+            await initLiveSpeakers();
+          }
+        } catch (err) {
+          console.warn("Speaker labels are unavailable:", err);
+        }
+      }
+
       const isContinuous = !vadConfig.enabled;
       const deviceId =
         selectedAudioDevices.output.id === "default"
@@ -1158,6 +1248,7 @@ export function useSystemAudio() {
               updatedAt: 0,
             });
             setLiveText(null);
+            setLiveSpeakers(emptyLiveSpeakerState);
             setCapturing(true);
             capturingRef.current = true;
             setSessionStartedAt(Date.now());
@@ -1202,6 +1293,7 @@ export function useSystemAudio() {
     isSttInitializing,
     initStt,
     initLiveText,
+    initLiveSpeakers,
     onSetSelectedSttProvider,
   ]);
 
@@ -1271,6 +1363,10 @@ export function useSystemAudio() {
 
       setCapturing(false);
       setLiveText(null);
+      // Keep the turn bookkeeping: a label for the last turn can still land.
+      setLiveSpeakers(
+        clearProvisionalThroughTurn(liveSpeakersRef.current, null),
+      );
       setSessionStartedAt(null);
       setIsProcessing(false);
       setIsAIProcessing(false);
@@ -1579,6 +1675,7 @@ export function useSystemAudio() {
       isSttInitializing,
       lastAIResponse,
       partialTranscription,
+      partialSpeaker,
       conversation:
         conversation.messages.length > LIVE_SNAPSHOT_MAX_MESSAGES
           ? {
@@ -1608,6 +1705,7 @@ export function useSystemAudio() {
       isSttInitializing,
       lastAIResponse,
       partialTranscription,
+      partialSpeaker,
       conversation,
       sessionStartedAt,
       currentSpeaker,
@@ -1756,5 +1854,6 @@ export function useSystemAudio() {
     isLabelingSpeakers,
     currentSpeaker,
     partialTranscription,
+    partialSpeaker,
   };
 }

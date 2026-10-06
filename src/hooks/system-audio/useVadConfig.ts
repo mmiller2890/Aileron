@@ -17,6 +17,8 @@ export interface VadConfig {
   compare_preprocessing: boolean;
   /** Show provisional text for the turn in progress (macOS, local model). */
   live_text: boolean;
+  /** Label each turn with its speaker as it lands (macOS). */
+  live_speakers: boolean;
 }
 
 export const DEFAULT_VAD_CONFIG: VadConfig = {
@@ -37,6 +39,7 @@ export const DEFAULT_VAD_CONFIG: VadConfig = {
   chunk_interval_ms: 1000,
   compare_preprocessing: false,
   live_text: true,
+  live_speakers: true,
 };
 
 export function vadDurationSeconds(

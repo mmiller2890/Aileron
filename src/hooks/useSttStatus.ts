@@ -9,6 +9,7 @@ export interface SttStatus {
   vadReady: boolean;
   diarizationReady: boolean;
   liveTextReady: boolean;
+  liveSpeakersReady: boolean;
   isSupported: boolean;
   isInitializing: boolean;
   error: string | null;
@@ -62,6 +63,7 @@ export function useSttStatus() {
     vadReady: false,
     diarizationReady: false,
     liveTextReady: false,
+    liveSpeakersReady: false,
     isSupported: false,
     isInitializing: false,
     error: null,
@@ -75,6 +77,7 @@ export function useSttStatus() {
         vad_ready: boolean;
         diarization_ready: boolean;
         live_text_ready?: boolean;
+        live_speakers_ready?: boolean;
         is_supported: boolean;
       }>("stt_get_status");
       setStatus((prev) => ({
@@ -84,6 +87,7 @@ export function useSttStatus() {
         vadReady: result.vad_ready,
         diarizationReady: result.diarization_ready,
         liveTextReady: result.live_text_ready ?? false,
+        liveSpeakersReady: result.live_speakers_ready ?? false,
         isSupported: result.is_supported,
         error: null,
       }));
@@ -137,6 +141,22 @@ export function useSttStatus() {
     }
   }, [refresh]);
 
+  // Speaker labels are optional in the same way as live text.
+  const initLiveSpeakers = useCallback(async () => {
+    setStatus((prev) => ({ ...prev, isInitializing: true }));
+    try {
+      await invoke("stt_init_live_speakers");
+      await refresh();
+      return true;
+    } catch (e) {
+      console.warn("Speaker labels are unavailable:", e);
+      return false;
+    } finally {
+      setStatus((prev) => ({ ...prev, isInitializing: false }));
+      setProgress(null);
+    }
+  }, [refresh]);
+
   useEffect(() => {
     refresh();
     let unlistenReady: (() => void) | undefined;
@@ -178,5 +198,12 @@ export function useSttStatus() {
     };
   }, [refresh]);
 
-  return { ...status, progress, refresh, init, initLiveText };
+  return {
+    ...status,
+    progress,
+    refresh,
+    init,
+    initLiveText,
+    initLiveSpeakers,
+  };
 }

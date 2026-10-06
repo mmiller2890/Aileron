@@ -443,6 +443,31 @@ mod utterance_store_tests {
         );
     }
 
+    #[test]
+    fn live_text_lock_is_independent_of_asr_and_vad() {
+        let state = SttState::default();
+        let _asr = state.inner.lock().unwrap();
+        let _vad = state.streaming_vad.lock().unwrap();
+        assert!(state.live_text.try_lock().is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_text_model_is_absent_until_initialised() {
+        let state = SttState::default();
+        assert!(state.live_text_model().is_none());
+    }
+
+    #[test]
+    fn status_reports_live_text_as_not_ready_by_default() {
+        let state = SttState::default();
+        // Holding the ASR lock makes the status fall back to its default
+        // snapshot, so this does not have to create a native bridge.
+        let _asr = state.inner.lock().unwrap();
+        let status = state.get_status().unwrap();
+        assert_eq!(status["live_text_ready"], serde_json::json!(false));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn vad_lock_remains_available_while_asr_is_busy() {
@@ -578,10 +603,18 @@ struct VadInner {
 }
 
 #[derive(Default)]
+struct LiveTextInner {
+    #[cfg(target_os = "macos")]
+    audio: Option<FluidAudio>,
+    ready: bool,
+}
+
+#[derive(Default)]
 pub struct SttState {
     pub inner: Arc<Mutex<SttInner>>,
     streaming_vad: Arc<Mutex<VadInner>>,
     mic_vad: Arc<Mutex<VadInner>>,
+    live_text: Arc<Mutex<LiveTextInner>>,
     session_wav_path: Arc<Mutex<Option<std::path::PathBuf>>>,
     last_status: Mutex<Option<serde_json::Value>>,
 }
@@ -687,6 +720,63 @@ impl SttState {
         }
         guard.ready = true;
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn init_live_text_inner(
+        inner: Arc<Mutex<LiveTextInner>>,
+        app: AppHandle,
+    ) -> Result<(), String> {
+        let mut guard = inner.lock().map_err(|e| e.to_string())?;
+        if guard.ready {
+            return Ok(());
+        }
+        if guard.audio.is_none() {
+            let audio = FluidAudio::new().map_err(|e| e.to_string())?;
+            if audio.is_intel_mac() {
+                return Err(not_supported());
+            }
+            guard.audio = Some(audio);
+        }
+        let audio = guard.audio.as_ref().ok_or("Live text not initialized")?;
+        let progress_app = app.clone();
+        audio
+            .init_streaming_asr_with_progress(move |progress| {
+                let _ = progress_app.emit(
+                    "stt-model-progress",
+                    serde_json::json!({
+                        "fraction_completed": progress.fraction_completed,
+                        "phase": progress.phase,
+                        "model_name": progress.model_name,
+                    }),
+                );
+            })
+            .map_err(|e| e.to_string())?;
+        // The model's first inference after loading stalls for about half a
+        // second. Pay that here, during setup, not in the first spoken turn.
+        audio
+            .streaming_asr_feed(&[0.0; 16_000])
+            .and_then(|_| audio.streaming_asr_reset())
+            .map_err(|e| e.to_string())?;
+        guard.ready = true;
+        Ok(())
+    }
+
+    /// The streaming model for one capture session, if it is loaded.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn live_text_model(
+        &self,
+    ) -> Option<Box<dyn crate::speaker::live_text::LiveTextModel>> {
+        let ready = self
+            .live_text
+            .lock()
+            .map(|guard| guard.ready)
+            .unwrap_or(false);
+        ready.then(|| {
+            Box::new(FluidLiveTextModel {
+                inner: self.live_text.clone(),
+            }) as Box<dyn crate::speaker::live_text::LiveTextModel>
+        })
     }
 
     #[cfg(target_os = "macos")]
@@ -950,6 +1040,7 @@ impl SttState {
             "model_version": serde_json::Value::Null,
             "vad_ready": false,
             "diarization_ready": false,
+            "live_text_ready": false,
             "is_apple_silicon": is_apple_silicon,
             "is_intel": is_intel,
             "is_supported": is_apple_silicon && !is_intel,
@@ -964,6 +1055,7 @@ impl SttState {
                 "model_version": serde_json::Value::Null,
                 "vad_ready": false,
                 "diarization_ready": false,
+                "live_text_ready": false,
                 "is_apple_silicon": false,
                 "is_intel": false,
                 "is_supported": false,
@@ -988,6 +1080,12 @@ impl SttState {
                 Ok(guard) => guard,
                 Err(_) => return self.cached_status(),
             };
+            // The live-text worker holds this lock only for single feeds, but
+            // the first model load holds it for the whole download.
+            let live_text_guard = match self.live_text.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return self.cached_status(),
+            };
 
             let (is_apple_silicon, is_intel) = if let Some(audio) = guard.audio.as_ref() {
                 (audio.is_apple_silicon(), audio.is_intel_mac())
@@ -1003,6 +1101,7 @@ impl SttState {
                 "model_version": guard.model_version.map(AsrModelVersion::as_str),
                 "vad_ready": streaming_vad_guard.ready && mic_vad_guard.ready,
                 "diarization_ready": guard.diarization_ready,
+                "live_text_ready": live_text_guard.ready,
                 "is_apple_silicon": is_apple_silicon,
                 "is_intel": is_intel,
                 "is_supported": is_apple_silicon && !is_intel,
@@ -1012,6 +1111,36 @@ impl SttState {
             }
             Ok(status)
         }
+    }
+}
+
+/// Adapter that lets the live-text worker drive the streaming model. It locks
+/// per call; nothing else holds this lock for longer than a status read.
+#[cfg(target_os = "macos")]
+struct FluidLiveTextModel {
+    inner: Arc<Mutex<LiveTextInner>>,
+}
+
+#[cfg(target_os = "macos")]
+impl crate::speaker::live_text::LiveTextModel for FluidLiveTextModel {
+    fn reset(&mut self) -> Result<(), String> {
+        let guard = self.inner.lock().map_err(|e| e.to_string())?;
+        guard
+            .audio
+            .as_ref()
+            .ok_or("Live text not initialized")?
+            .streaming_asr_reset()
+            .map_err(|e| e.to_string())
+    }
+
+    fn feed(&mut self, samples_16k: &[f32]) -> Result<String, String> {
+        let guard = self.inner.lock().map_err(|e| e.to_string())?;
+        guard
+            .audio
+            .as_ref()
+            .ok_or("Live text not initialized")?
+            .streaming_asr_feed(samples_16k)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -1136,6 +1265,23 @@ pub async fn stt_init_vad(
 }
 
 #[tauri::command]
+pub async fn stt_init_live_text(state: State<'_, SttState>, app: AppHandle) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (state, app);
+        return Err(not_supported());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let inner = state.live_text.clone();
+        tokio::task::spawn_blocking(move || SttState::init_live_text_inner(inner, app))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+}
+
+#[tauri::command]
 pub async fn stt_init_diarization(
     state: State<'_, SttState>,
     app: AppHandle,
@@ -1178,6 +1324,7 @@ pub async fn stt_diarize_file(
                 inner,
                 streaming_vad: Arc::default(),
                 mic_vad: Arc::default(),
+                live_text: Arc::default(),
                 session_wav_path: Arc::default(),
                 last_status: Mutex::default(),
             };

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::warn;
 
 /// About two seconds of capture hops (one message per ~21 ms hop).
 pub(crate) const LIVE_TEXT_QUEUE_MESSAGES: usize = 96;
@@ -197,7 +198,13 @@ impl LiveTextTurns {
 
     pub(crate) fn stop(self, deadline: Duration) {
         if let Some(handle) = self.handle {
-            handle.stop(deadline);
+            let dropped = handle.dropped();
+            if dropped > 0 {
+                warn!("Live text fell behind and skipped {dropped} audio messages this capture");
+            }
+            if !handle.stop(deadline) {
+                warn!("Live-text worker did not stop within the deadline; left to finish muted");
+            }
         }
     }
 }

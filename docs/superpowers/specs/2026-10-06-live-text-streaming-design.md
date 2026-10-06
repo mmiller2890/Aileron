@@ -92,7 +92,7 @@ A dedicated OS thread, started with a capture and joined when it stops. It owns 
 
 ## Pause default
 
-`silence_chunks` default changes from 100 (about 2.1 s at 48 kHz) to 47 (about 1.0 s) in both `VadConfig::default()` and `DEFAULT_VAD_CONFIG`. The storage key moves from `vad_config_v2` to `vad_config_v3`, which is how this code already handles default changes. Side effect: customised voice-detection settings reset to defaults once. The setting stays adjustable in `SettingsPanel`.
+`silence_chunks` default changes from 100 (about 2.1 s at 48 kHz) to 45 (0.96 s; 45 sits on the settings slider's step of 5) in both `VadConfig::default()` and `DEFAULT_VAD_CONFIG`. The storage key moves from `vad_config_v2` to `vad_config_v3`, which is how this code already handles default changes. Side effect: customised voice-detection settings reset to defaults once. The setting stays adjustable in `SettingsPanel`. Microphone dictation reads the same setting, so dictated utterances also end after about 1 second of silence.
 
 Known cost: a thinking pause longer than a second now splits one answer into two turns.
 

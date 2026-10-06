@@ -318,7 +318,7 @@ impl Default for VadConfig {
             // Tunables are sample-rate-dependent, tuned for 48 kHz:
             // hop_size 1024 = 21.3 ms/hop. At 96 kHz these halve in wall
             // time (silence 100 -> 1.07 s); at 44.1 kHz they scale ~linearly.
-            silence_chunks: 100, // ~2.1s of silence before stopping (tolerates thinking pauses)
+            silence_chunks: 45, // ~1.0s of silence ends the turn; live text covers the wait
             min_speech_chunks: 12, // ~0.26s - matches the mic path's minSpeechFrames
             pre_speech_chunks: 30, // ~0.64s - covers 2+ Silero refresh periods (256ms each) so
             // the word onset survives until VAD triggers
@@ -1707,6 +1707,13 @@ pub fn get_output_devices() -> Result<Vec<AudioDevice>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_silence_ends_a_turn_after_about_one_second() {
+        let config = VadConfig::default();
+        let seconds = (config.silence_chunks * config.hop_size) as f32 / 48_000.0;
+        assert!((0.9..=1.05).contains(&seconds), "{seconds}");
+    }
 
     #[test]
     fn live_text_defaults_on_and_survives_configs_saved_without_it() {

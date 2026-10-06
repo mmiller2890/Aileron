@@ -92,6 +92,8 @@ export function useSystemAudio() {
   }, []);
   // Turn → speaker bookkeeping for the capture; `partialSpeaker` is who is
   // speaking in the turn in progress.
+  // Set when a live feature stops mid-capture; the capture itself carries on.
+  const [liveNotice, setLiveNotice] = useState("");
   const [partialSpeaker, setPartialSpeaker] = useState<string | null>(null);
   const liveSpeakersRef = useRef<LiveSpeakerState>(emptyLiveSpeakerState);
   const setLiveSpeakers = useCallback((next: LiveSpeakerState) => {
@@ -162,6 +164,7 @@ export function useSystemAudio() {
     asrReady,
     isInitializing: isSttInitializing,
     progress: sttModelProgress,
+    initStage: sttInitStage,
     init: initStt,
     initLiveText,
     initLiveSpeakers,
@@ -329,6 +332,26 @@ export function useSystemAudio() {
   useEffect(() => {
     const scope = createAsyncListenerScope();
     void Promise.all([
+      scope.add(
+        listen(
+          "live-feature-stopped",
+          scope.guard((event) => {
+            if (!capturingRef.current) return;
+            setLiveNotice(
+              event.payload === "speakers"
+                ? "Speaker labels stopped for this session. Transcription continues."
+                : "Live text stopped for this session. Final transcripts continue.",
+            );
+            if (event.payload === "speakers") {
+              setLiveSpeakers(
+                clearProvisionalThroughTurn(liveSpeakersRef.current, null),
+              );
+            } else {
+              setLiveText(null);
+            }
+          }),
+        ),
+      ),
       scope.add(
         listen(
           "speech-speaker",
@@ -1163,6 +1186,7 @@ export function useSystemAudio() {
             });
             setLiveText(null);
             setLiveSpeakers(emptyLiveSpeakerState);
+            setLiveNotice("");
             setCapturing(true);
             capturingRef.current = true;
             setSessionStartedAt(Date.now());
@@ -1661,6 +1685,8 @@ export function useSystemAudio() {
     setupRequired,
     isSttInitializing,
     sttModelProgress,
+    sttInitStage,
+    liveNotice,
     startCapture,
     stopCapture,
     handleSetup,

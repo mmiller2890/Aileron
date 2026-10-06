@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { ChatConversation } from "@/types/completion";
 import { Markdown } from "@/components";
 import { isNearBottom } from "@/lib/scroll";
+import { SpeakerTag } from "@/components/SpeakerTag";
 
 const formatClock = (ts: number): string =>
   new Date(ts).toLocaleTimeString(undefined, {
@@ -93,8 +94,12 @@ export const TranscriptFeed = ({
                 </div>
               ) : (
                 <div className="min-w-0 flex-1">
-                  <div className="mb-1 font-mono text-[11px] text-muted-foreground">
-                    {(m.speaker || "heard").toLowerCase()}
+                  <div className="mb-1">
+                    <SpeakerTag
+                      speaker={m.speaker}
+                      fallback="heard"
+                      className="text-[11px]"
+                    />
                   </div>
                   <div className="text-sm leading-relaxed">{m.content}</div>
                 </div>
@@ -103,12 +108,16 @@ export const TranscriptFeed = ({
           ))}
           {provisional && (
             <div className="flex gap-3">
-              <span className="min-w-[40px] pt-0.5 font-mono text-[11px] text-meta">
+              <span className="min-w-[40px] pt-0.5 font-mono text-[11px] text-meta animate-pulse">
                 …
               </span>
               <div className="min-w-0 flex-1">
-                <div className="mb-1 font-mono text-[11px] text-muted-foreground">
-                  {(partialSpeaker || "hearing").toLowerCase()}
+                <div className="mb-1">
+                  <SpeakerTag
+                    speaker={partialSpeaker}
+                    fallback="hearing"
+                    className="text-[11px]"
+                  />
                 </div>
                 <div className="text-sm italic leading-relaxed text-muted-foreground">
                   {provisional}

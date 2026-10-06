@@ -70,6 +70,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
     scrollAreaRef,
     isSttInitializing,
     sttModelProgress,
+    sttInitStage,
+    liveNotice,
     currentSpeaker,
     partialTranscription,
     partialSpeaker,
@@ -233,7 +235,10 @@ export const SystemAudio = (props: useSystemAudioType) => {
         >
           <div className="relative flex flex-col h-[calc(100vh-4rem)] overflow-hidden">
             {isSttInitializing && (
-              <SttInitOverlay progress={sttModelProgress} />
+              <SttInitOverlay
+                progress={sttModelProgress}
+                stage={sttInitStage}
+              />
             )}
 
 
@@ -398,6 +403,11 @@ export const SystemAudio = (props: useSystemAudioType) => {
                               &amp; System Audio Recording
                             </span>
                             .
+                          </p>
+                        )}
+                        {liveNotice && (
+                          <p className="text-[10px] text-muted-foreground leading-snug">
+                            {liveNotice}
                           </p>
                         )}
                       </div>

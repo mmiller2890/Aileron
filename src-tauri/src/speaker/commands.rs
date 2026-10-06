@@ -626,7 +626,10 @@ pub async fn start_system_audio_capture(
                         let _ = emit_app.emit("speech-partial", partial);
                     }
                     live_text::LiveTextEvent::Error(error) => {
-                        let _ = emit_app.emit("stt-error", format!("Live text stopped: {error}"));
+                        // Its own event: the capture is fine, so this must
+                        // not surface as a speech-recognition error.
+                        error!("Live text stopped: {error}");
+                        let _ = emit_app.emit("live-feature-stopped", "live-text");
                     }
                 })
             })
@@ -647,7 +650,8 @@ pub async fn start_system_audio_capture(
                         let _ = emit_app.emit("speech-speaker", update);
                     }
                     live_speakers::LiveSpeakerEvent::Error(error) => {
-                        let _ = emit_app.emit("stt-error", format!("Speaker labels stopped: {error}"));
+                        error!("Speaker labels stopped: {error}");
+                        let _ = emit_app.emit("live-feature-stopped", "speakers");
                     }
                 })
             })

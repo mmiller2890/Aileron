@@ -3,6 +3,7 @@ import { Markdown, Switch, CopyButton } from "@/components";
 import { BotIcon, HeadphonesIcon, Loader2, SparklesIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isMacOS } from "@/lib";
+import { SpeakerTag } from "@/components/SpeakerTag";
 
 type Props = {
   lastTranscription: string;
@@ -30,9 +31,6 @@ export const ResultsSection = ({
   partialSpeaker = null,
 }: Props) => {
   const provisional = partialTranscription.trim();
-  // The badge follows the text beside it: the provisional line's speaker
-  // while someone is talking, the last settled line's speaker otherwise.
-  const shownSpeaker = provisional ? partialSpeaker : currentSpeaker;
   const hasResponse = lastAIResponse || isAIProcessing;
   const hasHistory = conversation.messages.length > 2;
 
@@ -42,9 +40,24 @@ export const ResultsSection = ({
 
   const modKey = isMacOS() ? "⌘" : "Ctrl";
 
-  // While someone is speaking, show what is being heard instead of the
-  // previous turn's final text.
-  const transcriptionText = provisional || lastTranscription;
+  const transcriptionText = lastTranscription;
+
+  // The turn in progress gets its own line. The settled question stays put so
+  // the answer below it never appears to belong to different words.
+  const hearingLine = provisional ? (
+    <p className="flex items-baseline gap-1.5 text-[11px] text-muted-foreground">
+      <span
+        aria-hidden
+        className="inline-block h-1.5 w-1.5 shrink-0 translate-y-[-1px] animate-pulse bg-primary"
+      />
+      <SpeakerTag
+        speaker={partialSpeaker}
+        fallback="hearing"
+        className="shrink-0 text-[9px] text-meta"
+      />
+      <span className="min-w-0 italic">{provisional}</span>
+    </p>
+  ) : null;
 
   return (
     <div className="rounded-lg border border-border bg-card p-3 space-y-3">
@@ -76,16 +89,14 @@ export const ResultsSection = ({
           {transcriptionText && (
             <p className="text-[11px]">
               <span className="font-mono text-meta">system</span>{" "}
-              {shownSpeaker && (
-                <span className="font-mono text-[9px] text-muted-foreground mr-1">
-                  {shownSpeaker}
-                </span>
+              {currentSpeaker && (
+                <SpeakerTag
+                  speaker={currentSpeaker}
+                  fallback=""
+                  className="mr-1 text-[9px]"
+                />
               )}
-              <span
-                className={cn("text-muted-foreground", provisional && "italic")}
-              >
-                {transcriptionText}
-              </span>
+              <span className="text-muted-foreground">{transcriptionText}</span>
             </p>
           )}
 
@@ -109,12 +120,16 @@ export const ResultsSection = ({
               )}
             </div>
           )}
+
+          {hearingLine}
         </div>
       )}
 
       {/* CONVERSATION MODE: AI on top, then System, then history */}
       {conversationMode && (
         <div className="space-y-2">
+          {/* Newest first here, so the turn in progress leads. */}
+          {hearingLine}
           {/* AI Response - First (on top) — signal left rule */}
           {hasResponse && (
             <div className="rounded-md border-l-2 border-primary bg-background p-2.5">
@@ -150,20 +165,15 @@ export const ResultsSection = ({
                 <span className="font-mono text-[9px] text-meta">
                   system
                 </span>
-                {shownSpeaker && (
-                  <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wide">
-                    {shownSpeaker}
-                  </span>
+                {currentSpeaker && (
+                  <SpeakerTag
+                    speaker={currentSpeaker}
+                    fallback=""
+                    className="text-[9px]"
+                  />
                 )}
               </div>
-              <p
-                className={cn(
-                  "text-sm",
-                  provisional && "italic text-muted-foreground",
-                )}
-              >
-                {transcriptionText}
-              </p>
+              <p className="text-sm">{transcriptionText}</p>
             </div>
           )}
 
@@ -187,11 +197,17 @@ export const ResultsSection = ({
                           : "bg-background"
                       )}
                     >
-                      <span className="font-mono text-[8px] text-meta">
-                        {message.role === "user"
-                          ? (message.speaker || "system").toLowerCase()
-                          : "answer"}
-                      </span>
+                      {message.role === "user" ? (
+                        <SpeakerTag
+                          speaker={message.speaker}
+                          fallback="system"
+                          className="text-[8px] text-meta"
+                        />
+                      ) : (
+                        <span className="font-mono text-[8px] text-meta">
+                          answer
+                        </span>
+                      )}
                       <div className="text-muted-foreground leading-relaxed mt-0.5">
                         <Markdown>{message.content}</Markdown>
                       </div>

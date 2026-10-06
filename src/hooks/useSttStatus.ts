@@ -14,6 +14,9 @@ export interface SttStatus {
   error: string | null;
 }
 
+/** Which model the setup overlay is currently preparing. */
+export type SttInitStage = "speech" | "live-text" | "speakers";
+
 export type SttProgressPhase = "listing" | "downloading" | "compiling";
 
 export interface SttModelProgress {
@@ -56,6 +59,7 @@ export function formatSttProgressPhase(progress: SttModelProgress): string {
 
 export function useSttStatus() {
   const [progress, setProgress] = useState<SttModelProgress | null>(null);
+  const [initStage, setInitStage] = useState<SttInitStage | null>(null);
   const [status, setStatus] = useState<SttStatus>({
     asrReady: false,
     modelVersion: null,
@@ -100,12 +104,14 @@ export function useSttStatus() {
 
   const init = useCallback(async (modelVersion: FluidAudioModel = "v3") => {
     setProgress(null);
+    setInitStage("speech");
     setStatus((prev) => ({ ...prev, isInitializing: true, error: null }));
     try {
       await invoke("stt_init", { modelVersion });
       await refresh();
       setStatus((prev) => ({ ...prev, isInitializing: false }));
       setProgress(null);
+      setInitStage(null);
       return true;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -116,6 +122,7 @@ export function useSttStatus() {
         asrReady: false,
       }));
       setProgress(null);
+      setInitStage(null);
       return false;
     }
   }, [refresh]);
@@ -123,6 +130,8 @@ export function useSttStatus() {
   // Live text is optional: a failed download must not block capture, so this
   // reports failure by return value and leaves `status.error` alone.
   const initLiveText = useCallback(async () => {
+    setProgress(null);
+    setInitStage("live-text");
     setStatus((prev) => ({ ...prev, isInitializing: true }));
     try {
       await invoke("stt_init_live_text");
@@ -134,11 +143,14 @@ export function useSttStatus() {
     } finally {
       setStatus((prev) => ({ ...prev, isInitializing: false }));
       setProgress(null);
+      setInitStage(null);
     }
   }, [refresh]);
 
   // Speaker labels are optional in the same way as live text.
   const initLiveSpeakers = useCallback(async () => {
+    setProgress(null);
+    setInitStage("speakers");
     setStatus((prev) => ({ ...prev, isInitializing: true }));
     try {
       await invoke("stt_init_live_speakers");
@@ -150,6 +162,7 @@ export function useSttStatus() {
     } finally {
       setStatus((prev) => ({ ...prev, isInitializing: false }));
       setProgress(null);
+      setInitStage(null);
     }
   }, [refresh]);
 
@@ -197,6 +210,7 @@ export function useSttStatus() {
   return {
     ...status,
     progress,
+    initStage,
     refresh,
     init,
     initLiveText,

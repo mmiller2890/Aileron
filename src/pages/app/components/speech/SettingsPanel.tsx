@@ -183,6 +183,52 @@ export const SettingsPanel = ({
               </div>
             )}
 
+            {/* Live features - VAD mode only; they follow each spoken turn */}
+            {vadConfig.enabled && (
+              <div className="space-y-2">
+                <Label className="text-xs font-medium">While listening</Label>
+                <div className="divide-y divide-border/50 rounded-md border border-border/50">
+                  <div className="flex items-start justify-between gap-3 p-2.5">
+                    <div className="space-y-0.5">
+                      <p className="text-xs font-medium">Live text</p>
+                      <p className="text-[10px] text-muted-foreground">
+                        Shows words as they are spoken. English only; the
+                        final transcript replaces it.
+                      </p>
+                    </div>
+                    <Switch
+                      aria-label="Live text"
+                      checked={vadConfig.live_text}
+                      onCheckedChange={(checked) =>
+                        onUpdateVadConfig({ ...vadConfig, live_text: checked })
+                      }
+                    />
+                  </div>
+                  <div className="flex items-start justify-between gap-3 p-2.5">
+                    <div className="space-y-0.5">
+                      <p className="text-xs font-medium">Speaker labels</p>
+                      <p className="text-[10px] text-muted-foreground">
+                        Marks each line with who said it, up to four speakers.
+                      </p>
+                    </div>
+                    <Switch
+                      aria-label="Speaker labels"
+                      checked={vadConfig.live_speakers}
+                      onCheckedChange={(checked) =>
+                        onUpdateVadConfig({
+                          ...vadConfig,
+                          live_speakers: checked,
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  Changes apply to the next capture.
+                </p>
+              </div>
+            )}
+
             {/* Max Duration - Only for Manual mode */}
             {!vadConfig.enabled && (
               <div className="space-y-2">
@@ -367,44 +413,6 @@ export const SettingsPanel = ({
                   <p className="text-[10px] text-muted-foreground">
                     Filters background noise
                   </p>
-                </div>
-
-                <div className="flex items-start justify-between gap-3 rounded-md border border-border/50 p-2.5">
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium">Live text</Label>
-                    <p className="text-[10px] text-muted-foreground">
-                      Shows what is being heard while the person is still speaking (English, local model). The final transcript replaces it. Applies to the next capture.
-                    </p>
-                  </div>
-                  <Switch
-                    checked={vadConfig.live_text}
-                    onCheckedChange={(checked) =>
-                      onUpdateVadConfig({
-                        ...vadConfig,
-                        live_text: checked,
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="flex items-start justify-between gap-3 rounded-md border border-border/50 p-2.5">
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium">
-                      Live speaker labels
-                    </Label>
-                    <p className="text-[10px] text-muted-foreground">
-                      Labels each line with who said it, up to four speakers. Applies to the next capture.
-                    </p>
-                  </div>
-                  <Switch
-                    checked={vadConfig.live_speakers}
-                    onCheckedChange={(checked) =>
-                      onUpdateVadConfig({
-                        ...vadConfig,
-                        live_speakers: checked,
-                      })
-                    }
-                  />
                 </div>
 
                 <div className="flex items-start justify-between gap-3 rounded-md border border-border/50 p-2.5">

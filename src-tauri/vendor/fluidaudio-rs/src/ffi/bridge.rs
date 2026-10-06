@@ -127,6 +127,20 @@ extern "C" {
 
     // String free
     fn fluidaudio_free_string(s: *mut i8);
+
+    fn fluidaudio_initialize_streaming_asr(
+        bridge: *mut std::ffi::c_void,
+        progress_callback: Option<ProgressCallback>,
+        progress_context: *mut std::ffi::c_void,
+    ) -> i32;
+    fn fluidaudio_is_streaming_asr_available(bridge: *mut std::ffi::c_void) -> i32;
+    fn fluidaudio_streaming_asr_feed(
+        bridge: *mut std::ffi::c_void,
+        samples: *const f32,
+        count: u32,
+        out_text: *mut *mut i8,
+    ) -> i32;
+    fn fluidaudio_streaming_asr_reset(bridge: *mut std::ffi::c_void) -> i32;
     fn fluidaudio_resample_samples(
         samples: *const f32,
         count: u32,
@@ -139,6 +153,34 @@ extern "C" {
 }
 
 use std::ffi::{CStr, CString};
+
+unsafe extern "C" fn progress_trampoline<F>(
+    context: *mut std::ffi::c_void,
+    fraction_completed: f64,
+    phase_code: i32,
+    model_name: *const i8,
+) where
+    F: Fn(ModelProgress) + Send + Sync,
+{
+    let callback = &*(context as *const F);
+    let model_name = if model_name.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(model_name).to_string_lossy().into_owned())
+    };
+    let phase = match phase_code {
+        0 => "listing",
+        1 => "downloading",
+        2 => "compiling",
+        _ => "unknown",
+    };
+    let progress = ModelProgress {
+        fraction_completed: fraction_completed.clamp(0.0, 1.0),
+        phase,
+        model_name,
+    };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(progress)));
+}
 
 type ProgressCallback = unsafe extern "C" fn(*mut std::ffi::c_void, f64, i32, *const i8);
 
@@ -260,40 +302,12 @@ impl FluidAudioBridge {
     where
         F: Fn(ModelProgress) + Send + Sync,
     {
-        unsafe extern "C" fn trampoline<F>(
-            context: *mut std::ffi::c_void,
-            fraction_completed: f64,
-            phase_code: i32,
-            model_name: *const i8,
-        ) where
-            F: Fn(ModelProgress) + Send + Sync,
-        {
-            let callback = &*(context as *const F);
-            let model_name = if model_name.is_null() {
-                None
-            } else {
-                Some(CStr::from_ptr(model_name).to_string_lossy().into_owned())
-            };
-            let phase = match phase_code {
-                0 => "listing",
-                1 => "downloading",
-                2 => "compiling",
-                _ => "unknown",
-            };
-            let progress = ModelProgress {
-                fraction_completed: fraction_completed.clamp(0.0, 1.0),
-                phase,
-                model_name,
-            };
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(progress)));
-        }
-
         let context = &progress_callback as *const F as *mut std::ffi::c_void;
         let result = unsafe {
             fluidaudio_initialize_asr_version(
                 self.ptr,
                 version_code,
-                Some(trampoline::<F>),
+                Some(progress_trampoline::<F>),
                 context,
             )
         };
@@ -451,6 +465,61 @@ impl FluidAudioBridge {
             Ok(probability)
         } else {
             Err(self.last_error_message("Failed to process VAD stream chunk"))
+        }
+    }
+
+    pub fn initialize_streaming_asr_with_progress<F>(
+        &self,
+        progress_callback: F,
+    ) -> Result<(), String>
+    where
+        F: Fn(ModelProgress) + Send + Sync,
+    {
+        let context = &progress_callback as *const F as *mut std::ffi::c_void;
+        let result = unsafe {
+            fluidaudio_initialize_streaming_asr(
+                self.ptr,
+                Some(progress_trampoline::<F>),
+                context,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(self.last_error_message("Failed to initialize streaming ASR"))
+        }
+    }
+
+    pub fn is_streaming_asr_available(&self) -> bool {
+        unsafe { fluidaudio_is_streaming_asr_available(self.ptr) != 0 }
+    }
+
+    pub fn streaming_asr_feed(&self, samples: &[f32]) -> Result<String, String> {
+        let mut out: *mut i8 = std::ptr::null_mut();
+        let result = unsafe {
+            fluidaudio_streaming_asr_feed(
+                self.ptr,
+                samples.as_ptr(),
+                samples.len() as u32,
+                &mut out,
+            )
+        };
+        if result != 0 || out.is_null() {
+            return Err(self.last_error_message("Failed to process streaming ASR audio"));
+        }
+        let text = unsafe { CStr::from_ptr(out) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { fluidaudio_free_string(out) };
+        Ok(text)
+    }
+
+    pub fn streaming_asr_reset(&self) -> Result<(), String> {
+        let result = unsafe { fluidaudio_streaming_asr_reset(self.ptr) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(self.last_error_message("Failed to reset streaming ASR"))
         }
     }
 

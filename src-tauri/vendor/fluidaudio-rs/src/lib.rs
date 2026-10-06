@@ -271,6 +271,39 @@ impl FluidAudio {
             .map_err(FluidAudioError::from)
     }
 
+    // ========== Streaming ASR (live text) ==========
+
+    /// Download and load the Parakeet EOU streaming model (320 ms chunks).
+    pub fn init_streaming_asr_with_progress<F>(
+        &self,
+        progress_callback: F,
+    ) -> Result<(), FluidAudioError>
+    where
+        F: Fn(ModelProgress) + Send + Sync,
+    {
+        self.bridge
+            .initialize_streaming_asr_with_progress(progress_callback)
+            .map_err(FluidAudioError::from)
+    }
+
+    pub fn is_streaming_asr_available(&self) -> bool {
+        self.bridge.is_streaming_asr_available()
+    }
+
+    /// Feed 16 kHz mono samples; returns the transcript accumulated since the
+    /// last reset.
+    pub fn streaming_asr_feed(&self, samples_16k: &[f32]) -> Result<String, FluidAudioError> {
+        self.bridge
+            .streaming_asr_feed(samples_16k)
+            .map_err(FluidAudioError::from)
+    }
+
+    pub fn streaming_asr_reset(&self) -> Result<(), FluidAudioError> {
+        self.bridge
+            .streaming_asr_reset()
+            .map_err(FluidAudioError::from)
+    }
+
     // ========== Diarization Methods ==========
 
     /// Initialize the speaker diarization engine

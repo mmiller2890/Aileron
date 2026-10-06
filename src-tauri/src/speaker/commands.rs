@@ -1,6 +1,7 @@
 // Assistant AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
 use crate::speaker::preprocessing::{apply_noise_gate, prepare_utterance, PreparedUtterance};
 use crate::speaker::live_text;
+use crate::speaker::{live_speakers, turn_feeds};
 use crate::speaker::session_recording;
 use crate::speaker::{AudioDevice, SpeakerInput};
 use anyhow::Result;
@@ -265,6 +266,9 @@ pub struct VadConfig {
     /// Show provisional text for the turn in progress (macOS, local model).
     #[serde(default = "default_live_text")]
     pub live_text: bool,
+    /// Label each turn with its speaker as it lands (macOS).
+    #[serde(default = "default_live_text")]
+    pub live_speakers: bool,
     #[serde(default = "default_chunk_interval")]
     pub chunk_interval_ms: u64,
 }
@@ -327,6 +331,7 @@ impl Default for VadConfig {
             emit_chunks: false,
             compare_preprocessing: false,
             live_text: true,
+            live_speakers: true,
             chunk_interval_ms: 1000,
         }
     }
@@ -632,6 +637,27 @@ pub async fn start_system_audio_capture(
     #[cfg(not(target_os = "macos"))]
     let live_text: Option<live_text::LiveTextHandle> = None;
 
+    #[cfg(target_os = "macos")]
+    let live_speakers = if vad_config.enabled && vad_config.live_speakers {
+        app.try_state::<crate::stt::SttState>()
+            .and_then(|stt_state| stt_state.live_speaker_model())
+            .map(|model| {
+                let emit_app = app.clone();
+                live_speakers::LiveSpeakerHandle::spawn(model, move |event| match event {
+                    live_speakers::LiveSpeakerEvent::Update(update) => {
+                        let _ = emit_app.emit("speech-speaker", update);
+                    }
+                    live_speakers::LiveSpeakerEvent::Error(error) => {
+                        let _ = emit_app.emit("stt-error", format!("Speaker labels stopped: {error}"));
+                    }
+                })
+            })
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "macos"))]
+    let live_speakers: Option<live_speakers::LiveSpeakerHandle> = None;
+
     let task = tokio::spawn(async move {
         let session_path = if vad_config.enabled {
             run_vad_capture(
@@ -642,6 +668,7 @@ pub async fn start_system_audio_capture(
                 monitor_output_uid,
                 stop_flag,
                 live_text,
+                live_speakers,
             )
             .await
         } else {
@@ -765,9 +792,10 @@ async fn run_vad_capture(
     monitor_output_uid: Option<String>,
     stop_flag: Arc<AtomicBool>,
     live_text: Option<live_text::LiveTextHandle>,
+    live_speakers: Option<live_speakers::LiveSpeakerHandle>,
 ) -> Option<std::path::PathBuf> {
     let mut stream = stream;
-    let mut live_turns = live_text::LiveTextTurns::new(live_text);
+    let mut live_turns = turn_feeds::TurnFeeds::new(live_text, live_speakers);
     let mut last_device_check = Instant::now();
     // Input-level metering + no-audio detection (see the emit sites below).
     let mut last_level_emit = Instant::now();
@@ -1718,10 +1746,13 @@ mod tests {
     #[test]
     fn live_text_defaults_on_and_survives_configs_saved_without_it() {
         assert!(VadConfig::default().live_text);
+        assert!(VadConfig::default().live_speakers);
         let mut saved = serde_json::to_value(VadConfig::default()).unwrap();
         saved.as_object_mut().unwrap().remove("live_text");
+        saved.as_object_mut().unwrap().remove("live_speakers");
         let parsed: VadConfig = serde_json::from_value(saved).unwrap();
         assert!(parsed.live_text);
+        assert!(parsed.live_speakers);
     }
 
     #[cfg(target_os = "macos")]

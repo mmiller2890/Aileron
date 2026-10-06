@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::warn;
 
 /// About two seconds of capture hops (one message per ~21 ms hop).
 pub(crate) const LIVE_TEXT_QUEUE_MESSAGES: usize = 96;
@@ -88,13 +87,17 @@ impl LiveTextHandle {
         }
     }
 
-    /// Stop the worker. Returns false if it had not exited by the deadline,
-    /// in which case it is left to finish on its own and can no longer emit.
+    /// Let the worker finish what is queued, up to the deadline. Returns
+    /// false if it had not exited by then, in which case it is muted and left
+    /// to finish on its own.
     pub(crate) fn stop(self, deadline: Duration) -> bool {
-        self.active.store(false, Ordering::Release);
-        let Self { tx, done, .. } = self;
+        let Self {
+            tx, done, active, ..
+        } = self;
         drop(tx);
-        done.recv_timeout(deadline).is_ok()
+        let finished = done.recv_timeout(deadline).is_ok();
+        active.store(false, Ordering::Release);
+        finished
     }
 }
 
@@ -141,69 +144,6 @@ fn run_worker(
             Err(error) => {
                 failed = true;
                 emit(LiveTextEvent::Error(error));
-            }
-        }
-    }
-}
-
-/// Turn bookkeeping for the capture loop. Turns are numbered whether or not a
-/// worker exists, so `speech-detected` always carries a turn.
-pub(crate) struct LiveTextTurns {
-    handle: Option<LiveTextHandle>,
-    turn: u64,
-    in_turn: bool,
-}
-
-impl LiveTextTurns {
-    pub(crate) fn new(handle: Option<LiveTextHandle>) -> Self {
-        Self {
-            handle,
-            turn: 0,
-            in_turn: false,
-        }
-    }
-
-    /// Start the next turn with the audio that preceded the detection.
-    pub(crate) fn begin(&mut self, lead_in_16k: Vec<f32>) -> u64 {
-        self.turn += 1;
-        self.in_turn = true;
-        if !lead_in_16k.is_empty() {
-            self.audio(lead_in_16k);
-        }
-        self.turn
-    }
-
-    pub(crate) fn audio(&self, samples_16k: Vec<f32>) {
-        if !self.in_turn || samples_16k.is_empty() {
-            return;
-        }
-        if let Some(handle) = &self.handle {
-            handle.audio(self.turn, samples_16k);
-        }
-    }
-
-    pub(crate) fn end(&mut self) {
-        if !self.in_turn {
-            return;
-        }
-        self.in_turn = false;
-        if let Some(handle) = &self.handle {
-            handle.end_turn();
-        }
-    }
-
-    pub(crate) fn current(&self) -> u64 {
-        self.turn
-    }
-
-    pub(crate) fn stop(self, deadline: Duration) {
-        if let Some(handle) = self.handle {
-            let dropped = handle.dropped();
-            if dropped > 0 {
-                warn!("Live text fell behind and skipped {dropped} audio messages this capture");
-            }
-            if !handle.stop(deadline) {
-                warn!("Live-text worker did not stop within the deadline; left to finish muted");
             }
         }
     }
@@ -348,39 +288,5 @@ mod tests {
         drop(gate_tx); // the model returns after stop
         std::thread::sleep(Duration::from_millis(100));
         assert!(rx.try_recv().is_err(), "a stopped worker must not emit");
-    }
-
-    #[test]
-    fn turns_number_from_one_and_only_send_audio_inside_a_turn() {
-        let script = Arc::new(Mutex::new(Script::default()));
-        let (handle, rx) = spawn_with(script.clone(), None);
-        let mut turns = LiveTextTurns::new(Some(handle));
-
-        assert_eq!(turns.current(), 0);
-        turns.audio(vec![0.0; 9]); // before any turn: ignored
-        assert_eq!(turns.begin(vec![0.0; 8]), 1);
-        assert_eq!(next(&rx), partial(1, "t1"));
-        turns.audio(vec![0.0; 4]);
-        assert_eq!(next(&rx), partial(1, "t2"));
-        turns.end();
-        turns.end(); // idempotent
-        turns.audio(vec![0.0; 9]); // between turns: ignored
-        assert_eq!(turns.begin(Vec::new()), 2);
-        turns.audio(vec![0.0; 4]);
-        assert_eq!(next(&rx), partial(2, "t1"));
-        turns.stop(Duration::from_secs(2));
-
-        let calls = script.lock().unwrap().calls.clone();
-        assert_eq!(calls, vec!["reset", "feed:8", "feed:4", "reset", "feed:4"]);
-    }
-
-    #[test]
-    fn turns_still_count_without_a_worker() {
-        let mut turns = LiveTextTurns::new(None);
-        assert_eq!(turns.begin(vec![0.0; 8]), 1);
-        turns.audio(vec![0.0; 4]);
-        turns.end();
-        assert_eq!(turns.begin(Vec::new()), 2);
-        turns.stop(Duration::from_millis(10));
     }
 }

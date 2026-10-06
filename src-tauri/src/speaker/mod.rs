@@ -7,6 +7,7 @@ pub mod mic;
 pub(crate) mod live_speakers;
 pub(crate) mod live_text;
 pub(crate) mod session_recording;
+pub(crate) mod turn_feeds;
 
 #[cfg(target_os = "macos")]
 mod macos;

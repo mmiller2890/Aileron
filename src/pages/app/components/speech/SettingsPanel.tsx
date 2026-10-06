@@ -371,6 +371,24 @@ export const SettingsPanel = ({
 
                 <div className="flex items-start justify-between gap-3 rounded-md border border-border/50 p-2.5">
                   <div className="space-y-1">
+                    <Label className="text-xs font-medium">Live text</Label>
+                    <p className="text-[10px] text-muted-foreground">
+                      Shows what is being heard while the person is still speaking (English, local model). The final transcript replaces it. Applies to the next capture.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={vadConfig.live_text}
+                    onCheckedChange={(checked) =>
+                      onUpdateVadConfig({
+                        ...vadConfig,
+                        live_text: checked,
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-start justify-between gap-3 rounded-md border border-border/50 p-2.5">
+                  <div className="space-y-1">
                     <Label className="text-xs font-medium">
                       Compare raw preprocessing
                     </Label>

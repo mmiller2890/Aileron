@@ -13,6 +13,8 @@ type Props = {
   setConversationMode: (mode: boolean) => void;
   isLabelingSpeakers?: boolean;
   currentSpeaker?: string | null;
+  /** Provisional text for the turn in progress. */
+  partialTranscription?: string;
 };
 
 export const ResultsSection = ({
@@ -24,17 +26,21 @@ export const ResultsSection = ({
   setConversationMode,
   isLabelingSpeakers = false,
   currentSpeaker = null,
+  partialTranscription = "",
 }: Props) => {
+  const provisional = partialTranscription.trim();
   const hasResponse = lastAIResponse || isAIProcessing;
   const hasHistory = conversation.messages.length > 2;
 
-  if (!hasResponse && !lastTranscription) {
+  if (!hasResponse && !lastTranscription && !provisional) {
     return null;
   }
 
   const modKey = isMacOS() ? "⌘" : "Ctrl";
 
-  const transcriptionText = lastTranscription;
+  // While someone is speaking, show what is being heard instead of the
+  // previous turn's final text.
+  const transcriptionText = provisional || lastTranscription;
 
   return (
     <div className="rounded-lg border border-border bg-card p-3 space-y-3">
@@ -77,7 +83,7 @@ export const ResultsSection = ({
                 </span>
               )}
               <span
-                className="text-muted-foreground"
+                className={cn("text-muted-foreground", provisional && "italic")}
               >
                 {transcriptionText}
               </span>
@@ -156,7 +162,12 @@ export const ResultsSection = ({
                   </span>
                 )}
               </div>
-              <p className="text-sm">
+              <p
+                className={cn(
+                  "text-sm",
+                  provisional && "italic text-muted-foreground",
+                )}
+              >
                 {transcriptionText}
               </p>
             </div>

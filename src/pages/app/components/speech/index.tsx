@@ -72,6 +72,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     sttModelProgress,
     isLabelingSpeakers,
     currentSpeaker,
+    partialTranscription,
     audioLevel,
     captureSampleRate,
     noAudioDetected,
@@ -425,6 +426,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       setConversationMode={setConversationMode}
                       isLabelingSpeakers={isLabelingSpeakers}
                       currentSpeaker={currentSpeaker}
+                      partialTranscription={partialTranscription}
                     />
 
                     {/* Session Summary (post-capture) */}

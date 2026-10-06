@@ -14,11 +14,15 @@ export const TranscriptFeed = ({
   conversation,
   live = false,
   liveAnswerDraft = null,
+  partialTranscription = "",
 }: {
   conversation: ChatConversation | null;
   live?: boolean;
   liveAnswerDraft?: string | null;
+  /** Provisional text for the turn in progress; shown only while live. */
+  partialTranscription?: string;
 }) => {
+  const provisional = live ? partialTranscription.trim() : "";
   // Live conversation state is newest-first; DB reads are chronological.
   // Sort by timestamp so both render oldest → newest.
   const turns = [...(conversation?.messages ?? [])]
@@ -50,11 +54,13 @@ export const TranscriptFeed = ({
     turns.length,
     lastContent,
     liveAnswerDraft,
+    provisional,
   ]);
 
   const empty =
     turns.length === 0 &&
-    liveAnswerDraft === null;
+    liveAnswerDraft === null &&
+    !provisional;
 
   return (
     <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto">
@@ -92,6 +98,21 @@ export const TranscriptFeed = ({
               )}
             </div>
           ))}
+          {provisional && (
+            <div className="flex gap-3">
+              <span className="min-w-[40px] pt-0.5 font-mono text-[11px] text-meta">
+                …
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="mb-1 font-mono text-[11px] text-muted-foreground">
+                  hearing
+                </div>
+                <div className="text-sm italic leading-relaxed text-muted-foreground">
+                  {provisional}
+                </div>
+              </div>
+            </div>
+          )}
           {live && liveAnswerDraft !== null && (
             <div className="flex gap-3">
               <span className="min-w-[40px] pt-0.5 font-mono text-[11px] text-meta">

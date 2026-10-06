@@ -109,6 +109,7 @@ const Dashboard = () => {
             conversation={displayed}
             live={isLive}
             liveAnswerDraft={liveAnswerDraft}
+            partialTranscription={snapshot?.partialTranscription ?? ""}
           />
           <button
             onClick={() => setRailCollapsed((v) => !v)}

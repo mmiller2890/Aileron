@@ -777,6 +777,12 @@ async fn run_vad_capture(
         None
     };
     let mut utterance_start_time: f32 = 0.0;
+    // Utterance times are positions in the captured audio, not wall-clock
+    // readings: after a processing stall the loop catches up on buffered
+    // audio, and the clock would stamp those utterances late and misalign
+    // them with the session WAV that diarization reads.
+    let mut samples_processed: u64 = 0;
+    let audio_position_secs = |samples: u64| (samples as f64 / sr as f64) as f32;
 
     while let Some(sample) = stream.next().await {
         if stop_flag.load(Ordering::Acquire) {
@@ -821,6 +827,7 @@ async fn run_vad_capture(
             // Silero ungated audio, and gating first zeroes quiet speech
             // onsets. The gate still applies to the recorded/streamed audio.
             let raw_mono = mono;
+            samples_processed += raw_mono.len() as u64;
 
             // Track the raw input level (pre-gate) for the UI meter and the
             // no-audio warning. A flat meter / warning surfaces the silent-tap
@@ -943,7 +950,7 @@ async fn run_vad_capture(
                     // Include pre-speech buffer for natural sound
                     speech_buffer.extend(pre_speech.drain(..));
 
-                    utterance_start_time = session_start.elapsed().as_secs_f32();
+                    utterance_start_time = audio_position_secs(samples_processed);
 
                     let _ = app.emit("speech-start", ());
                     last_emitted_len = 0;
@@ -973,7 +980,7 @@ async fn run_vad_capture(
 
                 // Safety cap: force emit if exceeds 30s
                 if speech_buffer.len() > max_samples {
-                    let utterance_end_time = session_start.elapsed().as_secs_f32();
+                    let utterance_end_time = audio_position_secs(samples_processed);
                     emit_speech_detected(
                         &app,
                         sr,
@@ -1010,7 +1017,7 @@ async fn run_vad_capture(
                                 speech_buffer.truncate(speech_buffer.len() - trim_amount);
                             }
 
-                            let utterance_end_time = session_start.elapsed().as_secs_f32();
+                            let utterance_end_time = audio_position_secs(samples_processed);
                             emit_speech_detected(
                                 &app,
                                 sr,
@@ -1074,7 +1081,7 @@ async fn run_vad_capture(
 
     // Emit any remaining audio when the stream ends.
     if in_speech && !speech_buffer.is_empty() {
-        let utterance_end_time = session_start.elapsed().as_secs_f32();
+        let utterance_end_time = audio_position_secs(samples_processed);
         emit_speech_detected(
             &app,
             sr,

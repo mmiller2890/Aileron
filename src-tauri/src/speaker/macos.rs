@@ -303,8 +303,7 @@ impl SpeakerInput {
         let format = av::AudioFormat::with_asbd(&asbd)
             .ok_or_else(|| anyhow::anyhow!("Failed to create audio format from tap format"))?;
 
-        let buffer_size = 1024 * 128;
-        let rb = HeapRb::<f32>::new(buffer_size);
+        let rb = HeapRb::<f32>::new(capture_buffer_capacity(asbd.sample_rate));
         let (producer, consumer) = rb.split();
 
         let waker_state = Arc::new(Mutex::new(WakerState {
@@ -337,6 +336,15 @@ impl SpeakerInput {
             current_sample_rate,
         })
     }
+}
+
+/// How much mono audio the capture ring holds while the consumer is stalled.
+/// A stall shorter than this delays the transcript and is caught up without
+/// losing audio; only a longer one overflows and ends the capture.
+const CAPTURE_BUFFER_SECS: usize = 60;
+
+fn capture_buffer_capacity(sample_rate: f64) -> usize {
+    (sample_rate as usize).clamp(8_000, 96_000) * CAPTURE_BUFFER_SECS
 }
 
 fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
@@ -471,6 +479,16 @@ mod tests {
             channel_count: 1,
         };
         (ctx, consumer)
+    }
+
+    #[test]
+    fn capture_buffer_holds_a_minute_at_the_tap_sample_rate() {
+        assert_eq!(capture_buffer_capacity(48_000.0), 48_000 * 60);
+        assert_eq!(capture_buffer_capacity(44_100.0), 44_100 * 60);
+        // A bogus tap format must not size the ring to nothing or to gigabytes.
+        assert_eq!(capture_buffer_capacity(0.0), 8_000 * 60);
+        assert_eq!(capture_buffer_capacity(f64::NAN), 8_000 * 60);
+        assert_eq!(capture_buffer_capacity(1e12), 96_000 * 60);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
 pub mod mic;
+pub(crate) mod live_speakers;
 pub(crate) mod live_text;
 pub(crate) mod session_recording;
 

@@ -363,7 +363,7 @@ describe("STT error paths redact secrets and point at the local server", () => {
     );
 
     expect(err.message).toContain("HTTP 401");
-    expect(err.message).toContain("[REDACTED]");
+    expect(err.message).toContain("[REDACTED:");
     expect(err.message).not.toContain("sk-live-1234567890abc");
   });
 
@@ -392,7 +392,7 @@ describe("STT error paths redact secrets and point at the local server", () => {
     );
 
     expect(err.message).toMatch(/Could not reach http:\/\/localhost:8000/);
-    expect(err.message).toContain("[REDACTED]");
+    expect(err.message).toContain("[REDACTED:");
     expect(err.message).not.toContain("sk-live-1234567890abc");
     expect(err.message).toContain(
       "Check that the local server is running and serving this port.",

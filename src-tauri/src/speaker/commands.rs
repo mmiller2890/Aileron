@@ -429,6 +429,27 @@ impl<T> TaskSlot<T> {
         }
     }
 
+    /// True while a stop holds the slot and is shutting its task down.
+    pub fn is_stopping(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|guard| matches!(&*guard, TaskSlotState::Stopping))
+            .unwrap_or(false)
+    }
+
+    /// Wait for a stop already in progress to finish. Returns false if it is
+    /// still going at the deadline.
+    pub async fn wait_for_stop_in_progress(&self, deadline: Duration) -> bool {
+        let started = Instant::now();
+        while self.is_stopping() {
+            if started.elapsed() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        true
+    }
+
     /// Take the registered task out of the slot (stop path).
     pub fn take(&self) -> Result<Option<tokio::task::JoinHandle<T>>, String> {
         let mut guard = self
@@ -1440,7 +1461,26 @@ pub async fn stop_system_audio_capture(
     // Hold the stop reservation until the capture task has joined and its
     // finalization completed: releasing the slot early would let a start/stop
     // overlap claim it while the previous capture is still shutting down.
-    let (task, stop_reservation) = state.stream_task.take_for_stop()?;
+    let (task, stop_reservation) = match state.stream_task.take_for_stop() {
+        Ok(taken) => taken,
+        // Another stop is already shutting this capture down (device change,
+        // mode switch, a second press). Its shutdown is this call's too: wait
+        // for it and report success, so no caller is left believing the
+        // capture is still running.
+        Err(error) if state.stream_task.is_stopping() => {
+            // Longer than the 5 s the first stop allows its task.
+            return if state
+                .stream_task
+                .wait_for_stop_in_progress(Duration::from_secs(7))
+                .await
+            {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        Err(error) => return Err(error),
+    };
 
     if let Some(task) = task {
         await_capture_shutdown(task, Duration::from_secs(5)).await;
@@ -1987,6 +2027,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_second_stop_can_wait_for_the_first_to_finish() {
+        let slot = Arc::new(TaskSlot::<()>::new());
+        assert!(!slot.is_stopping());
+        // Nothing in progress: returns at once.
+        assert!(slot.wait_for_stop_in_progress(Duration::ZERO).await);
+
+        let reservation = slot.reserve("busy").unwrap();
+        reservation
+            .install(tokio::spawn(std::future::pending::<()>()))
+            .unwrap();
+        let first = slot.clone();
+        let stopper = tokio::spawn(async move {
+            let (task, stopping) = first.take_for_stop().unwrap();
+            task.unwrap().abort();
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            drop(stopping);
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(slot.is_stopping());
+        assert!(slot.take_for_stop().is_err());
+        // Too short: the first stop is still going.
+        assert!(!slot.wait_for_stop_in_progress(Duration::from_millis(5)).await);
+        // Long enough: the wait ends when the first stop releases the slot.
+        assert!(slot.wait_for_stop_in_progress(Duration::from_secs(2)).await);
+        assert!(!slot.is_stopping());
+        stopper.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn timed_out_stop_aborts_before_the_slot_reopens() {
         let slot = TaskSlot::<()>::new();
         let reservation = slot.reserve("busy").unwrap();
@@ -2332,7 +2402,22 @@ pub async fn stop_mic_dictation(app: AppHandle) -> Result<(), String> {
     if state.task.request_stop_during_start()? {
         return Ok(());
     }
-    let (task, _stopping) = state.task.take_for_stop()?;
+    let (task, _stopping) = match state.task.take_for_stop() {
+        Ok(taken) => taken,
+        // Another stop is already shutting dictation down: wait for it.
+        Err(error) if state.task.is_stopping() => {
+            return if state
+                .task
+                .wait_for_stop_in_progress(Duration::from_secs(5))
+                .await
+            {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(task) = task {
         await_dictation_shutdown(task).await;
     }

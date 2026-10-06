@@ -67,7 +67,7 @@ describe("provider error redaction", () => {
     );
 
     expect(result).toBe(
-      "request to https://example.com failed with [REDACTED]",
+      "request to https://example.com failed with [REDACTED:API_KEY]",
     );
     expect(result).not.toContain("password");
     expect(result).not.toContain("private");
@@ -88,7 +88,7 @@ describe("provider error redaction", () => {
       MODEL: "qwen",
     });
 
-    expect(result).toBe("rejected key [REDACTED]");
+    expect(result).toBe("rejected key [REDACTED:KEY]");
   });
 
   it("redacts a short value when the variable is explicitly a secret", () => {
@@ -96,7 +96,18 @@ describe("provider error redaction", () => {
       redactProviderError("bad token abc123", {
         API_KEY: "abc123",
       }),
-    ).toBe("bad token [REDACTED]");
+    ).toBe("bad token [REDACTED:API_KEY]");
+  });
+
+  it("names the setting it hid so a long non-secret value stays diagnosable", () => {
+    expect(
+      redactProviderError("deployment gpt-4o-mini-prod not found in us-central1", {
+        DEPLOYMENT: "gpt-4o-mini-prod",
+        REGION: "us-central1",
+      }),
+    ).toBe(
+      "deployment [REDACTED:DEPLOYMENT] not found in [REDACTED:REGION]",
+    );
   });
 
   it("leaves short non-secret values alone so the message survives", () => {

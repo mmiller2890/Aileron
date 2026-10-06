@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 use fluidaudio_rs::{AsrModelVersion, FluidAudio};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -441,6 +442,21 @@ mod utterance_store_tests {
         assert!(state.live_speaker_model().is_none());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_readiness_is_readable_while_the_workers_hold_the_model_locks() {
+        let state = SttState::default();
+        state
+            .live_text_ready
+            .store(true, std::sync::atomic::Ordering::Release);
+        // A worker mid-feed, or a download in progress, holds these.
+        let _text = state.live_text.lock().unwrap();
+        let _speakers = state.live_speakers.lock().unwrap();
+
+        assert!(state.live_text_model().is_some());
+        assert!(state.live_speaker_model().is_none());
+    }
+
     #[test]
     fn status_reports_live_speakers_as_not_ready_by_default() {
         let state = SttState::default();
@@ -531,6 +547,11 @@ pub struct SttState {
     mic_vad: Arc<Mutex<VadInner>>,
     live_text: Arc<Mutex<LiveTextInner>>,
     live_speakers: Arc<Mutex<LiveSpeakersInner>>,
+    /// Readiness of the two live models, kept outside their locks: the
+    /// workers hold those locks while they run, and neither a status poll
+    /// nor a capture start may wait on (or be fooled by) a busy lock.
+    live_text_ready: Arc<AtomicBool>,
+    live_speakers_ready: Arc<AtomicBool>,
     last_status: Mutex<Option<serde_json::Value>>,
 }
 
@@ -640,6 +661,7 @@ impl SttState {
     #[cfg(target_os = "macos")]
     fn init_live_text_inner(
         inner: Arc<Mutex<LiveTextInner>>,
+        ready: Arc<AtomicBool>,
         app: AppHandle,
     ) -> Result<(), String> {
         let mut guard = inner.lock().map_err(|e| e.to_string())?;
@@ -674,6 +696,7 @@ impl SttState {
             .and_then(|_| audio.streaming_asr_reset())
             .map_err(|e| e.to_string())?;
         guard.ready = true;
+        ready.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -682,13 +705,7 @@ impl SttState {
     pub(crate) fn live_text_model(
         &self,
     ) -> Option<Box<dyn crate::speaker::live_text::LiveTextModel>> {
-        // try_lock: the first load holds this lock for the whole download,
-        // and a capture start must not wait behind it. Busy means not ready.
-        let ready = self
-            .live_text
-            .try_lock()
-            .map(|guard| guard.ready)
-            .unwrap_or(false);
+        let ready = self.live_text_ready.load(Ordering::Acquire);
         ready.then(|| {
             Box::new(FluidLiveTextModel {
                 inner: self.live_text.clone(),
@@ -699,6 +716,7 @@ impl SttState {
     #[cfg(target_os = "macos")]
     fn init_live_speakers_inner(
         inner: Arc<Mutex<LiveSpeakersInner>>,
+        ready: Arc<AtomicBool>,
         app: AppHandle,
     ) -> Result<(), String> {
         let mut guard = inner.lock().map_err(|e| e.to_string())?;
@@ -736,6 +754,7 @@ impl SttState {
             .and_then(|_| audio.live_diarizer_reset())
             .map_err(|e| e.to_string())?;
         guard.ready = true;
+        ready.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -744,12 +763,7 @@ impl SttState {
     pub(crate) fn live_speaker_model(
         &self,
     ) -> Option<Box<dyn crate::speaker::live_speakers::LiveSpeakerModel>> {
-        // try_lock, for the same reason as `live_text_model`.
-        let ready = self
-            .live_speakers
-            .try_lock()
-            .map(|guard| guard.ready)
-            .unwrap_or(false);
+        let ready = self.live_speakers_ready.load(Ordering::Acquire);
         ready.then(|| {
             Box::new(FluidLiveSpeakerModel {
                 inner: self.live_speakers.clone(),
@@ -994,16 +1008,6 @@ impl SttState {
                 Ok(guard) => guard,
                 Err(_) => return self.cached_status(),
             };
-            // The live-text worker holds this lock only for single feeds, but
-            // the first model load holds it for the whole download.
-            let live_text_guard = match self.live_text.try_lock() {
-                Ok(guard) => guard,
-                Err(_) => return self.cached_status(),
-            };
-            let live_speakers_guard = match self.live_speakers.try_lock() {
-                Ok(guard) => guard,
-                Err(_) => return self.cached_status(),
-            };
 
             let (is_apple_silicon, is_intel) = if let Some(audio) = guard.audio.as_ref() {
                 (audio.is_apple_silicon(), audio.is_intel_mac())
@@ -1018,8 +1022,8 @@ impl SttState {
                 "asr_ready": guard.asr_ready,
                 "model_version": guard.model_version.map(AsrModelVersion::as_str),
                 "vad_ready": streaming_vad_guard.ready && mic_vad_guard.ready,
-                "live_text_ready": live_text_guard.ready,
-                "live_speakers_ready": live_speakers_guard.ready,
+                "live_text_ready": self.live_text_ready.load(Ordering::Acquire),
+                "live_speakers_ready": self.live_speakers_ready.load(Ordering::Acquire),
                 "is_apple_silicon": is_apple_silicon,
                 "is_intel": is_intel,
                 "is_supported": is_apple_silicon && !is_intel,
@@ -1222,7 +1226,8 @@ pub async fn stt_init_live_text(state: State<'_, SttState>, app: AppHandle) -> R
     #[cfg(target_os = "macos")]
     {
         let inner = state.live_text.clone();
-        tokio::task::spawn_blocking(move || SttState::init_live_text_inner(inner, app))
+        let ready = state.live_text_ready.clone();
+        tokio::task::spawn_blocking(move || SttState::init_live_text_inner(inner, ready, app))
             .await
             .map_err(|e| e.to_string())?
     }
@@ -1242,7 +1247,10 @@ pub async fn stt_init_live_speakers(
     #[cfg(target_os = "macos")]
     {
         let inner = state.live_speakers.clone();
-        tokio::task::spawn_blocking(move || SttState::init_live_speakers_inner(inner, app))
+        let ready = state.live_speakers_ready.clone();
+        tokio::task::spawn_blocking(move || {
+            SttState::init_live_speakers_inner(inner, ready, app)
+        })
             .await
             .map_err(|e| e.to_string())?
     }

@@ -285,11 +285,13 @@ export function redactProviderError(
         SECRET_VARIABLE_NAME.test(key)
       );
     })
-    .map(([, value]) => value)
-    .sort((a, b) => b.length - a.length);
+    .sort(([, a], [, b]) => b.length - a.length);
 
-  for (const secret of secretValues) {
-    redacted = redacted.split(secret).join("[REDACTED]");
+  // The marker names the variable, never its value: an error such as
+  // "deployment [REDACTED:DEPLOYMENT] not found" still tells the user which
+  // setting to look at.
+  for (const [key, secret] of secretValues) {
+    redacted = redacted.split(secret).join(`[REDACTED:${key.toUpperCase()}]`);
   }
   return redacted;
 }

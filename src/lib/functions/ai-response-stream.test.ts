@@ -121,6 +121,35 @@ describe("fetchAIResponse non-streaming response", () => {
     expect(out).toEqual([""]);
   });
 
+  it("joins the text of a content-parts array", async () => {
+    const out = await drainJson(
+      {
+        content: [
+          { type: "text", text: "Hello" },
+          { type: "tool_use", id: "t1" },
+          { type: "text", text: " there" },
+        ],
+      },
+      "content",
+    );
+
+    expect(out).toEqual(["Hello there"]);
+  });
+
+  it("says the model sent no text when the content is null, without blaming the path", async () => {
+    const attempt = drainJson(
+      { choices: [{ message: { content: null } }] },
+      "choices[0].message.content",
+    );
+    await expect(attempt).rejects.toThrow(/returned no text for this request/);
+    await expect(
+      drainJson(
+        { choices: [{ message: { content: null } }] },
+        "choices[0].message.content",
+      ),
+    ).rejects.not.toThrow(/responseContentPath/);
+  });
+
   it("throws instead of yielding the whole body when the path is empty", async () => {
     await expect(
       drainJson({ choices: [{ message: { content: "Hello" } }] }, ""),

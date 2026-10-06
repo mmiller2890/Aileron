@@ -48,6 +48,35 @@ function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
   return prompts.join(" ");
 }
 
+/**
+ * What a non-streaming provider put at `responseContentPath`. Text comes as a
+ * plain string or as a list of parts (`[{ type: "text", text }]`); an explicit
+ * null means the model sent none; anything else means the path is wrong.
+ */
+export function nonStreamingText(
+  content: unknown,
+):
+  | { kind: "text"; text: string }
+  | { kind: "declined" }
+  | { kind: "unreadable" } {
+  if (typeof content === "string") return { kind: "text", text: content };
+  if (content === null) return { kind: "declined" };
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((part) =>
+        typeof part === "string"
+          ? part
+          : part && typeof part === "object" && typeof part.text === "string"
+            ? (part.text as string)
+            : null,
+      )
+      .filter((part): part is string => part !== null);
+    if (parts.length > 0) return { kind: "text", text: parts.join("") };
+    return content.length === 0 ? { kind: "declined" } : { kind: "unreadable" };
+  }
+  return { kind: "unreadable" };
+}
+
 export async function* fetchAIResponse(params: {
   provider: TYPE_PROVIDER | undefined;
   selectedProvider: {
@@ -260,18 +289,28 @@ export async function* fetchAIResponse(params: {
         );
       }
       const contentPath = provider?.responseContentPath || "";
-      const content = getByPath(json, contentPath);
+      const content = nonStreamingText(getByPath(json, contentPath));
+      if (content.kind === "declined") {
+        // The path is right but the model sent no text (a refusal, a tool
+        // call, or filtered output). Blaming the path would send the user to
+        // fix a setting that is not wrong.
+        throw new Error(
+          `Provider "${
+            provider?.id || "unknown"
+          }" returned no text for this request (the model may have declined or tried to call a tool)`,
+        );
+      }
       // Without this guard an empty or wrong responseContentPath makes
       // getByPath hand back the whole parsed response, which the caller
       // renders and persists as the literal text "[object Object]".
-      if (typeof content !== "string") {
+      if (content.kind === "unreadable") {
         throw new Error(
           `Provider "${
             provider?.id || "unknown"
           }" returned a response with no text at responseContentPath "${contentPath}"`,
         );
       }
-      yield content;
+      yield content.text;
       return;
     }
 

@@ -16,6 +16,7 @@ Install deps first:
 import argparse
 import io
 import sys
+import threading
 
 # Fallback model when the module is imported directly (e.g. `uvicorn whisper_server:app`)
 # without going through main()'s --model argument. Must match main()'s default.
@@ -39,6 +40,9 @@ except ImportError:
 
 app = FastAPI(title="Local Whisper Server")
 model: WhisperModel | None = None
+# The handler is sync, so FastAPI runs it on a threadpool: without the lock two
+# back-to-back requests would each load the default model.
+model_load_lock = threading.Lock()
 
 
 @app.post("/v1/audio/transcriptions")
@@ -55,12 +59,15 @@ def transcribe(file: UploadFile = File(...)):
     global model
     active_model = model
     if active_model is None:
-        # Module run directly (e.g. `uvicorn whisper_server:app`) skips
-        # main(), which is where the model is normally loaded. Load the
-        # default model lazily instead of crashing with a 500.
-        print(f"Loading default model: {DEFAULT_MODEL} (device=auto, compute_type=default)...")
-        active_model = WhisperModel(DEFAULT_MODEL, device="auto", compute_type="default")
-        model = active_model
+        with model_load_lock:
+            active_model = model
+            if active_model is None:
+                # Module run directly (e.g. `uvicorn whisper_server:app`) skips
+                # main(), which is where the model is normally loaded. Load the
+                # default model lazily instead of crashing with a 500.
+                print(f"Loading default model: {DEFAULT_MODEL} (device=auto, compute_type=default)...")
+                active_model = WhisperModel(DEFAULT_MODEL, device="auto", compute_type="default")
+                model = active_model
 
     segments, info = active_model.transcribe(io.BytesIO(audio_bytes), beam_size=5)
     text = " ".join(seg.text for seg in segments).strip()

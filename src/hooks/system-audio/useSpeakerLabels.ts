@@ -123,7 +123,7 @@ function resolveSpeakerFromSegments(
 }
 
 export function useSpeakerLabels(
-  setConversation: Dispatch<SetStateAction<ChatConversation>>
+  setConversation: Dispatch<SetStateAction<ChatConversation>>,
 ) {
   const [speakerSegments, setSpeakerSegments] = useState<SpeakerSegment[]>([]);
   const [isLabelingSpeakers, setIsLabelingSpeakers] = useState(false);
@@ -132,16 +132,13 @@ export function useSpeakerLabels(
   const resolveSpeaker = useCallback(getSpeakerForUtterance, []);
 
   const labelMessagesWithSpeakers = useCallback(
-    (
-      segments: SpeakerSegment[],
-      utterances: UtteranceRecord[],
-    ) => {
+    (segments: SpeakerSegment[], utterances: UtteranceRecord[]) => {
       setConversation((prev) => ({
         ...prev,
         messages: applySpeakerLabels(prev.messages, segments, utterances),
       }));
     },
-    [setConversation]
+    [setConversation],
   );
 
   return {

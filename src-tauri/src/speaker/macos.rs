@@ -248,6 +248,9 @@ impl SpeakerInput {
             ctx: Option<&mut Ctx>,
         ) -> os::Status {
             let ctx = ctx.unwrap();
+            if ctx.should_terminate.load(Ordering::Acquire) {
+                return os::Status::NO_ERR;
+            }
 
             ctx.current_sample_rate.store(
                 device
@@ -337,6 +340,10 @@ impl SpeakerInput {
 }
 
 fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
+    if ctx.should_terminate.load(Ordering::Acquire) {
+        return;
+    }
+
     let mono_data: Vec<f32> = if ctx.channel_count <= 1 {
         data.to_vec()
     } else {
@@ -360,11 +367,8 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
             eprintln!("Warning: Audio buffer experiencing drops - system may be overloaded");
         }
 
-        if consecutive > 50 {
+        if consecutive > 50 && !ctx.should_terminate.swap(true, Ordering::AcqRel) {
             eprintln!("Critical: Audio buffer overflow - capture stopping");
-            ctx.should_terminate.store(true, Ordering::Release);
-            // No early return here: fall through to the wake section so a
-            // consumer parked in poll_next is woken and can return None.
         }
     } else {
         // Success - reset consecutive drops counter
@@ -374,7 +378,7 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
     // Wake up consumer if we have new data
     let should_wake = {
         let mut waker_state = ctx.waker_state.lock().unwrap_or_else(|e| e.into_inner());
-        if !waker_state.has_data {
+        if !waker_state.has_data || ctx.should_terminate.load(Ordering::Acquire) {
             waker_state.has_data = true;
             waker_state.waker.take()
         } else {
@@ -387,38 +391,58 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
     }
 }
 
+/// Next buffered sample, or end-of-stream once termination is latched and
+/// the buffer is empty. A terminated producer rejects further audio, so the
+/// drain is bounded by the ring capacity. The pop after the termination check
+/// covers a producer that pushed and latched between the two.
+fn pop_or_end(consumer: &mut HeapCons<f32>, should_terminate: &AtomicBool) -> Option<Option<f32>> {
+    if let Some(sample) = consumer.try_pop() {
+        return Some(Some(sample));
+    }
+    if should_terminate.load(Ordering::Acquire) {
+        return Some(consumer.try_pop());
+    }
+    None
+}
+
+fn poll_audio_sample(
+    consumer: &mut HeapCons<f32>,
+    should_terminate: &AtomicBool,
+    waker_state: &Mutex<WakerState>,
+    cx: &mut std::task::Context<'_>,
+) -> Poll<Option<f32>> {
+    if let Some(next) = pop_or_end(consumer, should_terminate) {
+        return Poll::Ready(next);
+    }
+
+    {
+        let mut state = waker_state.lock().unwrap_or_else(|e| e.into_inner());
+        state.has_data = false;
+        state.waker = Some(cx.waker().clone());
+    }
+
+    // Re-check after registering the waker: a push or a termination that
+    // landed before the registration saw a stale waker state.
+    match pop_or_end(consumer, should_terminate) {
+        Some(next) => Poll::Ready(next),
+        None => Poll::Pending,
+    }
+}
+
 impl Stream for SpeakerStream {
     type Item = f32;
 
     fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        if let Some(sample) = self.consumer.try_pop() {
-            return Poll::Ready(Some(sample));
-        }
-
-        if self._ctx.should_terminate.load(Ordering::Acquire) {
-            return match self.consumer.try_pop() {
-                Some(sample) => Poll::Ready(Some(sample)),
-                None => Poll::Ready(None),
-            };
-        }
-
-        {
-            let mut state = self.waker_state.lock().unwrap_or_else(|e| e.into_inner());
-            state.has_data = false;
-            state.waker = Some(cx.waker().clone());
-        }
-
-        // Re-check after registering the waker: a producer that pushed
-        // between the first try_pop and the registration saw a stale
-        // has_data and skipped the wake, so the buffer may hold data now.
-        if let Some(sample) = self.consumer.try_pop() {
-            return Poll::Ready(Some(sample));
-        }
-
-        Poll::Pending
+        let stream = self.get_mut();
+        poll_audio_sample(
+            &mut stream.consumer,
+            &stream._ctx.should_terminate,
+            &stream.waker_state,
+            cx,
+        )
     }
 }
 
@@ -431,6 +455,110 @@ impl Drop for SpeakerStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_buffer() -> (Ctx, HeapCons<f32>) {
+        let (producer, consumer) = HeapRb::<f32>::new(4).split();
+        let ctx = Ctx {
+            format: av::AudioFormat::standard_with_sample_rate_and_channels(48_000.0, 1).unwrap(),
+            producer,
+            waker_state: Arc::new(Mutex::new(WakerState {
+                waker: None,
+                has_data: false,
+            })),
+            current_sample_rate: Arc::new(AtomicU32::new(48_000)),
+            consecutive_drops: Arc::new(AtomicU32::new(0)),
+            should_terminate: Arc::new(AtomicBool::new(false)),
+            channel_count: 1,
+        };
+        (ctx, consumer)
+    }
+
+    #[test]
+    fn terminated_callback_does_not_refill_or_repeat_overflow() {
+        let (mut ctx, mut consumer) = test_buffer();
+        for _ in 0..52 {
+            process_audio_data(&mut ctx, &[0.5; 8]);
+        }
+        assert!(ctx.should_terminate.load(Ordering::Acquire));
+        let drops = ctx.consecutive_drops.load(Ordering::Acquire);
+        while consumer.try_pop().is_some() {}
+        for _ in 0..100 {
+            process_audio_data(&mut ctx, &[0.5; 8]);
+        }
+        assert!(consumer.try_pop().is_none());
+        assert_eq!(ctx.consecutive_drops.load(Ordering::Acquire), drops);
+    }
+
+    #[test]
+    fn terminated_consumer_drains_buffered_audio_then_ends() {
+        let (mut ctx, mut consumer) = test_buffer();
+        process_audio_data(&mut ctx, &[0.5; 4]);
+        ctx.should_terminate.store(true, Ordering::Release);
+        // A terminated producer adds nothing, so the drain is bounded.
+        process_audio_data(&mut ctx, &[0.25; 4]);
+        let mut cx = std::task::Context::from_waker(Waker::noop());
+        for _ in 0..4 {
+            assert_eq!(
+                poll_audio_sample(
+                    &mut consumer,
+                    &ctx.should_terminate,
+                    &ctx.waker_state,
+                    &mut cx
+                ),
+                Poll::Ready(Some(0.5))
+            );
+        }
+        assert_eq!(
+            poll_audio_sample(
+                &mut consumer,
+                &ctx.should_terminate,
+                &ctx.waker_state,
+                &mut cx
+            ),
+            Poll::Ready(None)
+        );
+    }
+
+    #[test]
+    fn live_consumer_drains_audio_and_registers_for_wakeup() {
+        let (mut ctx, mut consumer) = test_buffer();
+        let mut cx = std::task::Context::from_waker(Waker::noop());
+        assert_eq!(
+            poll_audio_sample(
+                &mut consumer,
+                &ctx.should_terminate,
+                &ctx.waker_state,
+                &mut cx
+            ),
+            Poll::Pending
+        );
+        process_audio_data(&mut ctx, &[0.5]);
+        assert!(ctx.waker_state.lock().unwrap().waker.is_none());
+        assert_eq!(
+            poll_audio_sample(
+                &mut consumer,
+                &ctx.should_terminate,
+                &ctx.waker_state,
+                &mut cx
+            ),
+            Poll::Ready(Some(0.5))
+        );
+    }
+
+    #[test]
+    fn terminal_transition_wakes_even_when_has_data_is_set() {
+        let (mut ctx, _consumer) = test_buffer();
+        process_audio_data(&mut ctx, &[0.5; 4]);
+        ctx.consecutive_drops.store(50, Ordering::Release);
+        {
+            let mut state = ctx.waker_state.lock().unwrap();
+            state.has_data = true;
+            state.waker = Some(Waker::noop().clone());
+        }
+        process_audio_data(&mut ctx, &[0.5; 8]);
+        assert!(ctx.should_terminate.load(Ordering::Acquire));
+        assert!(ctx.waker_state.lock().unwrap().waker.is_none());
+    }
 
     /// A consumer parked in `poll_next` has registered its waker with
     /// `has_data = false`. Sustained buffer overflow makes the producer set

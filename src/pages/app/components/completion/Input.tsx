@@ -109,8 +109,7 @@ export const Input = ({
                   keepEngaged ? "AI response" : "conversation mode"
                 }`}</p>
                 <span className="text-[10px] text-muted-foreground/60 bg-muted/30 px-1 py-0 rounded border border-input/50">
-                  {isMacOS() ? "⌘" : "Ctrl"}{" "}
-                  + K
+                  {isMacOS() ? "⌘" : "Ctrl"} + K
                 </span>
                 <Switch
                   checked={keepEngaged}
@@ -143,8 +142,8 @@ export const Input = ({
                   isLoading
                     ? "Cancel loading"
                     : keepEngaged
-                    ? "Close and start new conversation"
-                    : "Clear conversation"
+                      ? "Close and start new conversation"
+                      : "Clear conversation"
                 }
               >
                 <XIcon />
@@ -197,7 +196,7 @@ export const Input = ({
                                 {
                                   hour: "2-digit",
                                   minute: "2-digit",
-                                }
+                                },
                               )}
                             </span>
                           </div>

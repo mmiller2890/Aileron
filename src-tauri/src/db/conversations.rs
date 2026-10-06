@@ -91,8 +91,12 @@ pub(crate) async fn apply_conversation(
 ) -> Result<(), ConversationError> {
     validate(conversation)?;
 
+    // IMMEDIATE takes the write lock up front. A deferred transaction reads
+    // first and upgrades on the first write, and SQLite fails that upgrade
+    // with SQLITE_BUSY (no busy_timeout wait) when another save got there
+    // first, so overlapping saves were rejected instead of queued.
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(ConversationError::Database)?;
 
@@ -328,6 +332,11 @@ mod tests {
             apply_conversation(&pool, &save_a, Operation::Upsert),
             apply_conversation(&pool, &save_b, Operation::Upsert)
         );
+
+        // Overlapping saves must be serialized, not rejected: a save that
+        // loses the lock race is a dropped save for the user.
+        assert!(result_a.is_ok(), "save A failed: {result_a:?}");
+        assert!(result_b.is_ok(), "save B failed: {result_b:?}");
 
         let (title, messages) = fetch_conversation(&pool, "c1").await;
         let complete_a = title == "Title A"

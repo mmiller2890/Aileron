@@ -6,7 +6,7 @@ Assistant's FluidAudio integration.
 
 Upstream: https://github.com/FluidInference/fluidaudio-rs
 
-The Swift package dependency is pinned separately in `Package.swift`.
+The Swift package dependency is pinned separately in `Package.swift` to FluidAudio v0.17.4 (`21493f8dac5a97e65742e6ff26f42f164c2fda0f`).
 
 Assistant carries these intentional bridge changes on top of that upstream
 revision:

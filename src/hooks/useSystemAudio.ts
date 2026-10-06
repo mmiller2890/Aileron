@@ -336,7 +336,11 @@ export function useSystemAudio() {
                 end: number;
               } | null =
                 payload.start_time !== 0 || payload.end_time !== 0
-                  ? { messageId: null, start: payload.start_time, end: payload.end_time }
+                  ? {
+                      messageId: null,
+                      start: payload.start_time,
+                      end: payload.end_time,
+                    }
                   : null;
               if (utteranceRecord) {
                 utteranceRecordsRef.current.push(utteranceRecord);
@@ -1336,36 +1340,47 @@ export function useSystemAudio() {
     };
   }, []);
 
+  // Save a snapshot outside the debounce, after any save already in flight so
+  // an older snapshot of the same conversation cannot land on top of it.
+  const saveSnapshotNow = useCallback(async (snapshot: ChatConversation) => {
+    if (inFlightSaveRef.current) {
+      try {
+        await inFlightSaveRef.current;
+      } catch (error) {
+        console.debug("Concurrent conversation save failed:", error);
+      }
+    }
+    try {
+      await saveConversation(snapshot);
+    } catch (error) {
+      console.error("Failed to save system audio conversation:", error);
+    }
+  }, []);
+
   useEffect(() => {
     return () => {
-      const flush = async () => {
-        const snapshot = pendingSaveConversationRef.current;
-        pendingSaveConversationRef.current = null;
-        if (saveTimeoutRef.current) {
-          clearTimeout(saveTimeoutRef.current);
-          saveTimeoutRef.current = null;
-        }
-        if (!snapshot) return;
-        if (inFlightSaveRef.current) {
-          try {
-            await inFlightSaveRef.current;
-          } catch (error) {
-            console.debug("Concurrent conversation save failed:", error);
-          }
-        }
-        try {
-          await saveConversation(snapshot);
-        } catch (error) {
-          console.error("Failed to save system audio conversation:", error);
-        }
-      };
-      flush();
+      const snapshot = pendingSaveConversationRef.current;
+      pendingSaveConversationRef.current = null;
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
+      if (snapshot) void saveSnapshotNow(snapshot);
     };
-  }, []);
+  }, [saveSnapshotNow]);
 
   useEffect(() => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
+    }
+
+    // The conversation was replaced inside the debounce window (new session):
+    // its cancelled save would otherwise be overwritten by the next
+    // conversation's snapshot, or sit here until unmount. Write it now.
+    const superseded = pendingSaveConversationRef.current;
+    if (superseded && superseded.id !== conversation.id) {
+      pendingSaveConversationRef.current = null;
+      void saveSnapshotNow(superseded);
     }
 
     if (

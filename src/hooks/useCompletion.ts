@@ -71,7 +71,9 @@ export const useCompletion = () => {
   } = useApp();
   // The mic popover only ever shows the missing-config warning, so micOpen is
   // meaningful (opens the popover / expands the window) only when unconfigured.
-  const sttConfigured = Boolean(localApiEnabled || selectedSttProvider.provider);
+  const sttConfigured = Boolean(
+    localApiEnabled || selectedSttProvider.provider,
+  );
   const globalShortcuts = useGlobalShortcuts();
 
   const [state, setState] = useState<CompletionState>({
@@ -105,7 +107,7 @@ export const useCompletion = () => {
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeBatcherRef = useRef<ReturnType<typeof createTokenBatcher> | null>(
-    null
+    null,
   );
   const currentRequestIdRef = useRef<string | null>(null);
   const activeGenerationRef = useRef(0);
@@ -164,7 +166,7 @@ export const useCompletion = () => {
     async (
       userMessage: string,
       assistantResponse: string,
-      _attachedFiles: AttachedFile[]
+      _attachedFiles: AttachedFile[],
     ) => {
       // Validate inputs
       if (!userMessage || !assistantResponse) {
@@ -198,7 +200,7 @@ export const useCompletion = () => {
       if (state.currentConversationId) {
         try {
           existingConversation = await getConversationById(
-            state.currentConversationId
+            state.currentConversationId,
           );
         } catch (error) {
           console.error("Failed to get existing conversation:", error);
@@ -243,7 +245,7 @@ export const useCompletion = () => {
         }
       }
     },
-    [state.currentConversationId, state.conversationHistory]
+    [state.currentConversationId, state.conversationHistory],
   );
 
   const submit = useCallback(
@@ -302,7 +304,7 @@ export const useCompletion = () => {
         }
 
         const provider = allAiProviders.find(
-          (p) => p.id === selectedAIProvider.provider
+          (p) => p.id === selectedAIProvider.provider,
         );
         if (!provider) {
           setState((prev) => ({
@@ -334,7 +336,7 @@ export const useCompletion = () => {
             }));
           },
           undefined,
-          isCurrent
+          isCurrent,
         );
         activeBatcherRef.current = batcher;
 
@@ -401,7 +403,7 @@ export const useCompletion = () => {
           await saveCurrentConversation(
             input,
             fullResponse,
-            state.attachedFiles
+            state.attachedFiles,
           );
           // Clear input and attached files after saving
           if (
@@ -435,7 +437,7 @@ export const useCompletion = () => {
       systemPrompt,
       state.conversationHistory,
       saveCurrentConversation,
-    ]
+    ],
   );
 
   const cancel = useCallback(() => {
@@ -480,18 +482,21 @@ export const useCompletion = () => {
   // Note: saveConversation, getConversationById, and generateConversationTitle
   // are now imported from lib/database/chat-history.action.ts
 
-  const loadConversation = useCallback((conversation: ChatConversation) => {
-    invalidateActiveCompletion();
-    setState((prev) => ({
-      ...prev,
-      currentConversationId: conversation.id,
-      conversationHistory: conversation.messages,
-      input: "",
-      response: "",
-      error: null,
-      isLoading: false,
-    }));
-  }, [invalidateActiveCompletion]);
+  const loadConversation = useCallback(
+    (conversation: ChatConversation) => {
+      invalidateActiveCompletion();
+      setState((prev) => ({
+        ...prev,
+        currentConversationId: conversation.id,
+        conversationHistory: conversation.messages,
+        input: "",
+        response: "",
+        error: null,
+        isLoading: false,
+      }));
+    },
+    [invalidateActiveCompletion],
+  );
 
   const startNewConversation = useCallback(() => {
     invalidateActiveCompletion();
@@ -579,12 +584,12 @@ export const useCompletion = () => {
     return () => {
       window.removeEventListener(
         "conversationSelected",
-        handleConversationSelected
+        handleConversationSelected,
       );
       window.removeEventListener("newConversation", handleNewConversation);
       window.removeEventListener(
         "conversationDeleted",
-        handleConversationDeleted
+        handleConversationDeleted,
       );
       window.removeEventListener("storage", handleStorageChange);
     };
@@ -594,7 +599,7 @@ export const useCompletion = () => {
     const files = Array.from(e.target.files || []);
     const selectedFiles = selectImageFilesWithinLimit(
       files,
-      state.attachedFiles.length
+      state.attachedFiles.length,
     );
     selectedFiles.forEach((file) => {
       addFile(file);
@@ -655,7 +660,7 @@ export const useCompletion = () => {
             }
 
             const provider = allAiProviders.find(
-              (p) => p.id === selectedAIProvider.provider
+              (p) => p.id === selectedAIProvider.provider,
             );
             if (!provider) {
               setState((prev) => ({
@@ -686,7 +691,7 @@ export const useCompletion = () => {
                 }));
               },
               undefined,
-              isCurrent
+              isCurrent,
             );
             activeBatcherRef.current = batcher;
 
@@ -791,7 +796,9 @@ export const useCompletion = () => {
 
           setState((prev) => ({
             ...prev,
-            attachedFiles: appendWithinLimit(prev.attachedFiles, [attachedFile]),
+            attachedFiles: appendWithinLimit(prev.attachedFiles, [
+              attachedFile,
+            ]),
           }));
         }
       } catch (error) {
@@ -814,7 +821,7 @@ export const useCompletion = () => {
       systemPrompt,
       saveCurrentConversation,
       inputRef,
-    ]
+    ],
   );
 
   const onRemoveAllFiles = () => {
@@ -838,7 +845,7 @@ export const useCompletion = () => {
       if (!items) return;
 
       const hasImages = Array.from(items).some((item) =>
-        item.type.startsWith("image/")
+        item.type.startsWith("image/"),
       );
 
       // If we have images, prevent default text pasting and process images
@@ -850,14 +857,14 @@ export const useCompletion = () => {
           .filter((file): file is File => file !== null);
         const processedFiles = selectImageFilesWithinLimit(
           clipboardFiles,
-          state.attachedFiles.length
+          state.attachedFiles.length,
         );
 
         // Process all files
         await Promise.all(processedFiles.map((file) => addFile(file)));
       }
     },
-    [state.attachedFiles.length, addFile]
+    [state.attachedFiles.length, addFile],
   );
 
   const isPopoverOpen =
@@ -871,7 +878,7 @@ export const useCompletion = () => {
       isPopoverOpen ||
         (micOpen && !sttConfigured) ||
         messageHistoryOpen ||
-        isFilesPopoverOpen
+        isFilesPopoverOpen,
     );
   }, [
     isPopoverOpen,
@@ -892,7 +899,7 @@ export const useCompletion = () => {
       responseSettings.autoScroll
     ) {
       const scrollElement = scrollAreaRef.current.querySelector(
-        "[data-radix-scroll-area-viewport]"
+        "[data-radix-scroll-area-viewport]",
       );
       if (scrollElement) {
         scrollElement.scrollTo({
@@ -909,7 +916,7 @@ export const useCompletion = () => {
       if (!isPopoverOpen) return;
 
       const scrollElement = scrollAreaRef.current?.querySelector(
-        "[data-radix-scroll-area-viewport]"
+        "[data-radix-scroll-area-viewport]",
       ) as HTMLElement;
 
       if (!scrollElement) return;
@@ -1056,8 +1063,8 @@ export const useCompletion = () => {
                 isProcessingScreenshotRef.current = false;
               }, 100);
             }
-          })
-        )
+          }),
+        ),
       )
       .catch((error) => {
         console.error("Failed to listen for captured selection:", error);
@@ -1078,8 +1085,8 @@ export const useCompletion = () => {
             setIsScreenshotLoading(false);
             isProcessingScreenshotRef.current = false;
             screenshotInitiatedByThisContext.current = false;
-          })
-        )
+          }),
+        ),
       )
       .catch((error) => {
         console.error("Failed to listen for capture close:", error);
@@ -1112,10 +1119,8 @@ export const useCompletion = () => {
 
   // register callbacks for global shortcuts
   useEffect(() => {
-    const disposeAudio =
-      globalShortcuts.registerAudioCallback(toggleRecording);
-    const disposeInput =
-      globalShortcuts.registerInputRef(inputRef.current);
+    const disposeAudio = globalShortcuts.registerAudioCallback(toggleRecording);
+    const disposeInput = globalShortcuts.registerInputRef(inputRef.current);
     const disposeScreenshot =
       globalShortcuts.registerScreenshotCallback(captureScreenshot);
     return () => {

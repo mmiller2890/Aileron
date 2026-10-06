@@ -327,7 +327,11 @@ impl Default for VadConfig {
 /// finishing task clear the slot only while it still holds its own handle.
 enum TaskSlotState<T> {
     Vacant,
-    Reserved,
+    /// A start holds the slot while it sets up and spawns. `stop_requested`
+    /// records a stop that arrived in that window so `install` can report it.
+    Starting { stop_requested: bool },
+    /// A stop holds the slot until the task it took has shut down.
+    Stopping,
     Running(tokio::task::JoinHandle<T>),
 }
 
@@ -348,6 +352,9 @@ pub struct TaskStopReservation<'a, T> {
 pub enum TaskInstallOutcome {
     Running,
     Finished,
+    /// A stop was requested while the start was still setting up. The task is
+    /// installed; the starter must stop it instead of reporting success.
+    StopRequested,
 }
 
 impl<T> TaskSlot<T> {
@@ -364,13 +371,34 @@ impl<T> TaskSlot<T> {
             .map_err(|e| format!("Failed to acquire lock: {}", e))?;
         match &*guard {
             TaskSlotState::Vacant => {
-                *guard = TaskSlotState::Reserved;
+                *guard = TaskSlotState::Starting {
+                    stop_requested: false,
+                };
                 Ok(TaskReservation {
                     slot: self,
                     active: true,
                 })
             }
-            TaskSlotState::Reserved | TaskSlotState::Running(_) => Err(already_running.to_string()),
+            TaskSlotState::Starting { .. }
+            | TaskSlotState::Stopping
+            | TaskSlotState::Running(_) => Err(already_running.to_string()),
+        }
+    }
+
+    /// Record a stop that arrived while a start still holds the slot. Returns
+    /// true when a start was in flight: there is no task to take yet, and the
+    /// starter stops the capture itself once `install` reports the request.
+    pub fn request_stop_during_start(&self) -> Result<bool, String> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
+        match &mut *guard {
+            TaskSlotState::Starting { stop_requested } => {
+                *stop_requested = true;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
     }
 
@@ -393,7 +421,9 @@ impl<T> TaskSlot<T> {
             .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
         match std::mem::replace(&mut *guard, TaskSlotState::Vacant) {
             TaskSlotState::Running(task) => Ok(Some(task)),
-            TaskSlotState::Vacant | TaskSlotState::Reserved => Ok(None),
+            TaskSlotState::Vacant | TaskSlotState::Starting { .. } | TaskSlotState::Stopping => {
+                Ok(None)
+            }
         }
     }
 
@@ -410,13 +440,14 @@ impl<T> TaskSlot<T> {
             .inner
             .lock()
             .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
-        if matches!(&*guard, TaskSlotState::Reserved) {
-            return Err("Task stop already in progress".to_string());
+        match &*guard {
+            TaskSlotState::Stopping => return Err("Task stop already in progress".to_string()),
+            TaskSlotState::Starting { .. } => return Err("Task start in progress".to_string()),
+            TaskSlotState::Vacant | TaskSlotState::Running(_) => {}
         }
-        let task = match std::mem::replace(&mut *guard, TaskSlotState::Reserved) {
+        let task = match std::mem::replace(&mut *guard, TaskSlotState::Stopping) {
             TaskSlotState::Running(task) => Some(task),
-            TaskSlotState::Vacant => None,
-            TaskSlotState::Reserved => unreachable!(),
+            _ => None,
         };
         Ok((task, TaskStopReservation { slot: self }))
     }
@@ -425,7 +456,7 @@ impl<T> TaskSlot<T> {
 impl<T> Drop for TaskStopReservation<'_, T> {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.slot.inner.lock() {
-            if matches!(&*guard, TaskSlotState::Reserved) {
+            if matches!(&*guard, TaskSlotState::Stopping) {
                 *guard = TaskSlotState::Vacant;
             }
         }
@@ -444,16 +475,23 @@ impl<T> TaskReservation<'_, T> {
                 return Err(format!("Failed to acquire lock: {}", error));
             }
         };
-        if !matches!(&*guard, TaskSlotState::Reserved) {
-            task.abort();
-            return Err("Task slot reservation was lost".to_string());
-        }
+        let stop_requested = match &*guard {
+            TaskSlotState::Starting { stop_requested } => *stop_requested,
+            _ => {
+                task.abort();
+                return Err("Task slot reservation was lost".to_string());
+            }
+        };
         let outcome = if task.is_finished() {
             *guard = TaskSlotState::Vacant;
             TaskInstallOutcome::Finished
         } else {
             *guard = TaskSlotState::Running(task);
-            TaskInstallOutcome::Running
+            if stop_requested {
+                TaskInstallOutcome::StopRequested
+            } else {
+                TaskInstallOutcome::Running
+            }
         };
         self.active = false;
         Ok(outcome)
@@ -464,7 +502,7 @@ impl<T> Drop for TaskReservation<'_, T> {
     fn drop(&mut self) {
         if self.active {
             if let Ok(mut guard) = self.slot.inner.lock() {
-                if matches!(&*guard, TaskSlotState::Reserved) {
+                if matches!(&*guard, TaskSlotState::Starting { .. }) {
                     *guard = TaskSlotState::Vacant;
                 }
             }
@@ -617,6 +655,30 @@ pub async fn start_system_audio_capture(
             }
             return Err("Audio capture ended during startup".to_string());
         }
+        Ok(TaskInstallOutcome::StopRequested) => {
+            // A stop raced this start and found no task to take. Honor it
+            // here: the stop flag may have been reset above, so set it again,
+            // then shut the task down exactly as the stop command would.
+            state.stop_flag.store(true, Ordering::Release);
+            if let Ok((Some(task), stop_reservation)) = state.stream_task.take_for_stop() {
+                let session_path = await_capture_shutdown(task, Duration::from_secs(5)).await;
+                drop(stop_reservation);
+                // Nobody is left to diarize a take that was stopped before
+                // it was announced.
+                #[cfg(target_os = "macos")]
+                if let (Some(path), Some(stt_state)) =
+                    (session_path, app.try_state::<crate::stt::SttState>())
+                {
+                    let _ = stt_state.discard_session_wav_path(&path.to_string_lossy());
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = session_path;
+            }
+            if let Ok(mut is_capturing) = state.is_capturing.lock() {
+                *is_capturing = false;
+            }
+            return Err("Capture stopped during startup".to_string());
+        }
         Err(error) => {
             if let Ok(mut is_capturing) = state.is_capturing.lock() {
                 *is_capturing = false;
@@ -632,6 +694,31 @@ pub async fn start_system_audio_capture(
 }
 
 // VAD-enabled capture - OPTIMIZED for real-time speech detection
+#[cfg(any(target_os = "macos", test))]
+struct CaptureDrainMonitor {
+    last_hop: Instant,
+    last_report: Option<Instant>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl CaptureDrainMonitor {
+    fn observe(&mut self, started: Instant, processing: Duration) -> Option<Duration> {
+        let gap = started.saturating_duration_since(self.last_hop);
+        self.last_hop = started;
+        if gap < Duration::from_millis(500) && processing < Duration::from_millis(500) {
+            return None;
+        }
+        if self
+            .last_report
+            .is_some_and(|last| started.saturating_duration_since(last) < Duration::from_secs(10))
+        {
+            return None;
+        }
+        self.last_report = Some(started);
+        Some(gap)
+    }
+}
+
 async fn run_vad_capture(
     app: AppHandle,
     stream: impl StreamExt<Item = f32> + Unpin,
@@ -667,8 +754,15 @@ async fn run_vad_capture(
 
     let session_start = Instant::now();
     #[cfg(target_os = "macos")]
+    let mut drain_monitor = CaptureDrainMonitor {
+        last_hop: session_start,
+        last_report: None,
+    };
+    #[cfg(target_os = "macos")]
+    let mut last_hop_end = session_start;
+    #[cfg(target_os = "macos")]
     let mut session_recording: Option<
-        session_recording::SessionRecording<std::fs::File>,
+        session_recording::SessionRecording<std::io::BufWriter<std::fs::File>>,
     > = None;
     #[cfg(target_os = "macos")]
     let mut session_recording_issue_reported = false;
@@ -714,6 +808,8 @@ async fn run_vad_capture(
 
         // Process in fixed chunks for VAD analysis
         while buffer.len() >= config.hop_size {
+            #[cfg(target_os = "macos")]
+            let hop_started = Instant::now();
             let mut mono = Vec::with_capacity(config.hop_size);
             for _ in 0..config.hop_size {
                 if let Some(v) = buffer.pop_front() {
@@ -752,15 +848,12 @@ async fn run_vad_capture(
             #[cfg(target_os = "macos")]
             {
                 if session_recording.is_none() && !session_recording_issue_reported {
-                    let temp_path = std::env::temp_dir().join(format!(
-                        "assistant-session-{}.wav",
-                        uuid::Uuid::new_v4()
-                    ));
+                    let temp_path = std::env::temp_dir()
+                        .join(format!("assistant-session-{}.wav", uuid::Uuid::new_v4()));
                     match session_recording::SessionRecording::create_file(
                         temp_path,
                         sr,
-                        sr as usize
-                            * session_recording::SESSION_RECORDING_MAX_SECS as usize,
+                        sr as usize * session_recording::SESSION_RECORDING_MAX_SECS as usize,
                     ) {
                         Ok(recording) => session_recording = Some(recording),
                         Err(e) => {
@@ -780,8 +873,7 @@ async fn run_vad_capture(
                             session_recording = None;
                             if !session_recording_issue_reported {
                                 session_recording_issue_reported = true;
-                                let message =
-                                    "Speaker labels cover the first hour of a session.";
+                                let message = "Speaker labels cover the first hour of a session.";
                                 error!("{}", message);
                                 let _ = app.emit("stt-error", message);
                             }
@@ -802,8 +894,12 @@ async fn run_vad_capture(
             }
 
             #[cfg(target_os = "macos")]
-            {
-                match resampled_vad_frames(&mut vad_accumulator, &raw_mono, sr) {
+            let (resample_duration, vad_duration) = {
+                let resample_started = Instant::now();
+                let frames = resampled_vad_frames(&mut vad_accumulator, &raw_mono, sr);
+                let resample_duration = resample_started.elapsed();
+                let vad_started = Instant::now();
+                match frames {
                     Ok(frames) => {
                         for frame in frames {
                             let (probability, error) = consume_vad_probability(
@@ -829,7 +925,8 @@ async fn run_vad_capture(
                         pending_silero_prob = None;
                     }
                 }
-            }
+                (resample_duration, vad_started.elapsed())
+            };
 
             let is_speech = match pending_silero_prob {
                 // Mic-style hysteresis on the raw probability.
@@ -951,6 +1048,25 @@ async fn run_vad_capture(
                     if pre_speech.len() == config.pre_speech_chunks * config.hop_size {
                         pre_speech.shrink_to_fit();
                     }
+                }
+            }
+
+            // Measured at the end of the hop so `processing_ms` covers the
+            // speech state machine and utterance emission too; `wait_ms` is
+            // the part of the gap spent outside hop processing (awaiting
+            // samples or the executor).
+            #[cfg(target_os = "macos")]
+            {
+                let wait_duration = hop_started.saturating_duration_since(last_hop_end);
+                let processing_duration = hop_started.elapsed();
+                last_hop_end = Instant::now();
+                if let Some(gap) = drain_monitor.observe(hop_started, processing_duration) {
+                    warn!(
+                        "System-audio drain stall: gap_ms={}, wait_ms={}, processing_ms={}, resample_ms={}, vad_ms={}, sample_rate={}",
+                        gap.as_millis(), wait_duration.as_millis(),
+                        processing_duration.as_millis(), resample_duration.as_millis(),
+                        vad_duration.as_millis(), sr
+                    );
                 }
             }
         }
@@ -1346,6 +1462,13 @@ pub async fn stop_system_audio_capture(
     latch_discard_intent(&state.discard_take, discard.unwrap_or(false));
     state.stop_flag.store(true, Ordering::Release);
 
+    // A start is still setting up: there is no task to take yet. The start
+    // sees the request when it installs its task and stops the capture itself
+    // without ever announcing it.
+    if state.stream_task.request_stop_during_start()? {
+        return Ok(None);
+    }
+
     // Hold the stop reservation until the capture task has joined and its
     // finalization completed: releasing the slot early would let a start/stop
     // overlap claim it while the previous capture is still shutting down.
@@ -1509,6 +1632,41 @@ pub fn get_output_devices() -> Result<Vec<AudioDevice>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_drain_monitor_reports_stalls_without_flooding_logs() {
+        let start = Instant::now();
+        let mut monitor = CaptureDrainMonitor {
+            last_hop: start,
+            last_report: None,
+        };
+        assert_eq!(monitor.observe(start, Duration::from_millis(2)), None);
+        assert_eq!(
+            monitor.observe(start + Duration::from_secs(1), Duration::ZERO),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            monitor.observe(start + Duration::from_secs(2), Duration::ZERO),
+            None
+        );
+        assert_eq!(
+            monitor.observe(start + Duration::from_secs(11), Duration::ZERO),
+            Some(Duration::from_secs(9))
+        );
+    }
+
+    #[test]
+    fn capture_drain_monitor_reports_slow_processing_without_a_read_gap() {
+        let start = Instant::now();
+        let mut monitor = CaptureDrainMonitor {
+            last_hop: start,
+            last_report: None,
+        };
+        assert_eq!(
+            monitor.observe(start, Duration::from_millis(500)),
+            Some(Duration::ZERO)
+        );
+    }
 
     struct FakeVadReset {
         result: Result<(), String>,
@@ -1880,6 +2038,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_during_start_is_reported_at_install_with_the_task_stoppable() {
+        let slot = TaskSlot::<()>::new();
+        let reservation = slot.reserve("busy").unwrap();
+
+        assert!(slot.request_stop_during_start().unwrap());
+        // No task exists yet, so a plain stop has nothing to take.
+        assert!(slot.take_for_stop().is_err());
+
+        let outcome = reservation
+            .install(tokio::spawn(std::future::pending::<()>()))
+            .unwrap();
+        assert_eq!(outcome, TaskInstallOutcome::StopRequested);
+
+        let (task, stopping) = slot.take_for_stop().unwrap();
+        task.expect("the starter must be able to stop its task").abort();
+        drop(stopping);
+        assert!(slot.reserve("busy").is_ok());
+    }
+
+    #[tokio::test]
+    async fn stop_request_is_only_recorded_while_a_start_is_in_flight() {
+        let slot = TaskSlot::<()>::new();
+        assert!(!slot.request_stop_during_start().unwrap());
+
+        let reservation = slot.reserve("busy").unwrap();
+        let outcome = reservation
+            .install(tokio::spawn(std::future::pending::<()>()))
+            .unwrap();
+        assert_eq!(outcome, TaskInstallOutcome::Running);
+        assert!(!slot.request_stop_during_start().unwrap());
+
+        let (task, stopping) = slot.take_for_stop().unwrap();
+        assert!(!slot.request_stop_during_start().unwrap());
+        task.unwrap().abort();
+        drop(stopping);
+
+        // A request left by an abandoned start does not leak into the next.
+        let abandoned = slot.reserve("busy").unwrap();
+        assert!(slot.request_stop_during_start().unwrap());
+        drop(abandoned);
+        let reservation = slot.reserve("busy").unwrap();
+        let outcome = reservation
+            .install(tokio::spawn(std::future::pending::<()>()))
+            .unwrap();
+        assert_eq!(outcome, TaskInstallOutcome::Running);
+        slot.take().unwrap().unwrap().abort();
+    }
+
+    #[tokio::test]
     async fn install_reports_a_running_task() {
         let slot = TaskSlot::<()>::new();
         let reservation = slot.reserve("busy").unwrap();
@@ -2130,6 +2337,15 @@ pub async fn start_mic_dictation(app: AppHandle, device_id: Option<String>) -> R
     match reservation.install(task)? {
         TaskInstallOutcome::Running => Ok(()),
         TaskInstallOutcome::Finished => Err("Microphone capture ended during startup".to_string()),
+        TaskInstallOutcome::StopRequested => {
+            // A stop raced this start; the flag was reset above, so set it
+            // again and shut the task down as the stop command would.
+            state
+                .stop_flag
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            stop_installed_dictation(&state.task).await;
+            Err("Dictation stopped during startup".to_string())
+        }
     }
 }
 
@@ -2150,17 +2366,30 @@ pub async fn stop_mic_dictation(app: AppHandle) -> Result<(), String> {
     state
         .stop_flag
         .store(true, std::sync::atomic::Ordering::SeqCst);
+    if state.task.request_stop_during_start()? {
+        return Ok(());
+    }
     let (task, _stopping) = state.task.take_for_stop()?;
-    if let Some(mut task) = task {
-        if tokio::time::timeout(tokio::time::Duration::from_secs(3), &mut task)
-            .await
-            .is_err()
-        {
-            task.abort();
-            let _ = task.await;
-        }
+    if let Some(task) = task {
+        await_dictation_shutdown(task).await;
     }
     Ok(())
+}
+
+async fn await_dictation_shutdown(mut task: tokio::task::JoinHandle<()>) {
+    if tokio::time::timeout(tokio::time::Duration::from_secs(3), &mut task)
+        .await
+        .is_err()
+    {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+async fn stop_installed_dictation(slot: &TaskSlot<()>) {
+    if let Ok((Some(task), _stopping)) = slot.take_for_stop() {
+        await_dictation_shutdown(task).await;
+    }
 }
 
 async fn run_mic_dictation(

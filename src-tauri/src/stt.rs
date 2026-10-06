@@ -227,16 +227,14 @@ impl UtteranceStore {
 
 #[cfg(test)]
 mod utterance_store_tests {
-    use super::{
-        try_lock_stt_inner, SttInner, SttState, UtteranceStore, MAX_CACHED_UTTERANCES,
-    };
-    #[cfg(target_os = "macos")]
-    use super::{
-        build_local_transcription_result, cleanup_session_file_after,
-        resolve_transcription_model, LocalTranscriptionContext, TranscriptionVariant,
-    };
     #[cfg(target_os = "macos")]
     use super::AsrModelVersion;
+    #[cfg(target_os = "macos")]
+    use super::{
+        build_local_transcription_result, cleanup_session_file_after, resolve_transcription_model,
+        LocalTranscriptionContext, TranscriptionVariant,
+    };
+    use super::{try_lock_stt_inner, SttInner, SttState, UtteranceStore, MAX_CACHED_UTTERANCES};
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration, Instant};
 

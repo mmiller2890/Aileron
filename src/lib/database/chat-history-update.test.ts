@@ -83,9 +83,9 @@ describe("native save delegation", () => {
   });
 
   test("rejects invalid conversations without invoking the native command", async () => {
-    await expect(
-      updateConversation({ id: "c1" } as never),
-    ).rejects.toThrow("Invalid conversation data");
+    await expect(updateConversation({ id: "c1" } as never)).rejects.toThrow(
+      "Invalid conversation data",
+    );
 
     expect(invokeMock).not.toHaveBeenCalled();
   });

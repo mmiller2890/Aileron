@@ -15,14 +15,15 @@ pub(crate) struct SessionRecording<W: std::io::Write + std::io::Seek> {
     max_samples: usize,
 }
 
-impl SessionRecording<std::fs::File> {
+impl SessionRecording<std::io::BufWriter<std::fs::File>> {
     pub(crate) fn create_file(
         path: std::path::PathBuf,
         sample_rate: u32,
         max_samples: usize,
     ) -> Result<Self, String> {
         let file = open_owner_only_file(&path)?;
-        let writer = WavWriter::new(file, wav_spec(sample_rate)).map_err(|e| e.to_string())?;
+        let writer = WavWriter::new(std::io::BufWriter::new(file), wav_spec(sample_rate))
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             path,
             writer: Some(writer),
@@ -179,15 +180,33 @@ mod tests {
 
         let chunk = vec![0.5; sample_rate as usize];
         for _ in 0..manual_limit_samples / sample_rate as usize {
-            assert!(matches!(recording.append(&chunk), Ok(AppendOutcome::Appended)));
+            assert!(matches!(
+                recording.append(&chunk),
+                Ok(AppendOutcome::Appended)
+            ));
         }
-        assert!(matches!(recording.append(&chunk), Ok(AppendOutcome::Appended)));
+        assert!(matches!(
+            recording.append(&chunk),
+            Ok(AppendOutcome::Appended)
+        ));
 
         recording.finalize().unwrap();
 
         let (rate, samples) = read_back_samples(&path);
         assert_eq!(rate, sample_rate);
         assert_eq!(samples.len(), manual_limit_samples + sample_rate as usize);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn session_file_uses_buffered_writes() {
+        let path = temp_wav_path("buffered");
+        let mut recording = SessionRecording::create_file(path.clone(), 8_000, 8_000).unwrap();
+        let _: &mut WavWriter<std::io::BufWriter<std::fs::File>> =
+            recording.writer.as_mut().unwrap();
+        recording.append(&[0.5; 256]).unwrap();
+        recording.finalize().unwrap();
+        assert_eq!(read_back_samples(&path).1.len(), 256);
         std::fs::remove_file(&path).ok();
     }
 
@@ -202,7 +221,10 @@ mod tests {
         let samples: Vec<f32> = (0..sample_rate)
             .map(|i| ((i as f32 / 100.0).sin()) * 0.5)
             .collect();
-        assert!(matches!(recording.append(&samples), Ok(AppendOutcome::Appended)));
+        assert!(matches!(
+            recording.append(&samples),
+            Ok(AppendOutcome::Appended)
+        ));
 
         recording.finalize().unwrap();
 
@@ -219,8 +241,7 @@ mod tests {
     fn session_files_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let path = temp_wav_path("perms");
-        let recording =
-            SessionRecording::create_file(path.clone(), 8_000, 8_000).unwrap();
+        let recording = SessionRecording::create_file(path.clone(), 8_000, 8_000).unwrap();
         recording.finalize().unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
@@ -233,8 +254,7 @@ mod tests {
         let path = temp_wav_path("failing");
         std::fs::write(&path, b"").unwrap();
         let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let writer =
-            WavWriter::new(FailingWriter { fail: fail.clone() }, wav_spec(8_000)).unwrap();
+        let writer = WavWriter::new(FailingWriter { fail: fail.clone() }, wav_spec(8_000)).unwrap();
         let mut recording = SessionRecording::from_writer(writer, path.clone(), 10_000);
 
         fail.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -264,8 +284,14 @@ mod tests {
             WavWriter::new(std::fs::File::create(&path).unwrap(), wav_spec(8_000)).unwrap();
         let mut recording = SessionRecording::from_writer(writer, path.clone(), 5);
 
-        assert!(matches!(recording.append(&[0.1; 3]), Ok(AppendOutcome::Appended)));
-        assert!(matches!(recording.append(&[0.1; 3]), Ok(AppendOutcome::Full)));
+        assert!(matches!(
+            recording.append(&[0.1; 3]),
+            Ok(AppendOutcome::Appended)
+        ));
+        assert!(matches!(
+            recording.append(&[0.1; 3]),
+            Ok(AppendOutcome::Full)
+        ));
         assert!(!path.exists());
 
         recording.finalize().unwrap();
@@ -274,8 +300,7 @@ mod tests {
     #[test]
     fn appending_after_close_is_an_error() {
         let path = temp_wav_path("closed");
-        let mut recording =
-            SessionRecording::create_file(path.clone(), 8_000, 100).unwrap();
+        let mut recording = SessionRecording::create_file(path.clone(), 8_000, 100).unwrap();
         recording.discard();
 
         assert!(recording.append(&[0.1]).is_err());

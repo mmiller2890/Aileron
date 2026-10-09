@@ -61,7 +61,9 @@ export const SessionMetrics = ({
     <div className="space-y-2">
       <div className="flex items-center justify-between font-mono text-[11px] text-meta">
         <span>session</span>
-        <span>{conversation ? `${date} · ${duration}` : ""}</span>
+        <span>
+          {conversation || liveStartedAt ? `${date} · ${duration}` : ""}
+        </span>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <Tile

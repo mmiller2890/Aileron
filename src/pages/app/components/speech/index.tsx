@@ -94,6 +94,18 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
   const isVadMode = vadConfig.enabled;
   const hasResponse = lastAIResponse || isAIProcessing;
+  // Mirrors the hook's open condition. The window grows to panel height
+  // whenever that holds, so the panel has to render for all of it: a narrower
+  // test here left a tall, empty, click-eating window after capture stopped
+  // and hid the session summary.
+  const hasPanelContent =
+    capturing ||
+    setupRequired ||
+    !!error ||
+    isAIProcessing ||
+    !!lastAIResponse ||
+    isSummarizing ||
+    !!sessionSummary;
 
   // Keyboard shortcut for Cmd+K to toggle view mode
   useEffect(() => {
@@ -226,7 +238,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
         </Button>
       </PopoverTrigger>
 
-      {(capturing || setupRequired || error) && (
+      {hasPanelContent && (
         <PopoverContent
           align="end"
           side="bottom"

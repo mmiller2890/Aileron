@@ -34,6 +34,8 @@ const Dashboard = () => {
   const { selectedAIProvider, selectedSttProvider } = useApp();
   const navigate = useNavigate();
   const [railCollapsed, setRailCollapsed] = useState(false);
+  // Overlay visibility drives the embedded bar's popped-in/out rendering.
+  const [overlayVisible, setOverlayVisible] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -57,7 +59,13 @@ const Dashboard = () => {
       try {
         const win = getCurrentWebviewWindow();
         unlisten = await win.onFocusChanged(({ payload: focused }) => {
-          if (focused) load();
+          if (!focused) return;
+          load();
+          // Shortcuts can show the bar without announcing it; re-check so the
+          // pop-out control does not act on a stale state.
+          invoke<boolean>("is_overlay_visible")
+            .then(setOverlayVisible)
+            .catch(() => {});
         });
       } catch (error) {
         console.error("Failed to set up dashboard focus listener:", error);
@@ -68,8 +76,6 @@ const Dashboard = () => {
     };
   }, [load]);
 
-  // Overlay visibility drives the embedded bar's popped-in/out rendering.
-  const [overlayVisible, setOverlayVisible] = useState(false);
   useEffect(() => {
     invoke<boolean>("is_overlay_visible")
       .then(setOverlayVisible)

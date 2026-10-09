@@ -13,6 +13,7 @@ import {
 import {
   LiveSessionSnapshot,
   LiveSessionCommand,
+  BarNotice,
   deriveSessionStatus,
   deriveBarNotice,
 } from "@/lib/live-session";
@@ -29,15 +30,20 @@ export const EmbeddedBar = ({
   overlayVisible,
   onTogglePopOut,
   onOpenProviders,
+  statusOverride,
+  noticeOverride,
 }: {
   snapshot: LiveSessionSnapshot | null;
   sendCommand: (command: LiveSessionCommand) => void;
   overlayVisible: boolean;
   onTogglePopOut: () => void;
   onOpenProviders: () => void;
+  /** Set while the feed shows the bar's own conversation, not the session. */
+  statusOverride?: ReturnType<typeof deriveSessionStatus>;
+  noticeOverride?: BarNotice;
 }) => {
   const { selectedAIProvider, selectedSttProvider } = useApp();
-  const status = deriveSessionStatus(snapshot);
+  const status = statusOverride ?? deriveSessionStatus(snapshot);
   const capturing = snapshot?.capturing ?? false;
   const manualMode = snapshot?.isContinuousMode ?? false;
   const recording = snapshot?.isRecordingInContinuousMode ?? false;
@@ -59,7 +65,7 @@ export const EmbeddedBar = ({
     setText("");
   };
 
-  const notice = deriveBarNotice(snapshot);
+  const notice = noticeOverride ?? deriveBarNotice(snapshot);
 
   return (
     <div

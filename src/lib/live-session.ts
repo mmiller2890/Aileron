@@ -1,4 +1,4 @@
-import { ChatConversation } from "@/types/completion";
+import { ChatConversation, ChatMessage } from "@/types/completion";
 
 /**
  * Typed contract for cross-window live-session sync. The overlay webview hosts
@@ -14,6 +14,15 @@ export const LIVE_SESSION_REQUEST = "live-session-request";
 
 /** Dashboard → overlay: run an engine action. */
 export const LIVE_SESSION_COMMAND = "live-session-command";
+
+/**
+ * Overlay → broadcast: the bar's own conversation (typed questions and voice
+ * input). It lives outside the capture engine, so it has its own snapshot.
+ */
+export const LIVE_CHAT_STATE = "live-chat-state";
+
+/** Dashboard → overlay: act on the bar's conversation. */
+export const LIVE_CHAT_COMMAND = "live-chat-command";
 
 /**
  * Existing Rust-emitted overlay-visibility event, typed here for listeners.
@@ -64,6 +73,82 @@ export type LiveSessionCommandAction =
 export type LiveSessionCommand =
   | { action: Exclude<LiveSessionCommandAction, "submit"> }
   | { action: "submit"; text: string };
+
+/** The bar's conversation as the dashboard mirrors it. */
+export interface LiveChatSnapshot {
+  /** Voice input is switched on. */
+  listening: boolean;
+  answering: boolean;
+  answerDraft: string;
+  error: string;
+  conversation: ChatConversation;
+}
+
+export type LiveChatCommand =
+  | { action: "submit"; text: string }
+  | { action: "new-conversation" };
+
+/**
+ * Builds the bar's snapshot from its completion state. Saved history only
+ * gains a question and its answer once the answer has finished and been
+ * written, so the exchange in flight is added here: the question while the
+ * answer streams, and the finished pair until the save lands.
+ */
+export function buildLiveChatSnapshot({
+  conversationId,
+  history,
+  input,
+  response,
+  isLoading,
+  error,
+  listening,
+  now = Date.now(),
+}: {
+  conversationId: string | null;
+  history: ChatMessage[];
+  input: string;
+  response: string;
+  isLoading: boolean;
+  error: string | null;
+  listening: boolean;
+  now?: number;
+}): LiveChatSnapshot {
+  const messages = [...history];
+  const last = messages[messages.length - 1];
+  const pendingAt = Math.max(now, (last?.timestamp ?? 0) + 1);
+  const saved = last?.role === "assistant" && last.content === response;
+  if (isLoading || (response && !saved)) {
+    if (input.trim()) {
+      messages.push({
+        id: "pending-user",
+        role: "user",
+        content: input,
+        timestamp: pendingAt,
+      });
+    }
+    if (!isLoading) {
+      messages.push({
+        id: "pending-assistant",
+        role: "assistant",
+        content: response,
+        timestamp: pendingAt + 1,
+      });
+    }
+  }
+  return {
+    listening,
+    answering: isLoading,
+    answerDraft: isLoading ? response : "",
+    error: error ?? "",
+    conversation: {
+      id: conversationId ?? "",
+      title: "",
+      messages: messages.slice(-LIVE_SNAPSHOT_MAX_MESSAGES),
+      createdAt: messages[0]?.timestamp ?? 0,
+      updatedAt: messages[messages.length - 1]?.timestamp ?? 0,
+    },
+  };
+}
 
 export function deriveLiveAnswerDraft(
   snapshot: LiveSessionSnapshot | null
@@ -128,6 +213,54 @@ export function deriveDashboardView(
     return "session";
   }
   return "home";
+}
+
+/**
+ * Which conversation the dashboard shows: the capture session ("engine"), the
+ * bar's own conversation ("chat"), or neither ("home"). Whatever is running
+ * wins; with both idle, the conversation that changed last does.
+ */
+export function deriveDashboardSource(
+  snapshot: LiveSessionSnapshot | null,
+  chat: LiveChatSnapshot | null,
+): "home" | "engine" | "chat" {
+  const engineHasMessages =
+    !!snapshot && snapshot.conversation.messages.length > 0;
+  const chatHasMessages = !!chat && chat.conversation.messages.length > 0;
+  if (
+    snapshot?.capturing ||
+    snapshot?.isProcessing ||
+    snapshot?.isAIProcessing
+  ) {
+    return "engine";
+  }
+  if (chat?.listening || chat?.answering) return "chat";
+  if (engineHasMessages && chatHasMessages) {
+    return chat.conversation.updatedAt > snapshot.conversation.updatedAt
+      ? "chat"
+      : "engine";
+  }
+  if (engineHasMessages) return "engine";
+  if (chatHasMessages) return "chat";
+  return "home";
+}
+
+/** The status ladder for the bar's conversation, shaped like the session's. */
+export function deriveChatStatus(chat: LiveChatSnapshot | null): {
+  word: string;
+  cls: string;
+  dot: string;
+} {
+  if (chat?.error) {
+    return { word: "error", cls: "text-destructive", dot: "bg-destructive" };
+  }
+  if (chat?.answering) {
+    return { word: "answering", cls: "text-primary", dot: "bg-primary" };
+  }
+  if (chat?.listening) {
+    return { word: "listening", cls: "text-primary", dot: "bg-primary" };
+  }
+  return { word: "idle", cls: "text-meta", dot: "bg-meta" };
 }
 
 /** Time-of-day greeting for the dashboard home (hour is 0–23, local). */

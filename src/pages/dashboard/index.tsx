@@ -6,8 +6,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatConversation } from "@/types/completion";
 import {
-  deriveDashboardView,
+  deriveChatStatus,
+  deriveDashboardSource,
   deriveLiveAnswerDraft,
+  LiveSessionCommand,
   TOGGLE_WINDOW_VISIBILITY,
 } from "@/lib/live-session";
 import { useApp } from "@/contexts";
@@ -23,7 +25,12 @@ import { PanelRightCloseIcon, PanelRightOpenIcon } from "lucide-react";
 
 const Dashboard = () => {
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
-  const { snapshot, sendCommand } = useLiveSession();
+  const {
+    snapshot,
+    sendCommand: sendSessionCommand,
+    chat,
+    sendChatCommand,
+  } = useLiveSession();
   const { selectedAIProvider, selectedSttProvider } = useApp();
   const navigate = useNavigate();
   const [railCollapsed, setRailCollapsed] = useState(false);
@@ -79,17 +86,38 @@ const Dashboard = () => {
       .then(setOverlayVisible)
       .catch(() => {});
 
-  // Mirror-only: prefer the live conversation whenever the engine has one.
-  const liveConversation =
-    snapshot && snapshot.conversation.messages.length > 0
-      ? snapshot.conversation
-      : null;
-  const isLive = Boolean(snapshot?.capturing || liveConversation);
-  const liveAnswerDraft = deriveLiveAnswerDraft(snapshot);
+  // Mirror-only. The feed follows the capture session or the bar's own
+  // conversation (typed questions and voice input), whichever is in use.
+  const source = deriveDashboardSource(snapshot, chat);
+  const showsChat = source === "chat" && chat !== null;
+  const shown = showsChat ? chat.conversation : snapshot?.conversation;
+  const liveConversation = shown && shown.messages.length > 0 ? shown : null;
+  const isLive = showsChat || Boolean(snapshot?.capturing || liveConversation);
+  const liveAnswerDraft = showsChat
+    ? chat.answering
+      ? chat.answerDraft
+      : null
+    : deriveLiveAnswerDraft(snapshot);
+
+  // A question typed here continues the conversation on screen, and "new
+  // session" clears both, so an older conversation does not take its place.
+  const sendCommand = useCallback(
+    (command: LiveSessionCommand) => {
+      if (command.action === "submit" && showsChat) {
+        sendChatCommand(command);
+        return;
+      }
+      if (command.action === "new-conversation") {
+        sendChatCommand({ action: "new-conversation" });
+      }
+      sendSessionCommand(command);
+    },
+    [showsChat, sendChatCommand, sendSessionCommand],
+  );
 
   // Nothing running and nothing to show: the quiet starting screen. Past
   // sessions live in Chats, not on the opening page.
-  if (deriveDashboardView(snapshot) === "home") {
+  if (source === "home") {
     return (
       <div className="flex h-screen w-full flex-col overflow-hidden bg-background">
         <DashboardHome
@@ -117,6 +145,12 @@ const Dashboard = () => {
         overlayVisible={overlayVisible}
         onTogglePopOut={togglePopOut}
         onOpenProviders={() => navigate("/dev-space")}
+        statusOverride={showsChat ? deriveChatStatus(chat) : undefined}
+        noticeOverride={
+          showsChat && chat.error
+            ? { kind: "error", message: chat.error }
+            : undefined
+        }
       />
       <div
         className={`grid min-h-0 flex-1 ${
@@ -134,8 +168,10 @@ const Dashboard = () => {
             conversation={liveConversation}
             live={isLive}
             liveAnswerDraft={liveAnswerDraft}
-            partialTranscription={snapshot?.partialTranscription ?? ""}
-            partialSpeaker={snapshot?.partialSpeaker ?? null}
+            partialTranscription={
+              showsChat ? "" : (snapshot?.partialTranscription ?? "")
+            }
+            partialSpeaker={showsChat ? null : (snapshot?.partialSpeaker ?? null)}
           />
           <button
             onClick={() => setRailCollapsed((v) => !v)}

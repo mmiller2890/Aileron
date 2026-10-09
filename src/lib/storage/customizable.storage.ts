@@ -20,7 +20,9 @@ export interface CustomizableState {
 
 export const DEFAULT_CUSTOMIZABLE_STATE: CustomizableState = {
   appIcon: { isVisible: true },
-  alwaysOnTop: { isEnabled: false },
+  // On by default: the bar is a floating overlay, and at the normal window
+  // level any other window (the dashboard included) covers its answers.
+  alwaysOnTop: { isEnabled: true },
   autostart: { isEnabled: true },
   cursor: { type: "invisible" },
 };

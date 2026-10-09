@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
 import { MAX_FILES } from "@/config";
@@ -20,6 +20,13 @@ import { buildAIHistory } from "@/lib/functions";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createAsyncListenerScope } from "@/lib/async-listener-scope";
+import {
+  buildLiveChatSnapshot,
+  LIVE_CHAT_COMMAND,
+  LIVE_CHAT_STATE,
+  LiveChatCommand,
+} from "@/lib/live-session";
+import { useLiveStatePublisher } from "./system-audio/useLiveStatePublisher";
 import {
   appendWithinLimit,
   selectImageFilesWithinLimit,
@@ -1092,6 +1099,60 @@ export const useCompletion = () => {
         console.error("Failed to listen for capture close:", error);
       });
 
+    return () => {
+      scope.dispose();
+    };
+  }, []);
+
+  // ---- Cross-window mirror of this conversation ----
+  // Voice input and typed questions in the bar are answered here, outside the
+  // capture engine, so the dashboard needs this snapshot to show them.
+  const liveChatSnapshot = useMemo(
+    () =>
+      buildLiveChatSnapshot({
+        conversationId: state.currentConversationId,
+        history: state.conversationHistory,
+        input: state.input,
+        response: state.response,
+        isLoading: state.isLoading,
+        error: state.error,
+        listening: enableVAD,
+      }),
+    [
+      state.currentConversationId,
+      state.conversationHistory,
+      state.input,
+      state.response,
+      state.isLoading,
+      state.error,
+      enableVAD,
+    ],
+  );
+  useLiveStatePublisher(liveChatSnapshot, LIVE_CHAT_STATE);
+
+  // Per-render ref so the once-registered listener calls the freshest closures.
+  const liveChatHandlersRef = useRef({ submit, startNewConversation });
+  liveChatHandlersRef.current = { submit, startNewConversation };
+  useEffect(() => {
+    const scope = createAsyncListenerScope();
+    void scope
+      .add(
+        listen<LiveChatCommand>(
+          LIVE_CHAT_COMMAND,
+          scope.guard((event) => {
+            const payload = event.payload;
+            if (payload?.action === "submit") {
+              const text = payload.text?.trim();
+              if (text) void liveChatHandlersRef.current.submit(text);
+            } else if (payload?.action === "new-conversation") {
+              liveChatHandlersRef.current.startNewConversation();
+            }
+          }),
+        ),
+      )
+      .catch((error) => {
+        console.error("Failed to listen for live chat commands:", error);
+      });
     return () => {
       scope.dispose();
     };

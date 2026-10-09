@@ -1,21 +1,20 @@
 import { useEffect, useRef } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
-import {
-  LIVE_SESSION_REQUEST,
-  LIVE_SESSION_STATE,
-  LiveSessionSnapshot,
-} from "@/lib/live-session";
+import { LIVE_SESSION_REQUEST, LIVE_SESSION_STATE } from "@/lib/live-session";
 
 const MIN_EMIT_INTERVAL_MS = 100;
 
 /**
- * Broadcasts the engine's live snapshot to other windows. Leading+trailing
+ * Broadcasts a live snapshot to other windows under `eventName`. Leading+trailing
  * throttle: the first change in a quiet period emits immediately (state
  * transitions never feel latent), high-frequency streams coalesce to ≤10 Hz,
  * and a trailing flush guarantees the final state always lands. Also answers
  * LIVE_SESSION_REQUEST with an immediate re-emit for freshly mounted mirrors.
  */
-export function useLiveStatePublisher(snapshot: LiveSessionSnapshot) {
+export function useLiveStatePublisher<T>(
+  snapshot: T,
+  eventName: string = LIVE_SESSION_STATE,
+) {
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
 
@@ -25,7 +24,7 @@ export function useLiveStatePublisher(snapshot: LiveSessionSnapshot) {
   useEffect(() => {
     const emitNow = () => {
       lastEmitRef.current = Date.now();
-      emit(LIVE_SESSION_STATE, snapshotRef.current).catch((e) =>
+      emit(eventName, snapshotRef.current).catch((e) =>
         console.error("Failed to publish live session state:", e)
       );
     };
@@ -41,12 +40,12 @@ export function useLiveStatePublisher(snapshot: LiveSessionSnapshot) {
     }
     // A scheduled trailing emit reads snapshotRef, so it always sends the
     // freshest state even when more changes landed while it was pending.
-  }, [snapshot]);
+  }, [snapshot, eventName]);
 
   useEffect(() => {
     const unlisten = listen(LIVE_SESSION_REQUEST, () => {
       lastEmitRef.current = Date.now();
-      emit(LIVE_SESSION_STATE, snapshotRef.current).catch((e) =>
+      emit(eventName, snapshotRef.current).catch((e) =>
         console.error("Failed to answer live session request:", e)
       );
     });
@@ -57,5 +56,5 @@ export function useLiveStatePublisher(snapshot: LiveSessionSnapshot) {
         timerRef.current = null;
       }
     };
-  }, []);
+  }, [eventName]);
 }

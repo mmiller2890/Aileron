@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { ChatConversation } from "@/types";
 import { Markdown, Switch, CopyButton } from "@/components";
 import { BotIcon, HeadphonesIcon, Loader2, SparklesIcon } from "lucide-react";
@@ -33,8 +34,54 @@ export const ResultsSection = ({
   const provisional = partialTranscription.trim();
   const hasResponse = lastAIResponse || isAIProcessing;
   const hasHistory = conversation.messages.length > 2;
+  const visible = Boolean(hasResponse || lastTranscription || provisional);
 
-  if (!hasResponse && !lastTranscription && !provisional) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const answerRef = useRef<HTMLDivElement>(null);
+  // Whether the panel should keep the end of the answer in view as it grows.
+  // Flips to false when the reader scrolls back up the answer, and back to
+  // true when the next answer starts.
+  const followAnswerRef = useRef(true);
+  useEffect(() => {
+    if (isAIProcessing) followAnswerRef.current = true;
+  }, [isAIProcessing]);
+
+  // Follow the answer's real size, not prop changes: Markdown paints a render
+  // after its text arrives. Only ever scrolls down, so settings and the other
+  // content below the answer stay where the reader put them.
+  useEffect(() => {
+    const root = rootRef.current;
+    const viewport = root?.closest<HTMLElement>(
+      "[data-radix-scroll-area-viewport]",
+    );
+    if (!root || !viewport) return;
+    const belowFold = () => {
+      const answer = answerRef.current;
+      if (!answer) return 0;
+      return (
+        answer.getBoundingClientRect().bottom -
+        viewport.getBoundingClientRect().bottom
+      );
+    };
+    const onScroll = () => {
+      followAnswerRef.current = belowFold() <= 80;
+    };
+    const follow = () => {
+      const distance = belowFold();
+      if (followAnswerRef.current && distance > 0) {
+        viewport.scrollTop += distance;
+      }
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    const observer = new ResizeObserver(follow);
+    observer.observe(root);
+    return () => {
+      viewport.removeEventListener("scroll", onScroll);
+      observer.disconnect();
+    };
+  }, [visible]);
+
+  if (!visible) {
     return null;
   }
 
@@ -60,7 +107,10 @@ export const ResultsSection = ({
   ) : null;
 
   return (
-    <div className="rounded-lg border border-border bg-card p-3 space-y-3">
+    <div
+      ref={rootRef}
+      className="rounded-lg border border-border bg-card p-3 space-y-3"
+    >
       {/* Header with toggle */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5">
@@ -102,7 +152,7 @@ export const ResultsSection = ({
 
           {/* AI Response — signal left rule */}
           {hasResponse && (
-            <div className="border-l-2 border-primary pl-3">
+            <div ref={answerRef} className="border-l-2 border-primary pl-3">
               {isAIProcessing && !lastAIResponse ? (
                 <div className="flex items-center gap-2 py-2">
                   <Loader2 className="h-4 w-4 animate-spin text-primary" />
@@ -132,7 +182,10 @@ export const ResultsSection = ({
           {hearingLine}
           {/* AI Response - First (on top) — signal left rule */}
           {hasResponse && (
-            <div className="rounded-md border-l-2 border-primary bg-background p-2.5">
+            <div
+              ref={answerRef}
+              className="rounded-md border-l-2 border-primary bg-background p-2.5"
+            >
               <div className="flex items-center gap-1.5 mb-1">
                 <BotIcon className="h-3 w-3 text-primary" />
                 <span className="font-mono text-[9px] text-primary">

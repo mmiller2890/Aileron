@@ -48,23 +48,27 @@ export const TranscriptFeed = ({
     );
   };
 
-  const lastContent = turns[turns.length - 1]?.content;
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !live || !stickToBottomRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [
-    live,
-    turns.length,
-    lastContent,
-    liveAnswerDraft,
-    provisional,
-  ]);
-
   const empty =
     turns.length === 0 &&
     liveAnswerDraft === null &&
     !provisional;
+
+  // Pin on the content's real size, not on prop changes: Markdown fills in a
+  // render after it mounts, so an answer that just replaced its streaming
+  // draft is momentarily empty and then grows with no prop change to follow.
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    const content = contentRef.current;
+    if (!el || !content || !live) return;
+    const pin = () => {
+      if (stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+    };
+    pin();
+    const observer = new ResizeObserver(pin);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [live, empty]);
 
   return (
     <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto">
@@ -77,7 +81,7 @@ export const TranscriptFeed = ({
           </span>
         </div>
       ) : (
-        <div className="flex flex-col gap-4 p-4">
+        <div ref={contentRef} className="flex flex-col gap-4 p-4">
           {turns.map((m) => (
             <div key={m.id} className="flex gap-3">
               <span className="min-w-[40px] pt-0.5 font-mono text-[11px] text-meta">

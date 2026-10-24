@@ -48,7 +48,11 @@
       "icons/icon.ico"
     ],
     "resources": ["info.plist", "assistant.desktop"],
-    "macOS": { "minimumSystemVersion": "14.0" }
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    }
   },
   "plugins": {
     "sql": {

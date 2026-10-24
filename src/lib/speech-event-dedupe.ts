@@ -1,5 +1,9 @@
 export interface SpeechEventPayload {
-  audio: string;
+  /**
+   * Base64 WAV. Null when the utterance is cached in Rust: the local model
+   * claims it by `utterance_id`, and remote providers fetch the WAV by id.
+   */
+  audio: string | null;
   start_time: number;
   end_time: number;
   /**
@@ -25,10 +29,13 @@ const hashAudio = (audio: string): string => {
   return `${(first >>> 0).toString(16)}${(second >>> 0).toString(16)}`;
 };
 
+// Cache ids are unique per utterance, so they fingerprint it outright.
 const fingerprint = (payload: SpeechEventPayload): string =>
-  `${payload.start_time}:${payload.end_time}:${payload.audio.length}:${hashAudio(
-    payload.audio
-  )}`;
+  payload.utterance_id
+    ? `id:${payload.utterance_id}`
+    : `${payload.start_time}:${payload.end_time}:${payload.audio?.length ?? 0}:${hashAudio(
+        payload.audio ?? ""
+      )}`;
 
 export class RecentSpeechEventFingerprints {
   private readonly entries = new Map<string, number>();

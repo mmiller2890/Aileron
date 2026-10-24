@@ -110,6 +110,7 @@ pub fn run() {
             stt::stt_transcribe_speech,
             stt::stt_transcribe_utterance,
             stt::stt_get_status,
+            stt::stt_utterance_wav,
             db::db_save_conversation,
         ])
         .setup(|app| {

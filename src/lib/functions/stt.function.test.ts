@@ -199,6 +199,31 @@ describe("local HTTP transcription", () => {
       Origin: "",
     });
   });
+
+  it("uploads audio produced asynchronously, as for a cached utterance", async () => {
+    tauriFetchMock.mockResolvedValueOnce({
+      ok: true,
+      text: vi.fn().mockResolvedValue(JSON.stringify({ text: "fetched" })),
+    });
+    const httpProvider = {
+      id: "local-whisper",
+      curl: `curl -X POST http://127.0.0.1:8000/v1/audio/transcriptions -H "Content-Type: audio/wav" --data-binary "{{AUDIO}}"`,
+      responseContentPath: "text",
+      streaming: false,
+    } as TYPE_PROVIDER;
+
+    await expect(
+      fetchSTT({
+        provider: httpProvider,
+        selectedProvider: { provider: "local-whisper", variables: {} },
+        audio: async () => new Blob(["wav-bytes"], { type: "audio/wav" }),
+        utteranceId: "u-1",
+      }),
+    ).resolves.toBe("fetched");
+
+    const body = tauriFetchMock.mock.calls[0][1].body as Blob;
+    expect(await body.text()).toBe("wav-bytes");
+  });
 });
 
 describe("form-upload STT providers attach audio under the template's field", () => {

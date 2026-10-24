@@ -8,9 +8,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 /// How many recent utterances to keep addressable by id.
 ///
-/// Only the newest is normally claimed; the small backlog covers a frontend
-/// that falls behind during a burst of speech.
-const MAX_CACHED_UTTERANCES: usize = 4;
+/// The frontend claims each one as it arrives; the backlog covers a frontend
+/// that falls behind. Utterances carry no WAV on macOS, so an evicted one
+/// cannot be recovered: keep enough for a stalled UI thread. The TTL below
+/// bounds the memory (a 25 s turn is about 6 MB with its source audio).
+const MAX_CACHED_UTTERANCES: usize = 12;
 const CACHED_UTTERANCE_TTL: Duration = Duration::from_secs(60);
 const UTTERANCE_CACHE_MISS_PREFIX: &str = "UTTERANCE_CACHE_MISS:";
 
@@ -21,6 +23,9 @@ pub(crate) struct CachedUtterance {
     pub(crate) comparison_samples: Option<Vec<f32>>,
     pub(crate) source_sample_rate: u32,
     pub(crate) source_duration: f64,
+    /// The prepared audio at the capture rate, encoded as a WAV only when a
+    /// remote provider asks for it (see `stt_utterance_wav`).
+    source_samples: Vec<f32>,
     created_at: Instant,
 }
 
@@ -146,7 +151,7 @@ impl UtteranceStore {
     #[cfg(test)]
     fn put_at(&self, samples: Vec<f32>, now: Instant) -> Option<String> {
         let duration = samples.len() as f64 / 16_000.0;
-        self.put_capture_at(samples, None, 16_000, duration, now)
+        self.put_capture_at(samples, None, 16_000, duration, Vec::new(), now)
     }
 
     pub(crate) fn put_capture(
@@ -155,12 +160,14 @@ impl UtteranceStore {
         comparison_samples: Option<Vec<f32>>,
         source_sample_rate: u32,
         source_duration: f64,
+        source_samples: Vec<f32>,
     ) -> Option<String> {
         self.put_capture_at(
             primary_samples,
             comparison_samples,
             source_sample_rate,
             source_duration,
+            source_samples,
             Instant::now(),
         )
     }
@@ -171,6 +178,7 @@ impl UtteranceStore {
         comparison_samples: Option<Vec<f32>>,
         source_sample_rate: u32,
         source_duration: f64,
+        source_samples: Vec<f32>,
         now: Instant,
     ) -> Option<String> {
         let id = uuid::Uuid::new_v4().to_string();
@@ -185,9 +193,22 @@ impl UtteranceStore {
             comparison_samples,
             source_sample_rate,
             source_duration,
+            source_samples,
             created_at: now,
         });
         Some(id)
+    }
+
+    /// An utterance's capture-rate audio and its rate, leaving it claimable.
+    pub(crate) fn source(&self, id: &str) -> Option<(Vec<f32>, u32)> {
+        self.source_at(id, Instant::now())
+    }
+
+    fn source_at(&self, id: &str, now: Instant) -> Option<(Vec<f32>, u32)> {
+        let mut queue = self.inner.lock().ok()?;
+        Self::prune_expired(&mut queue, now);
+        let entry = queue.iter().find(|entry| entry.id == id)?;
+        Some((entry.source_samples.clone(), entry.source_sample_rate))
     }
 
     /// Claim an utterance, removing it from the cache.
@@ -280,6 +301,31 @@ mod utterance_store_tests {
     }
 
     #[test]
+    fn source_audio_can_be_read_without_claiming_the_utterance() {
+        let store = UtteranceStore::default();
+        let now = Instant::now();
+        let id = store
+            .put_capture_at(vec![1.0], None, 48_000, 1.0, vec![0.5, 0.25], now)
+            .unwrap();
+
+        assert_eq!(store.source_at(&id, now), Some((vec![0.5, 0.25], 48_000)));
+        assert_eq!(store.source_at(&id, now), Some((vec![0.5, 0.25], 48_000)));
+        assert!(store.take_at(&id, now).is_some());
+        assert_eq!(store.source_at(&id, now), None);
+    }
+
+    #[test]
+    fn source_audio_expires_with_its_utterance() {
+        let store = UtteranceStore::default();
+        let now = Instant::now();
+        let id = store
+            .put_capture_at(vec![1.0], None, 48_000, 1.0, vec![0.5], now)
+            .unwrap();
+
+        assert_eq!(store.source_at(&id, now + Duration::from_secs(61)), None);
+    }
+
+    #[test]
     fn expires_unclaimed_entries_after_the_ttl() {
         let store = UtteranceStore::default();
         let now = Instant::now();
@@ -293,7 +339,7 @@ mod utterance_store_tests {
         let store = UtteranceStore::default();
         let now = Instant::now();
         let id = store
-            .put_capture_at(vec![1.0], Some(vec![2.0]), 48_000, 1.25, now)
+            .put_capture_at(vec![1.0], Some(vec![2.0]), 48_000, 1.25, Vec::new(), now)
             .unwrap();
 
         let cached = store.take_at(&id, now).unwrap();
@@ -389,10 +435,10 @@ mod utterance_store_tests {
         let store = UtteranceStore::default();
         let now = Instant::now();
         let first = store
-            .put_capture_at(vec![1.0], Some(vec![10.0]), 16_000, 0.5, now)
+            .put_capture_at(vec![1.0], Some(vec![10.0]), 16_000, 0.5, Vec::new(), now)
             .unwrap();
         let second = store
-            .put_capture_at(vec![2.0], Some(vec![20.0]), 16_000, 0.5, now)
+            .put_capture_at(vec![2.0], Some(vec![20.0]), 16_000, 0.5, Vec::new(), now)
             .unwrap();
 
         let first = store.take_at(&first, now).unwrap();
@@ -407,7 +453,7 @@ mod utterance_store_tests {
         let store = UtteranceStore::default();
         let now = Instant::now();
         let id = store
-            .put_capture_at(vec![0.0; 16_000 * 16], None, 16_000, 16.0, now)
+            .put_capture_at(vec![0.0; 16_000 * 16], None, 16_000, 16.0, Vec::new(), now)
             .unwrap();
 
         let cached = store.take_at(&id, now).unwrap();
@@ -1172,6 +1218,28 @@ pub async fn stt_transcribe_utterance(
     tokio::task::spawn_blocking(move || SttState::transcribe_cached_inner(inner, cached))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// The WAV a remote provider uploads for a cached utterance, as base64.
+///
+/// Reading it leaves the utterance cached. Encoded on demand because the
+/// local model, which claims the samples by id, never needs it.
+#[tauri::command]
+pub async fn stt_utterance_wav(
+    utterance_id: String,
+    store: State<'_, UtteranceStore>,
+) -> Result<String, String> {
+    let (samples, sample_rate) = store.source(&utterance_id).ok_or_else(|| {
+        format!(
+            "{} Utterance {} is no longer cached",
+            UTTERANCE_CACHE_MISS_PREFIX, utterance_id
+        )
+    })?;
+    tokio::task::spawn_blocking(move || {
+        crate::speaker::samples_to_wav_b64(sample_rate, &samples)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

@@ -28,6 +28,20 @@ describe("RecentSpeechEventFingerprints", () => {
     expect(recent.claim(payload("audio-a"), 1_002)).toBe(false);
   });
 
+  test("tells cached utterances apart by id when they carry no audio", () => {
+    const recent = new RecentSpeechEventFingerprints();
+    const cached = (utterance_id: string) => ({
+      audio: null,
+      utterance_id,
+      start_time: 1.25,
+      end_time: 2.5,
+    });
+
+    expect(recent.claim(cached("u-1"), 1_000)).toBe(true);
+    expect(recent.claim(cached("u-2"), 1_001)).toBe(true);
+    expect(recent.claim(cached("u-1"), 1_002)).toBe(false);
+  });
+
   test("accepts the same payload after sixty seconds", () => {
     const recent = new RecentSpeechEventFingerprints();
     const event = payload("audio-a");

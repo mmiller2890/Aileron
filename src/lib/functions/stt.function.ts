@@ -26,10 +26,10 @@ export interface STTParams {
    * The encoded audio, or a thunk producing it.
    *
    * Pass a thunk when producing the blob is itself expensive (decoding a
-   * base64 WAV) and the chosen provider may not need it at all — see
-   * `utteranceId` below.
+   * base64 WAV, fetching a cached utterance's WAV from Rust) and the chosen
+   * provider may not need it at all — see `utteranceId` below.
    */
-  audio: File | Blob | (() => File | Blob);
+  audio: File | Blob | (() => File | Blob | Promise<File | Blob>);
   signal?: AbortSignal;
   /**
    * Handle for an utterance the Rust capture loop still holds in memory.
@@ -121,10 +121,11 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     if (!selectedProvider) throw new Error("Selected provider not provided");
     if (!audioSource) throw new Error("Audio file is required");
 
-    let resolvedAudio: File | Blob | null = null;
-    const audioBlob = (): File | Blob => {
-      resolvedAudio ??=
-        typeof audioSource === "function" ? audioSource() : audioSource;
+    let resolvedAudio: Promise<File | Blob> | null = null;
+    const audioBlob = (): Promise<File | Blob> => {
+      resolvedAudio ??= Promise.resolve(
+        typeof audioSource === "function" ? audioSource() : audioSource,
+      );
       return resolvedAudio;
     };
 
@@ -154,7 +155,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
 
       // Caller already has samples (mic VAD): skip the WAV round trip.
       const f32 =
-        samples ?? (await wavBase64ToF32Samples(await blobToBase64(audioBlob())));
+        samples ?? (await wavBase64ToF32Samples(await blobToBase64(await audioBlob())));
       if (f32.length === 0) throw new Error("Audio file is empty");
       const result = await invoke<LocalTranscriptionResult>("stt_transcribe_speech", {
         samples: Array.from(f32),
@@ -165,7 +166,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       return consumeLocalTranscription(result);
     }
 
-    const audio = audioBlob();
+    const audio = await audioBlob();
 
     let curlJson: any;
     try {

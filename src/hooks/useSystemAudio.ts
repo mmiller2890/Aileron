@@ -416,7 +416,10 @@ export function useSystemAudio() {
 
               const payload = event.payload as SpeechEventPayload;
               const base64Audio = payload.audio;
-              if (!base64Audio || base64Audio.length < 100) {
+              const utteranceId = payload.utterance_id ?? undefined;
+              // A cached utterance arrives as an id alone (its WAV is fetched
+              // only if a remote provider needs it).
+              if (!utteranceId && (!base64Audio || base64Audio.length < 100)) {
                 return;
               }
               if (!recentSpeechEventsRef.current.claim(payload)) {
@@ -428,8 +431,11 @@ export function useSystemAudio() {
               // Deferred: the local provider transcribes by handle (below) and
               // never needs the decoded WAV, and this loop runs over every byte
               // of the utterance on the UI thread.
-              const audioBlob = () => {
-                const binaryString = atob(base64Audio);
+              const audioBlob = async () => {
+                const wav =
+                  base64Audio ??
+                  (await invoke<string>("stt_utterance_wav", { utteranceId }));
+                const binaryString = atob(wav);
                 const bytes = new Uint8Array(binaryString.length);
                 for (let i = 0; i < binaryString.length; i++) {
                   bytes[i] = binaryString.charCodeAt(i);
@@ -468,7 +474,7 @@ export function useSystemAudio() {
                     provider: providerConfig,
                     selectedProvider: currentSelected,
                     audio: audioBlob,
-                    utteranceId: payload.utterance_id ?? undefined,
+                    utteranceId,
                     signal: sttAbortController.signal,
                   }),
                 );

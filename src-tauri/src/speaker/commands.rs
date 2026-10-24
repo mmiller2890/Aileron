@@ -1,6 +1,7 @@
 // Assistant AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
 use crate::speaker::preprocessing::{apply_noise_gate, prepare_utterance, PreparedUtterance};
 use crate::speaker::live_text;
+use crate::speaker::utterance_emitter::UtteranceEmitter;
 use crate::speaker::{live_speakers, turn_feeds};
 use crate::speaker::{AudioDevice, SpeakerInput};
 use anyhow::Result;
@@ -169,10 +170,11 @@ fn reset_vad_for_dictation(reset: Option<&dyn DictationVadReset>) -> Result<(), 
 
 /// Cache an utterance's samples and announce it to the frontend.
 ///
-/// The payload carries both the base64 WAV (which remote STT providers upload
-/// as-is) and an `utterance_id`. The local STT path claims the id instead,
-/// transcribing the samples we still hold here rather than decoding the WAV
-/// and shipping the samples back over IPC.
+/// A cached utterance is announced by `utterance_id` alone. The local STT path
+/// claims the id and transcribes the samples held here; a remote provider
+/// fetches the WAV it uploads with `stt_utterance_wav`. Encoding and shipping
+/// a multi-megabyte WAV the local model never reads is skipped. Without a
+/// cache entry, the payload carries the base64 WAV instead.
 fn emit_speech_detected(
     app: &AppHandle,
     sr: u32,
@@ -192,12 +194,6 @@ fn emit_speech_detected(
         );
         return;
     }
-
-    let Ok(b64) = samples_to_wav_b64(sr, &processed) else {
-        error!("Failed to encode speech to WAV");
-        let _ = app.emit("audio-encoding-error", "Failed to encode speech");
-        return;
-    };
 
     #[cfg(target_os = "macos")]
     let utterance_id = match samples_for_local_asr(&processed, sr) {
@@ -221,6 +217,7 @@ fn emit_speech_detected(
                 comparison_samples,
                 sr,
                 samples.len() as f64 / sr as f64,
+                processed.clone(),
             )
         }
         Err(error) => {
@@ -233,6 +230,19 @@ fn emit_speech_detected(
     };
     #[cfg(not(target_os = "macos"))]
     let utterance_id: Option<String> = None;
+
+    let b64 = if utterance_id.is_some() {
+        None
+    } else {
+        match samples_to_wav_b64(sr, &processed) {
+            Ok(b64) => Some(b64),
+            Err(_) => {
+                error!("Failed to encode speech to WAV");
+                let _ = app.emit("audio-encoding-error", "Failed to encode speech");
+                return;
+            }
+        }
+    };
 
     let _ = app.emit(
         "speech-detected",
@@ -778,6 +788,33 @@ impl CaptureDrainMonitor {
     }
 }
 
+/// What the capture loop hands the utterance thread, in loop order.
+enum TurnOutcome {
+    Utterance {
+        samples: Vec<f32>,
+        start_time: f32,
+        end_time: f32,
+        turn: u64,
+    },
+    TooShort,
+}
+
+fn spawn_turn_emitter(app: &AppHandle, sr: u32, config: &VadConfig) -> UtteranceEmitter<TurnOutcome> {
+    let app = app.clone();
+    let (noise_gate, compare) = (config.noise_gate_threshold, config.compare_preprocessing);
+    UtteranceEmitter::spawn(move |outcome| match outcome {
+        TurnOutcome::Utterance {
+            samples,
+            start_time,
+            end_time,
+            turn,
+        } => emit_speech_detected(&app, sr, &samples, noise_gate, compare, start_time, end_time, turn),
+        TurnOutcome::TooShort => {
+            let _ = app.emit("speech-discarded", "Audio too short (likely background noise)");
+        }
+    })
+}
+
 async fn run_vad_capture(
     app: AppHandle,
     stream: impl StreamExt<Item = f32> + Unpin,
@@ -794,6 +831,7 @@ async fn run_vad_capture(
 ) {
     let mut stream = stream;
     let mut live_turns = turn_feeds::TurnFeeds::new(live_text, live_speakers);
+    let turns_out = spawn_turn_emitter(&app, sr, &config);
     let mut last_device_check = Instant::now();
     // Input-level metering + no-audio detection (see the emit sites below).
     let mut last_level_emit = Instant::now();
@@ -996,16 +1034,12 @@ async fn run_vad_capture(
                     let carried = speech_buffer.split_off(split);
                     let utterance_end_time =
                         audio_position_secs(samples_processed - carried.len() as u64);
-                    emit_speech_detected(
-                        &app,
-                        sr,
-                        &speech_buffer,
-                        config.noise_gate_threshold,
-                        config.compare_preprocessing,
-                        utterance_start_time,
-                        utterance_end_time,
-                        live_turns.current(),
-                    );
+                    turns_out.send(TurnOutcome::Utterance {
+                        samples: std::mem::take(&mut speech_buffer),
+                        start_time: utterance_start_time,
+                        end_time: utterance_end_time,
+                        turn: live_turns.current(),
+                    });
                     live_turns.end();
 
                     #[cfg(target_os = "macos")]
@@ -1042,21 +1076,14 @@ async fn run_vad_capture(
                             }
 
                             let utterance_end_time = audio_position_secs(samples_processed);
-                            emit_speech_detected(
-                                &app,
-                                sr,
-                                &speech_buffer,
-                                config.noise_gate_threshold,
-                                config.compare_preprocessing,
-                                utterance_start_time,
-                                utterance_end_time,
-                                live_turns.current(),
-                            );
+                            turns_out.send(TurnOutcome::Utterance {
+                                samples: std::mem::take(&mut speech_buffer),
+                                start_time: utterance_start_time,
+                                end_time: utterance_end_time,
+                                turn: live_turns.current(),
+                            });
                         } else {
-                            let _ = app.emit(
-                                "speech-discarded",
-                                "Audio too short (likely background noise)",
-                            );
+                            turns_out.send(TurnOutcome::TooShort);
                         }
 
                         live_turns.end();
@@ -1106,21 +1133,23 @@ async fn run_vad_capture(
     // Emit any remaining audio when the stream ends.
     if in_speech && !speech_buffer.is_empty() {
         let utterance_end_time = audio_position_secs(samples_processed);
-        emit_speech_detected(
-            &app,
-            sr,
-            &speech_buffer,
-            config.noise_gate_threshold,
-            config.compare_preprocessing,
-            utterance_start_time,
-            utterance_end_time,
-            live_turns.current(),
-        );
+        turns_out.send(TurnOutcome::Utterance {
+            samples: speech_buffer,
+            start_time: utterance_start_time,
+            end_time: utterance_end_time,
+            turn: live_turns.current(),
+        });
     }
 
-    // Bounded: a worker that will not stop is left behind and muted. Off the
-    // async runtime, because waiting for the workers blocks the thread.
-    let _ = tokio::task::spawn_blocking(move || live_turns.stop(Duration::from_millis(500))).await;
+    // Off the async runtime, because both wait on threads. Every queued
+    // utterance is emitted before the task ends and the frontend hears the
+    // capture is over. The live workers stop within a bound; one that will
+    // not is left behind and muted.
+    let _ = tokio::task::spawn_blocking(move || {
+        turns_out.finish();
+        live_turns.stop(Duration::from_millis(500));
+    })
+    .await;
 }
 
 /// What a finished manual take should do with the audio it collected.
@@ -1339,7 +1368,7 @@ fn calculate_audio_metrics(chunk: &[f32]) -> (f32, f32) {
 }
 
 // Convert samples to WAV base64 (with proper error handling)
-fn samples_to_wav_b64(sample_rate: u32, mono_f32: &[f32]) -> Result<String, String> {
+pub(crate) fn samples_to_wav_b64(sample_rate: u32, mono_f32: &[f32]) -> Result<String, String> {
     // Validate sample rate
     if !(8000..=96000).contains(&sample_rate) {
         error!("Invalid sample rate: {}", sample_rate);

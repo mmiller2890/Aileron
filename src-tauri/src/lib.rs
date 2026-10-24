@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod capture;
+mod logging;
 mod db;
 mod shortcuts;
 mod window;
@@ -112,6 +113,11 @@ pub fn run() {
             db::db_save_conversation,
         ])
         .setup(|app| {
+            // First, so warnings raised during the rest of setup are kept.
+            match app.path().app_log_dir() {
+                Ok(dir) => logging::init(&dir),
+                Err(error) => eprintln!("No log directory, so warnings are not logged: {error}"),
+            }
             // Clear session WAVs left behind by versions that recorded them.
             speaker::sweep_stale_session_wavs(
                 &std::env::temp_dir(),

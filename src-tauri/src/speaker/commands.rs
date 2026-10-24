@@ -807,7 +807,7 @@ async fn run_vad_capture(
     let mut in_speech = false;
     let mut silence_chunks = 0;
     let mut speech_chunks = 0;
-    let max_samples = sr as usize * 30; // 30s safety cap per utterance
+    let max_samples = sr as usize * MAX_TURN_SECS;
 
 
 
@@ -985,9 +985,17 @@ async fn run_vad_capture(
                 live_turns.audio(hop_16k);
                 silence_chunks = 0; // Reset silence counter on any speech
 
-                // Safety cap: force emit if exceeds 30s
+                // Length cap: emit up to the quietest recent hop, so the cut
+                // falls between words, and carry the rest into a new turn.
                 if speech_buffer.len() > max_samples {
-                    let utterance_end_time = audio_position_secs(samples_processed);
+                    let split = quietest_split(
+                        &speech_buffer,
+                        config.hop_size,
+                        sr as usize * CAPPED_TURN_SPLIT_SECS,
+                    );
+                    let carried = speech_buffer.split_off(split);
+                    let utterance_end_time =
+                        audio_position_secs(samples_processed - carried.len() as u64);
                     emit_speech_detected(
                         &app,
                         sr,
@@ -999,9 +1007,15 @@ async fn run_vad_capture(
                         live_turns.current(),
                     );
                     live_turns.end();
-                    speech_buffer.clear();
-                    in_speech = false;
-                    speech_chunks = 0;
+
+                    #[cfg(target_os = "macos")]
+                    let carried_16k = samples_for_local_asr(&carried, sr).unwrap_or_default();
+                    #[cfg(not(target_os = "macos"))]
+                    let carried_16k = Vec::new();
+                    live_turns.begin(carried_16k);
+                    speech_chunks = carried.len() / config.hop_size;
+                    speech_buffer = carried;
+                    utterance_start_time = utterance_end_time;
                 }
             } else {
                 // Silence detected
@@ -1013,7 +1027,9 @@ async fn run_vad_capture(
                     live_turns.audio(hop_16k);
 
                     // Check if silence duration exceeds threshold
-                    if silence_chunks >= config.silence_chunks {
+                    if silence_chunks
+                        >= required_silence_chunks(&config, speech_buffer.len(), sr)
+                    {
                         if speech_chunks >= config.min_speech_chunks && !speech_buffer.is_empty() {
                             // Trim trailing silence (keep ~0.15s for natural ending)
                             let silence_duration_samples = silence_chunks * config.hop_size;
@@ -1131,6 +1147,56 @@ fn take_first_error(reported: &mut bool) -> bool {
     } else {
         *reported = true;
         true
+    }
+}
+
+/// A turn this long ends at a short pause instead of the configured silence.
+/// Edited video and lively calls rarely pause for a full second, so without
+/// this a turn only ends at the length cap and text arrives in late blocks.
+/// Long enough that an interviewer's question, which ends in a real pause,
+/// is not split at a breath and answered half-asked.
+const LONG_TURN_SECS: f32 = 15.0;
+/// The shortest pause Silero's 256 ms frames reliably report: measured on
+/// speech, 12 hops at 48 kHz end turns at pauses of 350 ms and up.
+const LONG_TURN_PAUSE_SECS: f32 = 0.25;
+/// Length cap on a turn. At the cap the turn splits at its quietest hop in
+/// the last `CAPPED_TURN_SPLIT_SECS`, and the rest starts the next turn.
+const MAX_TURN_SECS: usize = 25;
+const CAPPED_TURN_SPLIT_SECS: usize = 3;
+
+/// Hops of silence that end a turn already holding `turn_samples`.
+fn required_silence_chunks(config: &VadConfig, turn_samples: usize, sr: u32) -> usize {
+    if (turn_samples as f32) < LONG_TURN_SECS * sr as f32 {
+        return config.silence_chunks;
+    }
+    let pause_chunks = (LONG_TURN_PAUSE_SECS * sr as f32 / config.hop_size as f32).ceil() as usize;
+    config.silence_chunks.min(pause_chunks)
+}
+
+/// Where to cut a turn at the length cap: the start of the quietest hop in
+/// the last `search` samples, when it is clearly quieter than the rest of
+/// that tail; otherwise the end of the buffer. Never 0, so a cut always
+/// emits something.
+fn quietest_split(buffer: &[f32], hop: usize, search: usize) -> usize {
+    let start = (buffer.len().saturating_sub(search) / hop * hop).max(hop);
+    let hops: Vec<(usize, f32)> = (start..)
+        .step_by(hop)
+        .take_while(|i| i + hop <= buffer.len())
+        .map(|i| (i, calculate_audio_metrics(&buffer[i..i + hop]).0))
+        .collect();
+    if hops.is_empty() {
+        return buffer.len();
+    }
+    let mean = hops.iter().map(|(_, rms)| rms).sum::<f32>() / hops.len() as f32;
+    let (index, quietest) = hops
+        .iter()
+        .copied()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("hops is not empty");
+    if quietest < mean / 2.0 {
+        index
+    } else {
+        buffer.len()
     }
 }
 
@@ -1553,6 +1619,61 @@ mod tests {
         let config = VadConfig::default();
         let seconds = (config.silence_chunks * config.hop_size) as f32 / 48_000.0;
         assert!((0.9..=1.05).contains(&seconds), "{seconds}");
+    }
+
+    #[test]
+    fn a_short_turn_needs_the_configured_silence_to_end() {
+        let config = VadConfig::default();
+        let fourteen_seconds = 48_000 * 14;
+        assert_eq!(
+            required_silence_chunks(&config, fourteen_seconds, 48_000),
+            config.silence_chunks
+        );
+    }
+
+    #[test]
+    fn a_long_turn_ends_at_a_quarter_second_pause() {
+        let config = VadConfig::default();
+        let fifteen_seconds = 48_000 * 15;
+        assert_eq!(required_silence_chunks(&config, fifteen_seconds, 48_000), 12);
+        // The pause is a duration, so it spans twice the hops at 96 kHz.
+        assert_eq!(required_silence_chunks(&config, 96_000 * 15, 96_000), 24);
+    }
+
+    #[test]
+    fn a_shorter_configured_silence_still_applies_to_long_turns() {
+        let config = VadConfig {
+            silence_chunks: 5,
+            ..VadConfig::default()
+        };
+        assert_eq!(required_silence_chunks(&config, 48_000 * 20, 48_000), 5);
+    }
+
+    #[test]
+    fn a_capped_turn_splits_at_its_quietest_hop() {
+        let hop = 4;
+        // Loud everywhere except hop 5 (samples 20..24).
+        let mut buffer = vec![0.5f32; 40];
+        buffer[20..24].fill(0.01);
+        assert_eq!(quietest_split(&buffer, hop, 24), 20);
+    }
+
+    #[test]
+    fn a_capped_turn_without_a_quiet_hop_splits_at_the_end() {
+        let buffer = vec![0.5f32; 40];
+        assert_eq!(quietest_split(&buffer, 4, 24), 40);
+    }
+
+    #[test]
+    fn the_split_search_stays_inside_the_tail() {
+        let hop = 4;
+        let mut buffer = vec![0.5f32; 40];
+        // Quietest overall, but before the 12-sample tail being searched.
+        buffer[4..8].fill(0.0);
+        buffer[32..36].fill(0.1);
+        assert_eq!(quietest_split(&buffer, hop, 12), 32);
+        // A tail longer than the buffer never splits off the whole turn.
+        assert!(quietest_split(&buffer, hop, 400) > 0);
     }
 
     #[test]

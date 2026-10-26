@@ -105,6 +105,16 @@ export function useSystemAudio() {
   }, []);
   const [lastAIResponse, setLastAIResponse] = useState<string>("");
   const [error, setError] = useState<string>("");
+  // Whatever the bar tells the user also lands in aileron.log, so a session
+  // that went wrong can be read back afterwards.
+  useEffect(() => {
+    if (error) void invoke("log_ui_message", { message: error }).catch(() => {});
+  }, [error]);
+  useEffect(() => {
+    if (liveNotice) {
+      void invoke("log_ui_message", { message: liveNotice }).catch(() => {});
+    }
+  }, [liveNotice]);
   const [setupRequired, setSetupRequired] = useState<boolean>(false);
   const {
     quickActions,

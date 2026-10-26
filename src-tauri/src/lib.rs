@@ -111,6 +111,7 @@ pub fn run() {
             stt::stt_transcribe_utterance,
             stt::stt_get_status,
             stt::stt_utterance_wav,
+            logging::log_ui_message,
             db::db_save_conversation,
         ])
         .setup(|app| {
@@ -131,7 +132,7 @@ pub fn run() {
             let app_handle = app.handle();
             if app_handle.get_webview_window("dashboard").is_none() {
                 if let Err(e) = window::create_dashboard_window(app_handle) {
-                    eprintln!("Failed to pre-create dashboard window on startup: {}", e);
+                    tracing::warn!("Failed to pre-create dashboard window on startup: {}", e);
                 }
             }
             // NOTE: the dashboard-primary launch flip (hide overlay + focus
@@ -150,7 +151,7 @@ pub fn run() {
                     MacosLauncher::LaunchAgent,
                     Some(vec![]),
                 )) {
-                    eprintln!("Failed to initialize autostart plugin: {}", e);
+                    tracing::warn!("Failed to initialize autostart plugin: {}", e);
                 }
             }
 
@@ -166,7 +167,7 @@ pub fn run() {
                                 let registered = match state.shortcuts.lock() {
                                     Ok(guard) => guard,
                                     Err(poisoned) => {
-                                        eprintln!("Mutex poisoned in handler, recovering...");
+                                        tracing::error!("Mutex poisoned in handler, recovering...");
                                         poisoned.into_inner()
                                     }
                                 };
@@ -189,7 +190,7 @@ pub fn run() {
                                         {
                                             shortcuts::start_move_window(app, direction);
                                         } else {
-                                            eprintln!("Shortcut triggered: {}", action_id);
+                                            tracing::debug!("Shortcut triggered: {}", action_id);
                                             shortcuts::handle_shortcut_action(app, &action_id);
                                         }
                                     }
@@ -207,7 +208,7 @@ pub fn run() {
                 )
                 .expect("Failed to initialize global shortcut plugin");
             if let Err(e) = shortcuts::setup_global_shortcuts(app.handle()) {
-                eprintln!("Failed to setup global shortcuts: {}", e);
+                tracing::warn!("Failed to setup global shortcuts: {}", e);
             }
             Ok(())
         });
@@ -227,7 +228,7 @@ pub fn run() {
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {
             if let Err(e) = window::show_dashboard_window(app_handle) {
-                eprintln!("Failed to reopen dashboard on dock activation: {}", e);
+                tracing::warn!("Failed to reopen dashboard on dock activation: {}", e);
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -241,12 +242,12 @@ pub fn run() {
 #[allow(deprecated, unexpected_cfgs)]
 fn init(app_handle: &AppHandle) {
     let Some(window) = app_handle.get_webview_window("main") else {
-        eprintln!("main window not found; skipping panel setup");
+        tracing::warn!("main window not found; skipping panel setup");
         return;
     };
 
     let Ok(panel) = window.to_panel() else {
-        eprintln!("failed to convert main window to panel; skipping panel setup");
+        tracing::warn!("failed to convert main window to panel; skipping panel setup");
         return;
     };
 

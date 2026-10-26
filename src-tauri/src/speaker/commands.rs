@@ -678,9 +678,13 @@ pub async fn start_system_audio_capture(
     #[cfg(not(target_os = "macos"))]
     let live_speakers: Option<live_speakers::LiveSpeakerHandle> = None;
 
+    let started_summary = format!(
+        "vad={}, live_text={}, live_speakers={}",
+        vad_config.enabled, vad_config.live_text, vad_config.live_speakers
+    );
     let task = tokio::spawn(async move {
         if vad_config.enabled {
-            run_vad_capture(
+            let end = run_vad_capture(
                 app_clone.clone(),
                 stream,
                 sr,
@@ -691,6 +695,15 @@ pub async fn start_system_audio_capture(
                 live_speakers,
             )
             .await;
+            match end {
+                CaptureEnd::StopRequested => tracing::info!("System-audio capture stopped on request"),
+                CaptureEnd::DeviceChanged => {
+                    tracing::info!("System-audio capture ended for an output-device change")
+                }
+                CaptureEnd::StreamEnded => {
+                    warn!("System-audio stream ended without a stop request")
+                }
+            }
         } else {
             run_continuous_capture(
                 app_clone.clone(),
@@ -718,6 +731,7 @@ pub async fn start_system_audio_capture(
             if let Ok(mut is_capturing) = state.is_capturing.lock() {
                 *is_capturing = false;
             }
+            warn!("System-audio capture ended unexpectedly; telling the frontend");
             let _ = app_clone.emit("capture-ended-unexpectedly", ());
         }
     });
@@ -756,6 +770,9 @@ pub async fn start_system_audio_capture(
         }
     }
 
+    tracing::info!(
+        "System-audio capture started: sample_rate={sr}, default_device={on_default_device}, {started_summary}"
+    );
     let _ = app.emit("capture-started", sr);
 
     Ok(())
@@ -785,6 +802,14 @@ impl CaptureDrainMonitor {
         self.last_report = Some(started);
         Some(gap)
     }
+}
+
+/// Why a VAD capture loop returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureEnd {
+    StopRequested,
+    DeviceChanged,
+    StreamEnded,
 }
 
 /// What the capture loop hands the utterance thread, in loop order.
@@ -827,8 +852,9 @@ async fn run_vad_capture(
     stop_flag: Arc<AtomicBool>,
     live_text: Option<live_text::LiveTextHandle>,
     live_speakers: Option<live_speakers::LiveSpeakerHandle>,
-) {
+) -> CaptureEnd {
     let mut stream = stream;
+    let mut end = CaptureEnd::StreamEnded;
     let mut live_turns = turn_feeds::TurnFeeds::new(live_text, live_speakers);
     let turns_out = spawn_turn_emitter(&app, sr, &config);
     let mut last_device_check = Instant::now();
@@ -875,6 +901,7 @@ async fn run_vad_capture(
 
     while let Some(sample) = stream.next().await {
         if stop_flag.load(Ordering::Acquire) {
+            end = CaptureEnd::StopRequested;
             break;
         }
 
@@ -893,6 +920,7 @@ async fn run_vad_capture(
                             bound_uid, current_uid
                         );
                         let _ = app.emit("audio-device-changed", ());
+                        end = CaptureEnd::DeviceChanged;
                         break;
                     }
                 }
@@ -1202,6 +1230,7 @@ async fn run_vad_capture(
         live_turns.stop(Duration::from_millis(500));
     })
     .await;
+    end
 }
 
 /// What a finished manual take should do with the audio it collected.
@@ -1534,6 +1563,7 @@ pub async fn stop_system_audio_capture(
     // discard visible to the take being stopped.
     latch_discard_intent(&state.discard_take, discard.unwrap_or(false));
     state.stop_flag.store(true, Ordering::Release);
+    tracing::info!("System-audio capture stop requested (discard={})", discard.unwrap_or(false));
 
     // A start is still setting up: there is no task to take yet. The start
     // sees the request when it installs its task and stops the capture itself

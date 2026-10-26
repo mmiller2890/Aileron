@@ -262,7 +262,7 @@ impl SpeakerInput {
                 source_name.as_deref(),
                 init_tx,
             ) {
-                eprintln!("Audio capture loop failed: {}", e);
+                tracing::warn!("Audio capture loop failed: {}", e);
             }
         }));
 
@@ -271,12 +271,12 @@ impl SpeakerInput {
             Ok(Ok(sr)) => (sr, None),
             Ok(Err(e)) => {
                 let msg = format!("Audio initialization failed: {}", e);
-                eprintln!("{}", msg);
+                tracing::warn!("{}", msg);
                 (DEFAULT_SAMPLE_RATE, Some(msg))
             }
             Err(e) => {
                 let msg = format!("Failed to receive audio init signal: {}", e);
-                eprintln!("{}", msg);
+                tracing::warn!("{}", msg);
                 (DEFAULT_SAMPLE_RATE, Some(msg))
             }
         };

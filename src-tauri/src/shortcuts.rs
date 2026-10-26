@@ -88,11 +88,11 @@ pub fn setup_global_shortcuts<R: Runtime>(
     let _registered = match state.shortcuts.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            eprintln!("Mutex poisoned in setup, recovering...");
+            tracing::error!("Mutex poisoned in setup, recovering...");
             poisoned.into_inner()
         }
     };
-    eprintln!("Global shortcuts state initialized, waiting for frontend config");
+    tracing::debug!("Global shortcuts state initialized, waiting for frontend config");
 
     Ok(())
 }
@@ -117,7 +117,7 @@ pub fn handle_shortcut_action<R: Runtime>(app: &AppHandle<R>, action_id: &str) {
                     "custom-shortcut-triggered",
                     json!({ "action": custom_action }),
                 ) {
-                    eprintln!("Failed to emit custom shortcut event: {}", e);
+                    tracing::warn!("Failed to emit custom shortcut event: {}", e);
                 }
             }
         }
@@ -128,7 +128,7 @@ pub fn start_move_window<R: Runtime>(app: &AppHandle<R>, direction: &str) {
     {
         let license_state = app.state::<LicenseState>();
         if !license_state.is_active() {
-            eprintln!(
+            tracing::debug!(
                 "Ignoring move_window start for direction '{}' - license inactive",
                 direction
             );
@@ -200,18 +200,18 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
         *is_hidden = !*is_hidden;
 
         if let Err(e) = window.emit("toggle-window-visibility", *is_hidden) {
-            eprintln!("Failed to emit toggle-window-visibility event: {}", e);
+            tracing::warn!("Failed to emit toggle-window-visibility event: {}", e);
         }
 
         if !*is_hidden {
             if let Err(e) = window.show() {
-                eprintln!("Failed to show window: {}", e);
+                tracing::warn!("Failed to show window: {}", e);
             }
             if let Err(e) = window.set_focus() {
-                eprintln!("Failed to focus window: {}", e);
+                tracing::warn!("Failed to focus window: {}", e);
             }
             if let Err(e) = window.emit("focus-text-input", json!({})) {
-                eprintln!("Failed to emit focus-text-input event: {}", e);
+                tracing::warn!("Failed to emit focus-text-input event: {}", e);
             }
         }
         return;
@@ -227,23 +227,23 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
             }
             // Window is visible, hide it and handle app icon based on user settings
             if let Err(e) = window.hide() {
-                eprintln!("Failed to hide window: {}", e);
+                tracing::warn!("Failed to hide window: {}", e);
             }
             // Payload semantics match the Windows branch: `true` = now hidden.
             // The overlay ignores this off-Windows; the dashboard's pop-out
             // button listens to keep its label in sync.
             if let Err(e) = window.emit("toggle-window-visibility", true) {
-                eprintln!("Failed to emit toggle-window-visibility: {}", e);
+                tracing::warn!("Failed to emit toggle-window-visibility: {}", e);
             }
         }
         Ok(false) => {
             // Window is hidden, show it and handle app icon based on user settings
             if let Err(e) = window.show() {
-                eprintln!("Failed to show window: {}", e);
+                tracing::warn!("Failed to show window: {}", e);
             }
 
             if let Err(e) = window.set_focus() {
-                eprintln!("Failed to focus window: {}", e);
+                tracing::warn!("Failed to focus window: {}", e);
             }
 
             #[cfg(target_os = "macos")]
@@ -252,13 +252,13 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
                 panel.show();
             }
             if let Err(e) = window.emit("toggle-window-visibility", false) {
-                eprintln!("Failed to emit toggle-window-visibility: {}", e);
+                tracing::warn!("Failed to emit toggle-window-visibility: {}", e);
             }
             // Emit event to focus text input
             let _ = window.emit("focus-text-input", json!({}));
         }
         Err(e) => {
-            eprintln!("Failed to check window visibility: {}", e);
+            tracing::warn!("Failed to check window visibility: {}", e);
         }
     }
 }
@@ -310,13 +310,13 @@ fn handle_audio_shortcut<R: Runtime>(app: &AppHandle<R>) {
                 return;
             }
             if let Err(e) = window.set_focus() {
-                eprintln!("Failed to focus window: {}", e);
+                tracing::warn!("Failed to focus window: {}", e);
             }
         }
 
         // Emit event to start audio recording
         if let Err(e) = window.emit("start-audio-recording", json!({})) {
-            eprintln!("Failed to emit audio recording event: {}", e);
+            tracing::warn!("Failed to emit audio recording event: {}", e);
         }
     }
 }
@@ -326,7 +326,7 @@ fn handle_screenshot_shortcut<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         // Emit event to trigger screenshot - frontend will determine auto/manual mode
         if let Err(e) = window.emit("trigger-screenshot", json!({})) {
-            eprintln!("Failed to emit screenshot event: {}", e);
+            tracing::warn!("Failed to emit screenshot event: {}", e);
         }
     }
 }
@@ -338,7 +338,7 @@ fn handle_system_audio_shortcut<R: Runtime>(app: &AppHandle<R>) {
         // dashboard pop-out button or ⌘\ (dashboard-primary posture). The
         // engine runs in the hidden overlay webview either way.
         if let Err(e) = window.emit("toggle-system-audio", json!({})) {
-            eprintln!("Failed to emit system audio event: {}", e);
+            tracing::warn!("Failed to emit system audio event: {}", e);
         }
     }
 }
@@ -352,7 +352,7 @@ pub fn get_registered_shortcuts<R: Runtime>(
     let registered = match state.shortcuts.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            eprintln!("Mutex poisoned in get_registered_shortcuts, recovering...");
+            tracing::error!("Mutex poisoned in get_registered_shortcuts, recovering...");
             poisoned.into_inner()
         }
     };
@@ -365,7 +365,7 @@ pub fn update_shortcuts<R: Runtime>(
     app: AppHandle<R>,
     config: ShortcutsConfig,
 ) -> Result<(), String> {
-    eprintln!("Updating shortcuts with {} bindings", config.bindings.len());
+    tracing::debug!("Updating shortcuts with {} bindings", config.bindings.len());
 
     let mut shortcuts_to_register = Vec::new();
 
@@ -378,7 +378,7 @@ pub fn update_shortcuts<R: Runtime>(
         if binding.enabled && !binding.key.is_empty() {
             if action_id == "move_window" {
                 if !has_license {
-                    eprintln!("Skipping move_window registration - license inactive");
+                    tracing::warn!("Skipping move_window registration - license inactive");
                     continue;
                 }
 
@@ -396,7 +396,7 @@ pub fn update_shortcuts<R: Runtime>(
                             shortcuts_to_register.push((direction_action_id, full_key, shortcut));
                         }
                         Err(e) => {
-                            eprintln!("Invalid shortcut '{}' for move_window: {}", full_key, e);
+                            tracing::warn!("Invalid shortcut '{}' for move_window: {}", full_key, e);
                             return Err(format!(
                                 "Invalid shortcut '{}' for move_window: {}",
                                 full_key, e
@@ -413,7 +413,7 @@ pub fn update_shortcuts<R: Runtime>(
                     shortcuts_to_register.push((action_id.clone(), binding.key.clone(), shortcut));
                 }
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Invalid shortcut '{}' for action '{}': {}",
                         binding.key, action_id, e
                     );
@@ -433,7 +433,7 @@ pub fn update_shortcuts<R: Runtime>(
     let previous_shortcuts = match state.shortcuts.lock() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => {
-            eprintln!("Mutex poisoned in update_shortcuts, recovering...");
+            tracing::error!("Mutex poisoned in update_shortcuts, recovering...");
             poisoned.into_inner().clone()
         }
     };
@@ -449,11 +449,11 @@ pub fn update_shortcuts<R: Runtime>(
     for (action_id, shortcut_str, shortcut) in shortcuts_to_register {
         match app.global_shortcut().register(shortcut) {
             Ok(_) => {
-                eprintln!("Registered shortcut: {} -> {}", action_id, shortcut_str);
+                tracing::debug!("Registered shortcut: {} -> {}", action_id, shortcut_str);
                 successfully_registered.insert(action_id, shortcut_str);
             }
             Err(e) => {
-                eprintln!("Failed to register {} shortcut: {}", action_id, e);
+                tracing::warn!("Failed to register {} shortcut: {}", action_id, e);
                 registration_failures.push((action_id, shortcut_str, e.to_string()));
             }
         }
@@ -467,18 +467,18 @@ pub fn update_shortcuts<R: Runtime>(
                 match prev_str.parse::<Shortcut>() {
                     Ok(shortcut) => match app.global_shortcut().register(shortcut) {
                         Ok(_) => {
-                            eprintln!("Restored previous shortcut for {}: {}", action_id, prev_str);
+                            tracing::debug!("Restored previous shortcut for {}: {}", action_id, prev_str);
                             successfully_registered.insert(action_id.clone(), prev_str.clone());
                         }
                         Err(e) => {
-                            eprintln!(
+                            tracing::warn!(
                                 "Failed to restore previous shortcut {} for {}: {}",
                                 prev_str, action_id, e
                             );
                         }
                     },
                     Err(e) => {
-                        eprintln!(
+                        tracing::warn!(
                             "Failed to parse previous shortcut {} for {}: {}",
                             prev_str, action_id, e
                         );
@@ -494,7 +494,7 @@ pub fn update_shortcuts<R: Runtime>(
         let mut registered = match state.shortcuts.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                eprintln!("Mutex poisoned in update_shortcuts, recovering...");
+                tracing::error!("Mutex poisoned in update_shortcuts, recovering...");
                 poisoned.into_inner()
             }
         };
@@ -506,7 +506,7 @@ pub fn update_shortcuts<R: Runtime>(
     if !registration_failures.is_empty() {
         if let Some(window) = app.get_webview_window("main") {
             if let Err(e) = window.emit("shortcut-registration-error", &registration_failures) {
-                eprintln!("Failed to emit shortcut registration error event: {}", e);
+                tracing::warn!("Failed to emit shortcut registration error event: {}", e);
             }
         }
 
@@ -530,7 +530,7 @@ fn unregister_all_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
     let registered = match state.shortcuts.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            eprintln!("Mutex poisoned in unregister_all_shortcuts, recovering...");
+            tracing::error!("Mutex poisoned in unregister_all_shortcuts, recovering...");
             poisoned.into_inner()
         }
     };
@@ -539,10 +539,10 @@ fn unregister_all_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
         if let Ok(shortcut) = shortcut_str.parse::<Shortcut>() {
             match app.global_shortcut().unregister(shortcut) {
                 Ok(_) => {
-                    eprintln!("Unregistered shortcut: {} -> {}", action_id, shortcut_str);
+                    tracing::debug!("Unregistered shortcut: {} -> {}", action_id, shortcut_str);
                 }
                 Err(e) => {
-                    eprintln!("Failed to unregister shortcut {}: {}", shortcut_str, e);
+                    tracing::warn!("Failed to unregister shortcut {}: {}", shortcut_str, e);
                 }
             }
         }
@@ -558,7 +558,7 @@ pub fn check_shortcuts_registered<R: Runtime>(app: AppHandle<R>) -> Result<bool,
     let registered = match state.shortcuts.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            eprintln!("Mutex poisoned in check_shortcuts_registered, recovering...");
+            tracing::error!("Mutex poisoned in check_shortcuts_registered, recovering...");
             poisoned.into_inner()
         }
     };
@@ -571,7 +571,7 @@ pub fn validate_shortcut_key(key: String) -> Result<bool, String> {
     match key.parse::<Shortcut>() {
         Ok(_) => Ok(true),
         Err(e) => {
-            eprintln!("Invalid shortcut '{}': {}", key, e);
+            tracing::warn!("Invalid shortcut '{}': {}", key, e);
             Ok(false)
         }
     }
@@ -604,7 +604,7 @@ pub fn set_app_icon_visibility<R: Runtime>(app: AppHandle<R>, visible: bool) -> 
         };
 
         app.set_activation_policy(policy).map_err(|e| {
-            eprintln!("Failed to set activation policy: {}", e);
+            tracing::warn!("Failed to set activation policy: {}", e);
             format!("Failed to set activation policy: {}", e)
         })?;
     }
@@ -617,7 +617,7 @@ pub fn set_app_icon_visibility<R: Runtime>(app: AppHandle<R>, visible: bool) -> 
                 .set_skip_taskbar(!visible)
                 .map_err(|e| format!("Failed to set taskbar visibility: {}", e))?;
         } else {
-            eprintln!("Main window not found on Windows");
+            tracing::warn!("Main window not found on Windows");
         }
     }
 
@@ -629,7 +629,7 @@ pub fn set_app_icon_visibility<R: Runtime>(app: AppHandle<R>, visible: bool) -> 
                 .set_skip_taskbar(!visible)
                 .map_err(|e| format!("Failed to set panel visibility: {}", e))?;
         } else {
-            eprintln!("Main window not found on Linux");
+            tracing::warn!("Main window not found on Linux");
         }
     }
 
@@ -657,27 +657,27 @@ fn handle_toggle_dashboard<R: Runtime>(app: &AppHandle<R>) {
             Ok(true) => {
                 // Window is visible, hide it
                 if let Err(e) = dashboard_window.hide() {
-                    eprintln!("Failed to hide dashboard window: {}", e);
+                    tracing::warn!("Failed to hide dashboard window: {}", e);
                 }
             }
             Ok(false) => {
                 // Window is hidden, show and focus it
                 if let Err(e) = dashboard_window.show() {
-                    eprintln!("Failed to show dashboard window: {}", e);
+                    tracing::warn!("Failed to show dashboard window: {}", e);
                 }
                 if let Err(e) = dashboard_window.set_focus() {
-                    eprintln!("Failed to focus dashboard window: {}", e);
+                    tracing::warn!("Failed to focus dashboard window: {}", e);
                 }
             }
             Err(e) => {
-                eprintln!("Failed to check dashboard visibility: {}", e);
+                tracing::warn!("Failed to check dashboard visibility: {}", e);
             }
         }
     } else {
         // Window doesn't exist, create and show it
         match show_dashboard_window(app) {
-            Ok(_) => eprintln!("Dashboard window created and shown successfully"),
-            Err(e) => eprintln!("Failed to create/show dashboard window: {}", e),
+            Ok(_) => tracing::debug!("Dashboard window created and shown successfully"),
+            Err(e) => tracing::warn!("Failed to create/show dashboard window: {}", e),
         }
     }
 }
@@ -706,7 +706,7 @@ fn handle_move_window<R: Runtime>(app: &AppHandle<R>, direction: &str) {
                     "left" => (current_pos.x - step, current_pos.y),
                     "right" => (current_pos.x + step, current_pos.y),
                     _ => {
-                        eprintln!("Invalid direction: {}", direction);
+                        tracing::warn!("Invalid direction: {}", direction);
                         return;
                     }
                 };
@@ -717,15 +717,15 @@ fn handle_move_window<R: Runtime>(app: &AppHandle<R>, direction: &str) {
                         y: new_y,
                     }))
                 {
-                    eprintln!("Failed to set window position: {}", e);
+                    tracing::warn!("Failed to set window position: {}", e);
                 }
             }
             Err(e) => {
-                eprintln!("Failed to get window position: {}", e);
+                tracing::warn!("Failed to get window position: {}", e);
             }
         }
     } else {
-        eprintln!("Main window not found");
+        tracing::warn!("Main window not found");
     }
 }
 

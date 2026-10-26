@@ -628,7 +628,7 @@ fn resolve_transcription_model(
 }
 
 fn emit_error(app: &AppHandle, message: String) {
-    eprintln!("[STT] error: {}", message);
+    tracing::error!("[STT] error: {}", message);
     let _ = app.emit("stt-error", message);
 }
 

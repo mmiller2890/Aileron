@@ -61,7 +61,7 @@ pub async fn start_screen_capture(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("Failed to get monitor layout: {}", e))?;
 
     if tauri_monitors.len() != capture_monitors.len() {
-        eprintln!(
+        tracing::debug!(
             "Monitor count mismatch between capture ({}) and layout ({}); falling back to capture dimensions",
             capture_monitors.len(),
             tauri_monitors.len()
@@ -95,7 +95,7 @@ pub async fn start_screen_capture(app: tauri::AppHandle) -> Result<(), String> {
         let mut guard = match state.captured_monitors.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                eprintln!("captured_monitors mutex poisoned, recovering");
+                tracing::error!("captured_monitors mutex poisoned, recovering");
                 poisoned.into_inner()
             }
         };
@@ -200,7 +200,7 @@ pub fn close_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
         let mut guard = match state.captured_monitors.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                eprintln!("captured_monitors mutex poisoned, recovering");
+                tracing::error!("captured_monitors mutex poisoned, recovering");
                 poisoned.into_inner()
             }
         };
@@ -211,7 +211,7 @@ pub fn close_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
     // Emit an event to the main window to signal that the overlay has been closed
     if let Some(main_window) = app.get_webview_window("main") {
         if let Err(e) = main_window.emit("capture-closed", ()) {
-            eprintln!("Failed to emit capture-closed event: {}", e);
+            tracing::warn!("Failed to emit capture-closed event: {}", e);
         }
     }
 
@@ -229,7 +229,7 @@ pub async fn capture_selected_area(
     let mut captured_monitors = match state.captured_monitors.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            eprintln!("captured_monitors mutex poisoned, recovering");
+            tracing::error!("captured_monitors mutex poisoned, recovering");
             poisoned.into_inner()
         }
     };

@@ -185,7 +185,7 @@ fn setup_dashboard_close_handler<R: Runtime>(window: &WebviewWindow<R>) {
             api.prevent_close();
             // Hide the window instead
             if let Err(e) = window_clone.hide() {
-                eprintln!("Failed to hide dashboard window on close: {}", e);
+                tracing::warn!("Failed to hide dashboard window on close: {}", e);
             }
         }
     });

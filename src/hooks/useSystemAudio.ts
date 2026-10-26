@@ -3,6 +3,8 @@ import { useWindowResize, useGlobalShortcuts } from ".";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
+import { STORAGE_KEYS } from "@/config/constants";
+import { safeLocalStorage } from "@/lib/storage";
 import {
   fetchSTT,
   fetchAIResponse,
@@ -162,6 +164,7 @@ export function useSystemAudio() {
     allAiProviders,
     systemPrompt,
     selectedAudioDevices,
+    setSelectedAudioDevices,
     onSetSelectedSttProvider,
   } = useApp();
   const {
@@ -362,6 +365,24 @@ export function useSystemAudio() {
             } else {
               setLiveText(null);
             }
+          }),
+        ),
+      ),
+      scope.add(
+        listen(
+          "audio-output-device-missing",
+          scope.guard(() => {
+            // The capture already follows the system default. Record that,
+            // without the restart a device change otherwise triggers.
+            prevOutputDeviceRef.current = "";
+            setSelectedAudioDevices((prev) => {
+              const next = { ...prev, output: { id: "", name: "" } };
+              safeLocalStorage.setItem(
+                STORAGE_KEYS.SELECTED_AUDIO_DEVICES,
+                JSON.stringify(next),
+              );
+              return next;
+            });
           }),
         ),
       ),

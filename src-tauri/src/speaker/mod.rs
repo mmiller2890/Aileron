@@ -78,6 +78,20 @@ pub(crate) fn list_output_devices() -> Result<Vec<AudioDevice>> {
 /// determined. Used by the capture loop to detect a mid-session output-device
 /// switch. Only implemented for macOS today; other platforms return None
 /// (no monitoring), which is safe — it just disables the auto-restart.
+/// Whether a saved output device is connected. Only macOS can check;
+/// elsewhere the saved device is trusted as before.
+pub(crate) fn output_device_connected(uid: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::output_device_connected(uid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = uid;
+        true
+    }
+}
+
 pub(crate) fn default_output_uid() -> Option<String> {
     #[cfg(target_os = "macos")]
     {

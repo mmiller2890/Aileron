@@ -104,6 +104,22 @@ pub fn get_output_devices() -> Result<Vec<AudioDevice>> {
 }
 
 fn find_output_device_by_uid(uid: &str) -> Option<ca::Device> {
+    let device = find_output_device_quietly(uid);
+    if device.is_none() {
+        error!(
+            "[find_output_device_by_uid] No matching device found for UID: {}",
+            uid
+        );
+    }
+    device
+}
+
+/// Whether an output device with this UID is connected now.
+pub(crate) fn output_device_connected(uid: &str) -> bool {
+    find_output_device_quietly(uid).is_some()
+}
+
+fn find_output_device_quietly(uid: &str) -> Option<ca::Device> {
     let all_devices = match ca::System::devices() {
         Ok(d) => d,
         Err(e) => {
@@ -126,11 +142,6 @@ fn find_output_device_by_uid(uid: &str) -> Option<ca::Device> {
             }
         }
     }
-
-    error!(
-        "[find_output_device_by_uid] No matching device found for UID: {}",
-        uid
-    );
     None
 }
 

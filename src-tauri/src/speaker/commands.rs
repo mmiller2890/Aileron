@@ -577,6 +577,16 @@ pub async fn start_system_audio_capture(
         *vad_cfg = config;
     }
 
+    // A saved device that is no longer connected would make the tap fall
+    // back to the default without watching for device switches. Follow the
+    // default openly instead, and let the UI forget the stale choice.
+    let (device_id, saved_device_missing) =
+        resolve_output_device(device_id, crate::speaker::output_device_connected);
+    if saved_device_missing {
+        warn!("Saved output device is not connected; following the system default output");
+        let _ = app.emit("audio-output-device-missing", ());
+    }
+
     // Only monitor for default-output-device switches when we're actually
     // tapping the default device (not a user-pinned one). Captured before the
     // tap is built, so it reflects the device the tap binds to.
@@ -1327,6 +1337,19 @@ fn quietest_split(buffer: &[f32], hop: usize, search: usize) -> usize {
     }
 }
 
+/// The output device to tap, and whether a saved one had to be dropped
+/// because it is not connected. `None`, empty and "default" mean the system
+/// default and are passed through.
+fn resolve_output_device(
+    requested: Option<String>,
+    connected: impl Fn(&str) -> bool,
+) -> (Option<String>, bool) {
+    match requested {
+        Some(uid) if !uid.is_empty() && uid != "default" && !connected(&uid) => (None, true),
+        other => (other, false),
+    }
+}
+
 /// How far behind live the capture loop may fall before it skips ahead, and
 /// the backlog it keeps when it does. Below the bound a stall only delays
 /// text; past it, the loop drops the oldest audio so what it transcribes is
@@ -1773,6 +1796,32 @@ mod tests {
         let config = VadConfig::default();
         let seconds = (config.silence_chunks * config.hop_size) as f32 / 48_000.0;
         assert!((0.9..=1.05).contains(&seconds), "{seconds}");
+    }
+
+    #[test]
+    fn a_connected_saved_output_device_is_used() {
+        let connected = |uid: &str| uid == "speakers";
+        assert_eq!(
+            resolve_output_device(Some("speakers".into()), connected),
+            (Some("speakers".into()), false)
+        );
+    }
+
+    #[test]
+    fn a_missing_saved_output_device_falls_back_to_the_system_default() {
+        let connected = |uid: &str| uid == "speakers";
+        assert_eq!(resolve_output_device(Some("gone".into()), connected), (None, true));
+    }
+
+    #[test]
+    fn default_output_requests_are_left_alone() {
+        let nothing = |_: &str| false;
+        assert_eq!(resolve_output_device(None, nothing), (None, false));
+        assert_eq!(resolve_output_device(Some(String::new()), nothing), (Some(String::new()), false));
+        assert_eq!(
+            resolve_output_device(Some("default".into()), nothing),
+            (Some("default".into()), false)
+        );
     }
 
     #[test]

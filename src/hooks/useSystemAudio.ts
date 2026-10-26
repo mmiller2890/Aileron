@@ -357,6 +357,20 @@ export function useSystemAudio() {
       ),
       scope.add(
         listen(
+          "capture-skipped-audio",
+          scope.guard((event) => {
+            if (!capturingRef.current) return;
+            const seconds = Number(event.payload);
+            setLiveNotice(
+              `Aileron fell behind and skipped ${
+                Number.isFinite(seconds) ? seconds.toFixed(1) : "some"
+              }s of audio to stay live. Listening continues.`,
+            );
+          }),
+        ),
+      ),
+      scope.add(
+        listen(
           "speech-speaker",
           scope.guard((event) => {
             // Allowed while stopping: the last turn's label is emitted as

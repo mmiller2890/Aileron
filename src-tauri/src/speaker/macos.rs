@@ -5,10 +5,10 @@ use ca::aggregate_device_keys as agg_keys;
 use cidre::{arc, av, cat, cf, core_audio as ca, ns, os};
 use futures_util::Stream;
 use ringbuf::{
-    traits::{Consumer, Producer, Split},
+    traits::{Consumer, Observer, Producer, Split},
     HeapCons, HeapProd, HeapRb,
 };
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use tracing::error;
@@ -174,7 +174,9 @@ struct Ctx {
     producer: HeapProd<f32>,
     waker_state: Arc<Mutex<WakerState>>,
     current_sample_rate: Arc<AtomicU32>,
-    consecutive_drops: Arc<AtomicU32>,
+    /// Samples the full ring could not take. Read and reset by the capture
+    /// loop, which reports them; the callback itself never logs.
+    dropped_samples: Arc<AtomicU64>,
     should_terminate: Arc<AtomicBool>,
     channel_count: usize,
 }
@@ -320,7 +322,7 @@ impl SpeakerInput {
             producer,
             waker_state: waker_state.clone(),
             current_sample_rate: current_sample_rate.clone(),
-            consecutive_drops: Arc::new(AtomicU32::new(0)),
+            dropped_samples: Arc::new(AtomicU64::new(0)),
             should_terminate: Arc::new(AtomicBool::new(false)),
             channel_count: channel_count.max(1),
         });
@@ -339,8 +341,9 @@ impl SpeakerInput {
 }
 
 /// How much mono audio the capture ring holds while the consumer is stalled.
-/// A stall shorter than this delays the transcript and is caught up without
-/// losing audio; only a longer one overflows and ends the capture.
+/// The capture loop skips ahead long before the ring fills (see
+/// `catch_up_skip` in commands.rs); a full ring drops the newest audio and
+/// counts it, and capture carries on.
 const CAPTURE_BUFFER_SECS: usize = 60;
 
 fn capture_buffer_capacity(sample_rate: f64) -> usize {
@@ -352,35 +355,21 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
         return;
     }
 
-    let mono_data: Vec<f32> = if ctx.channel_count <= 1 {
-        data.to_vec()
+    // Real-time thread: push straight from the device buffer, without
+    // allocating. A full ring drops what does not fit; losing audio under
+    // overload is recoverable, ending the capture is not.
+    let (offered, pushed) = if ctx.channel_count <= 1 {
+        (data.len(), ctx.producer.push_slice(data))
     } else {
-        let mut mono = Vec::with_capacity(data.len() / ctx.channel_count);
-        for frame in data.chunks(ctx.channel_count) {
-            let sum: f32 = frame.iter().sum();
-            mono.push(sum / ctx.channel_count as f32);
-        }
-        mono
+        let channels = ctx.channel_count;
+        let frames = data
+            .chunks(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32);
+        (data.len().div_ceil(channels), ctx.producer.push_iter(frames))
     };
-
-    let buffer_size = mono_data.len();
-    let pushed = ctx.producer.push_slice(&mono_data);
-
-    // Consistent buffer overflow handling
-    if pushed < buffer_size {
-        let consecutive = ctx.consecutive_drops.fetch_add(1, Ordering::AcqRel) + 1;
-
-        // Only terminate after many consecutive drops (prevents temporary spikes from killing stream)
-        if consecutive == 25 {
-            eprintln!("Warning: Audio buffer experiencing drops - system may be overloaded");
-        }
-
-        if consecutive > 50 && !ctx.should_terminate.swap(true, Ordering::AcqRel) {
-            eprintln!("Critical: Audio buffer overflow - capture stopping");
-        }
-    } else {
-        // Success - reset consecutive drops counter
-        ctx.consecutive_drops.store(0, Ordering::Release);
+    if pushed < offered {
+        ctx.dropped_samples
+            .fetch_add((offered - pushed) as u64, Ordering::Relaxed);
     }
 
     // Wake up consumer if we have new data
@@ -454,6 +443,28 @@ impl Stream for SpeakerStream {
     }
 }
 
+/// Samples dropped since the last call.
+fn take_dropped(dropped: &AtomicU64) -> u64 {
+    dropped.swap(0, Ordering::Relaxed)
+}
+
+impl SpeakerStream {
+    /// Captured samples waiting to be read.
+    pub fn backlog_samples(&self) -> usize {
+        self.consumer.occupied_len()
+    }
+
+    /// Discard up to `count` of the oldest waiting samples; returns how many.
+    pub fn skip_samples(&mut self, count: usize) -> usize {
+        self.consumer.skip(count)
+    }
+
+    /// Samples the full ring dropped since the last call.
+    pub fn take_dropped_samples(&self) -> u64 {
+        take_dropped(&self._ctx.dropped_samples)
+    }
+}
+
 impl Drop for SpeakerStream {
     fn drop(&mut self) {
         self._ctx.should_terminate.store(true, Ordering::Release);
@@ -474,7 +485,7 @@ mod tests {
                 has_data: false,
             })),
             current_sample_rate: Arc::new(AtomicU32::new(48_000)),
-            consecutive_drops: Arc::new(AtomicU32::new(0)),
+            dropped_samples: Arc::new(AtomicU64::new(0)),
             should_terminate: Arc::new(AtomicBool::new(false)),
             channel_count: 1,
         };
@@ -492,19 +503,28 @@ mod tests {
     }
 
     #[test]
-    fn terminated_callback_does_not_refill_or_repeat_overflow() {
+    fn sustained_overflow_keeps_capturing_and_counts_what_it_drops() {
         let (mut ctx, mut consumer) = test_buffer();
-        for _ in 0..52 {
-            process_audio_data(&mut ctx, &[0.5; 8]);
-        }
-        assert!(ctx.should_terminate.load(Ordering::Acquire));
-        let drops = ctx.consecutive_drops.load(Ordering::Acquire);
-        while consumer.try_pop().is_some() {}
         for _ in 0..100 {
             process_audio_data(&mut ctx, &[0.5; 8]);
         }
-        assert!(consumer.try_pop().is_none());
-        assert_eq!(ctx.consecutive_drops.load(Ordering::Acquire), drops);
+        // Overload loses audio, never the capture.
+        assert!(!ctx.should_terminate.load(Ordering::Acquire));
+        // The 4-sample ring keeps the first 4; the other 796 are counted.
+        assert_eq!(take_dropped(&ctx.dropped_samples), 796);
+        assert_eq!(take_dropped(&ctx.dropped_samples), 0);
+        while consumer.try_pop().is_some() {}
+        process_audio_data(&mut ctx, &[0.25; 2]);
+        assert_eq!(consumer.try_pop(), Some(0.25));
+    }
+
+    #[test]
+    fn a_consumer_can_measure_and_skip_its_backlog() {
+        let (mut ctx, mut consumer) = test_buffer();
+        process_audio_data(&mut ctx, &[0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(consumer.occupied_len(), 4);
+        assert_eq!(consumer.skip(3), 3);
+        assert_eq!(consumer.try_pop(), Some(0.4));
     }
 
     #[test]
@@ -561,69 +581,5 @@ mod tests {
             ),
             Poll::Ready(Some(0.5))
         );
-    }
-
-    #[test]
-    fn terminal_transition_wakes_even_when_has_data_is_set() {
-        let (mut ctx, _consumer) = test_buffer();
-        process_audio_data(&mut ctx, &[0.5; 4]);
-        ctx.consecutive_drops.store(50, Ordering::Release);
-        {
-            let mut state = ctx.waker_state.lock().unwrap();
-            state.has_data = true;
-            state.waker = Some(Waker::noop().clone());
-        }
-        process_audio_data(&mut ctx, &[0.5; 8]);
-        assert!(ctx.should_terminate.load(Ordering::Acquire));
-        assert!(ctx.waker_state.lock().unwrap().waker.is_none());
-    }
-
-    /// A consumer parked in `poll_next` has registered its waker with
-    /// `has_data = false`. Sustained buffer overflow makes the producer set
-    /// `should_terminate`; that path must still wake the parked consumer, or
-    /// `poll_next` never re-runs and the stop path burns its 5s timeout.
-    #[test]
-    fn terminate_overflow_wakes_the_parked_consumer() {
-        let rb = HeapRb::<f32>::new(4);
-        let (producer, _consumer) = rb.split();
-        let waker_state = Arc::new(Mutex::new(WakerState {
-            waker: None,
-            has_data: false,
-        }));
-        let mut ctx = Box::new(Ctx {
-            format: av::AudioFormat::standard_with_sample_rate_and_channels(48_000.0, 1)
-                .expect("failed to create test audio format"),
-            producer,
-            waker_state: waker_state.clone(),
-            current_sample_rate: Arc::new(AtomicU32::new(48_000)),
-            consecutive_drops: Arc::new(AtomicU32::new(0)),
-            should_terminate: Arc::new(AtomicBool::new(false)),
-            channel_count: 1,
-        });
-
-        let noop = std::task::Waker::noop();
-        for _ in 0..60 {
-            // Re-park the consumer exactly as poll_next does before each
-            // producer callback: waker registered, has_data reset.
-            {
-                let mut state = waker_state.lock().unwrap();
-                state.has_data = false;
-                state.waker = Some(noop.clone());
-            }
-
-            process_audio_data(&mut ctx, &[0.0f32; 8]);
-
-            if ctx.should_terminate.load(Ordering::Acquire) {
-                // The terminate path must still wake the parked consumer so
-                // poll_next re-runs and returns None.
-                let state = waker_state.lock().unwrap();
-                assert!(
-                    state.waker.is_none(),
-                    "parked consumer was not woken when capture terminated"
-                );
-                return;
-            }
-        }
-        panic!("capture never terminated after sustained buffer overflow");
     }
 }

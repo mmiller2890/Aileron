@@ -69,7 +69,6 @@ impl VadFrameAccumulator {
             .collect()
     }
 
-    #[cfg(test)]
     fn clear(&mut self) {
         self.samples.clear();
     }
@@ -817,7 +816,7 @@ fn spawn_turn_emitter(app: &AppHandle, sr: u32, config: &VadConfig) -> Utterance
 
 async fn run_vad_capture(
     app: AppHandle,
-    stream: impl StreamExt<Item = f32> + Unpin,
+    stream: crate::speaker::SpeakerStream,
     sr: u32,
     config: VadConfig,
     // When Some, the UID of the default output device this capture bound to.
@@ -904,6 +903,59 @@ async fn run_vad_capture(
 
         // Process in fixed chunks for VAD analysis
         while buffer.len() >= config.hop_size {
+            // Overload must cost audio, never the session: a loop this far
+            // behind skips ahead instead of letting the backlog grow until
+            // nothing it transcribes is current.
+            let dropped = stream.take_dropped_samples();
+            let skip = catch_up_skip(stream.backlog_samples() + buffer.len(), sr);
+            if dropped > 0 || skip > 0 {
+                let skipped = if skip > 0 {
+                    let from_ring = stream.skip_samples(skip.saturating_sub(buffer.len()));
+                    let from_hop = buffer.len();
+                    buffer.clear();
+                    from_ring + from_hop
+                } else {
+                    0
+                };
+                let lost_secs = (skipped as u64 + dropped) as f32 / sr as f32;
+                warn!(
+                    "System audio fell behind: skipped {:.1}s to catch up and lost {:.1}s to a full buffer",
+                    skipped as f32 / sr as f32,
+                    dropped as f32 / sr as f32
+                );
+                let _ = app.emit("capture-skipped-audio", lost_secs);
+                if skipped > 0 {
+                    // The turn in progress lost its continuation: end it with
+                    // what it has, and restart detection on fresh audio.
+                    if in_speech && speech_chunks >= config.min_speech_chunks {
+                        turns_out.send(TurnOutcome::Utterance {
+                            samples: std::mem::take(&mut speech_buffer),
+                            start_time: utterance_start_time,
+                            end_time: audio_position_secs(samples_processed),
+                            turn: live_turns.current(),
+                        });
+                    }
+                    live_turns.end();
+                    speech_buffer.clear();
+                    pre_speech.clear();
+                    vad_accumulator.clear();
+                    in_speech = false;
+                    silence_chunks = 0;
+                    speech_chunks = 0;
+                    samples_processed += skipped as u64;
+                    #[cfg(target_os = "macos")]
+                    {
+                        if let Some(stt_state) = app.try_state::<crate::stt::SttState>() {
+                            let _ = stt_state.reset_vad_stream();
+                        }
+                        pending_silero_prob = Some(0.0);
+                        drain_monitor.last_hop = Instant::now();
+                        last_hop_end = drain_monitor.last_hop;
+                    }
+                    continue;
+                }
+            }
+
             #[cfg(target_os = "macos")]
             let hop_started = Instant::now();
             let mut mono = Vec::with_capacity(config.hop_size);
@@ -1226,6 +1278,23 @@ fn quietest_split(buffer: &[f32], hop: usize, search: usize) -> usize {
         index
     } else {
         buffer.len()
+    }
+}
+
+/// How far behind live the capture loop may fall before it skips ahead, and
+/// the backlog it keeps when it does. Below the bound a stall only delays
+/// text; past it, the loop drops the oldest audio so what it transcribes is
+/// still current.
+const CATCH_UP_AFTER_SECS: usize = 8;
+const CATCH_UP_TO_SECS: usize = 1;
+
+/// Samples to skip given `backlog` waiting samples.
+fn catch_up_skip(backlog: usize, sr: u32) -> usize {
+    let sr = sr as usize;
+    if backlog <= CATCH_UP_AFTER_SECS * sr {
+        0
+    } else {
+        backlog - CATCH_UP_TO_SECS * sr
     }
 }
 
@@ -1648,6 +1717,20 @@ mod tests {
         let config = VadConfig::default();
         let seconds = (config.silence_chunks * config.hop_size) as f32 / 48_000.0;
         assert!((0.9..=1.05).contains(&seconds), "{seconds}");
+    }
+
+    #[test]
+    fn a_capture_loop_within_eight_seconds_of_live_keeps_every_sample() {
+        assert_eq!(catch_up_skip(0, 48_000), 0);
+        assert_eq!(catch_up_skip(48_000 * 8, 48_000), 0);
+    }
+
+    #[test]
+    fn a_capture_loop_further_behind_skips_to_one_second_of_backlog() {
+        assert_eq!(catch_up_skip(48_000 * 8 + 1, 48_000), 48_000 * 7 + 1);
+        assert_eq!(catch_up_skip(48_000 * 30, 48_000), 48_000 * 29);
+        // The bound is a duration, so it scales with the sample rate.
+        assert_eq!(catch_up_skip(44_100 * 9, 44_100), 44_100 * 8);
     }
 
     #[test]

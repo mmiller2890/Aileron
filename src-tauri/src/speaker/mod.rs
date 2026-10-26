@@ -174,6 +174,34 @@ impl Stream for SpeakerStream {
 }
 
 impl SpeakerStream {
+    /// Captured samples waiting to be read: how far behind the reader is.
+    /// Only macOS buffers capture this way; elsewhere it is always 0.
+    pub fn backlog_samples(&self) -> usize {
+        #[cfg(target_os = "macos")]
+        return self.inner.backlog_samples();
+        #[cfg(not(target_os = "macos"))]
+        0
+    }
+
+    /// Discard up to `count` of the oldest waiting samples; returns how many.
+    pub fn skip_samples(&mut self, count: usize) -> usize {
+        #[cfg(target_os = "macos")]
+        return self.inner.skip_samples(count);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = count;
+            0
+        }
+    }
+
+    /// Samples lost to a full capture buffer since the last call.
+    pub fn take_dropped_samples(&self) -> u64 {
+        #[cfg(target_os = "macos")]
+        return self.inner.take_dropped_samples();
+        #[cfg(not(target_os = "macos"))]
+        0
+    }
+
     // Gets the sample rate (e.g., 16000 Hz on stub, variable on real impls).
     pub fn sample_rate(&self) -> u32 {
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]

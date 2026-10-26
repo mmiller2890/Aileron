@@ -15,11 +15,35 @@ use tracing::warn;
 
 static NEXT_TURN: AtomicU64 = AtomicU64::new(1);
 
+/// Capture backlog past which the live workers stop getting audio, and the
+/// backlog under which they get it again. They are previews competing with
+/// the capture loop for the same CPU and Neural Engine; the final transcript
+/// does not depend on them.
+const LIVE_PAUSE_BEHIND_SECS: f32 = 1.5;
+const LIVE_RESUME_BEHIND_SECS: f32 = 0.5;
+
+/// Whether the live workers should be held back, given whether they were
+/// and the capture backlog. Hysteresis keeps them from flapping.
+pub(crate) fn live_feeds_behind(was_behind: bool, backlog_samples: usize, sr: u32) -> bool {
+    let secs = backlog_samples as f32 / sr as f32;
+    if was_behind {
+        secs >= LIVE_RESUME_BEHIND_SECS
+    } else {
+        secs > LIVE_PAUSE_BEHIND_SECS
+    }
+}
+
 pub(crate) struct TurnFeeds {
     text: Option<LiveTextHandle>,
     speakers: Option<LiveSpeakerHandle>,
     turn: u64,
     in_turn: bool,
+    /// The capture loop is behind; set by `set_behind`.
+    behind: bool,
+    /// The current turn gets no more live audio. Set when the loop falls
+    /// behind and kept to the turn's end: resuming mid-turn would feed the
+    /// models audio with a hole in it.
+    paused: bool,
 }
 
 impl TurnFeeds {
@@ -29,6 +53,16 @@ impl TurnFeeds {
             speakers,
             turn: 0,
             in_turn: false,
+            behind: false,
+            paused: false,
+        }
+    }
+
+    /// Report whether the capture loop is behind (see `live_feeds_behind`).
+    pub(crate) fn set_behind(&mut self, behind: bool) {
+        self.behind = behind;
+        if behind {
+            self.paused = true;
         }
     }
 
@@ -36,12 +70,13 @@ impl TurnFeeds {
     pub(crate) fn begin(&mut self, lead_in_16k: Vec<f32>) -> u64 {
         self.turn = NEXT_TURN.fetch_add(1, Ordering::Relaxed);
         self.in_turn = true;
+        self.paused = self.behind;
         self.audio(lead_in_16k);
         self.turn
     }
 
     pub(crate) fn audio(&self, samples_16k: Vec<f32>) {
-        if !self.in_turn || samples_16k.is_empty() {
+        if !self.in_turn || self.paused || samples_16k.is_empty() {
             return;
         }
         match (&self.text, &self.speakers) {
@@ -172,6 +207,50 @@ mod tests {
             })
         };
         assert_eq!(finals, vec![expected(first), expected(second)]);
+    }
+
+    #[test]
+    fn falling_behind_pauses_the_rest_of_the_turn_and_catching_up_resumes_at_the_next() {
+        let (text_tx, text_rx) = mpsc::channel();
+        let text = LiveTextHandle::spawn(Box::new(CountingText(0)), move |event| {
+            let _ = text_tx.send(event);
+        });
+        let mut feeds = TurnFeeds::new(Some(text), None);
+        let piece = || vec![0.0; 6_000];
+
+        let first = feeds.begin(piece()); // fed: t1
+        feeds.set_behind(true);
+        feeds.audio(piece()); // paused
+        feeds.set_behind(false);
+        feeds.audio(piece()); // still paused: the turn already has a hole
+        feeds.end();
+
+        feeds.set_behind(true);
+        let second = feeds.begin(piece()); // starts paused while behind
+        feeds.audio(piece());
+        feeds.end();
+
+        feeds.set_behind(false);
+        let third = feeds.begin(piece()); // caught up: fed again
+        feeds.stop(Duration::from_secs(2));
+
+        let texts: Vec<LiveTextEvent> = text_rx.try_iter().collect();
+        let partial = |turn, text: &str| {
+            LiveTextEvent::Partial(LiveTextPartial { turn, text: text.into() })
+        };
+        assert_eq!(texts, vec![partial(first, "t1"), partial(third, "t1")]);
+        assert!(second > first && third > second);
+    }
+
+    #[test]
+    fn live_feeds_pause_past_a_second_and_a_half_behind_and_resume_under_half() {
+        let sr = 48_000;
+        assert!(!live_feeds_behind(false, sr * 3 / 2, 48_000));
+        assert!(live_feeds_behind(false, sr * 3 / 2 + 1, 48_000));
+        // Hysteresis: once behind, stay behind until under half a second.
+        assert!(live_feeds_behind(true, sr, 48_000));
+        assert!(live_feeds_behind(true, sr / 2, 48_000));
+        assert!(!live_feeds_behind(true, sr / 2 - 1, 48_000));
     }
 
     #[test]

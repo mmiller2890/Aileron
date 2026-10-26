@@ -857,6 +857,7 @@ async fn run_vad_capture(
     let mut end = CaptureEnd::StreamEnded;
     let mut live_turns = turn_feeds::TurnFeeds::new(live_text, live_speakers);
     let turns_out = spawn_turn_emitter(&app, sr, &config);
+    let mut live_behind = false;
     let mut last_device_check = Instant::now();
     // Input-level metering + no-audio detection (see the emit sites below).
     let mut last_level_emit = Instant::now();
@@ -934,8 +935,19 @@ async fn run_vad_capture(
             // Overload must cost audio, never the session: a loop this far
             // behind skips ahead instead of letting the backlog grow until
             // nothing it transcribes is current.
+            let backlog = stream.backlog_samples() + buffer.len();
+            let behind = turn_feeds::live_feeds_behind(live_behind, backlog, sr);
+            if behind != live_behind {
+                live_behind = behind;
+                live_turns.set_behind(behind);
+                tracing::info!(
+                    "Live text and speaker labels {} (capture {:.1}s behind)",
+                    if behind { "paused" } else { "resume at the next turn" },
+                    backlog as f32 / sr as f32
+                );
+            }
             let dropped = stream.take_dropped_samples();
-            let skip = catch_up_skip(stream.backlog_samples() + buffer.len(), sr);
+            let skip = catch_up_skip(backlog, sr);
             if dropped > 0 || skip > 0 {
                 let skipped = if skip > 0 {
                     let from_ring = stream.skip_samples(skip.saturating_sub(buffer.len()));

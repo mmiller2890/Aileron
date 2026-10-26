@@ -392,10 +392,14 @@ export function useSystemAudio() {
           scope.guard((event) => {
             if (!capturingRef.current) return;
             const seconds = Number(event.payload);
-            setLiveNotice(
-              `Aileron fell behind and skipped ${
-                Number.isFinite(seconds) ? seconds.toFixed(1) : "some"
-              }s of audio to stay live. Listening continues.`,
+            const notice = `Aileron fell behind and skipped ${
+              Number.isFinite(seconds) ? seconds.toFixed(1) : "some"
+            }s of audio to stay live. Listening continues.`;
+            setLiveNotice(notice);
+            // Capture has recovered by now; clear it unless replaced.
+            setTimeout(
+              () => setLiveNotice((current) => (current === notice ? "" : current)),
+              15_000,
             );
           }),
         ),

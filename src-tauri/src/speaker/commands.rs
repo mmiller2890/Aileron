@@ -13,7 +13,7 @@ use hound::{WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Listener, Manager};
@@ -842,20 +842,43 @@ enum TurnOutcome {
     TooShort,
 }
 
+/// Numbers each VAD capture, so utterances a stopped capture finishes late
+/// are not delivered into the capture that replaced it.
+static CAPTURE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn begin_capture_generation() -> u64 {
+    CAPTURE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn is_current_capture(generation: u64) -> bool {
+    CAPTURE_GENERATION.load(Ordering::SeqCst) == generation
+}
+
 fn spawn_turn_emitter(app: &AppHandle, sr: u32, config: &VadConfig) -> UtteranceEmitter<TurnOutcome> {
     let app = app.clone();
     let (noise_gate, compare) = (config.noise_gate_threshold, config.compare_preprocessing);
-    UtteranceEmitter::spawn(move |outcome| match outcome {
+    let generation = begin_capture_generation();
+    UtteranceEmitter::spawn(move |outcome| {
+        if !is_current_capture(generation) {
+            warn!("Dropped an utterance a stopped capture finished after a new capture began");
+            return;
+        }
+        emit_turn_outcome(&app, sr, noise_gate, compare, outcome)
+    })
+}
+
+fn emit_turn_outcome(app: &AppHandle, sr: u32, noise_gate: f32, compare: bool, outcome: TurnOutcome) {
+    match outcome {
         TurnOutcome::Utterance {
             samples,
             start_time,
             end_time,
             turn,
-        } => emit_speech_detected(&app, sr, &samples, noise_gate, compare, start_time, end_time, turn),
+        } => emit_speech_detected(app, sr, &samples, noise_gate, compare, start_time, end_time, turn),
         TurnOutcome::TooShort => {
             let _ = app.emit("speech-discarded", "Audio too short (likely background noise)");
         }
-    })
+    }
 }
 
 async fn run_vad_capture(
@@ -994,6 +1017,9 @@ async fn run_vad_capture(
                             end_time: audio_position_secs(samples_processed),
                             turn: live_turns.current(),
                         });
+                    } else if in_speech {
+                        // Clears the turn's live preview, as a short turn does.
+                        turns_out.send(TurnOutcome::TooShort);
                     }
                     live_turns.end();
                     speech_buffer.clear();
@@ -1796,6 +1822,15 @@ mod tests {
         let config = VadConfig::default();
         let seconds = (config.silence_chunks * config.hop_size) as f32 / 48_000.0;
         assert!((0.9..=1.05).contains(&seconds), "{seconds}");
+    }
+
+    #[test]
+    fn a_newer_capture_retires_the_previous_ones_late_utterances() {
+        let first = begin_capture_generation();
+        assert!(is_current_capture(first));
+        let second = begin_capture_generation();
+        assert!(!is_current_capture(first));
+        assert!(is_current_capture(second));
     }
 
     #[test]

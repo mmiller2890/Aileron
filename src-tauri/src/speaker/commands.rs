@@ -599,6 +599,9 @@ pub async fn start_system_audio_capture(
         format!("Failed to access system audio: {}", e)
     })?;
     let sr = stream.sample_rate();
+    if let Ok(mut stopper) = state.stream_stopper.lock() {
+        *stopper = Some(stream.stopper());
+    }
 
     if !(8000..=96000).contains(&sr) {
         error!("Invalid sample rate: {}", sr);
@@ -757,6 +760,7 @@ pub async fn start_system_audio_capture(
             // and any discard the stop latched was cleared above.
             state.discard_take.store(true, Ordering::Release);
             state.stop_flag.store(true, Ordering::Release);
+            wake_capture_for_stop(&state);
             if let Ok((Some(task), stop_reservation)) = state.stream_task.take_for_stop() {
                 await_capture_shutdown(task, Duration::from_secs(5)).await;
                 drop(stop_reservation);
@@ -1213,6 +1217,12 @@ async fn run_vad_capture(
         }
     }
 
+    // A stop wakes an idle stream by ending it, so a stream that ended
+    // while the stop flag is set was stopped on request.
+    if stop_flag.load(Ordering::Acquire) {
+        end = CaptureEnd::StopRequested;
+    }
+
     // Emit any remaining audio when the stream ends.
     if in_speech && !speech_buffer.is_empty() {
         let utterance_end_time = audio_position_secs(samples_processed);
@@ -1224,12 +1234,16 @@ async fn run_vad_capture(
         });
     }
 
-    // Off the async runtime, because both wait on threads. Every queued
-    // utterance is emitted before the task ends and the frontend hears the
-    // capture is over. The live workers stop within a bound; one that will
-    // not is left behind and muted.
+    // Off the async runtime, because both wait on threads. Queued utterances
+    // get 1.5 s to go out before the task ends and the frontend hears the
+    // capture is over; under heavy load the rest go out late, and the UI may
+    // already have stopped listening for them. The live workers get 0.5 s
+    // each; one that will not stop is left behind and muted. Stop therefore
+    // returns within about 2.5 s.
     let _ = tokio::task::spawn_blocking(move || {
-        turns_out.finish();
+        if !turns_out.finish_within(Duration::from_millis(1_500)) {
+            warn!("Utterances were still being prepared at stop; they will be emitted late");
+        }
         live_turns.stop(Duration::from_millis(500));
     })
     .await;
@@ -1541,6 +1555,14 @@ pub fn sweep_stale_session_wavs(dir: &std::path::Path, older_than: Duration) -> 
     removed
 }
 
+/// Wake the running capture so it sees the stop flag now, even with no
+/// audio arriving to wake it.
+fn wake_capture_for_stop(state: &crate::AudioState) {
+    if let Some(stopper) = state.stream_stopper.lock().ok().and_then(|mut s| s.take()) {
+        stopper.stop();
+    }
+}
+
 async fn await_capture_shutdown(mut task: tokio::task::JoinHandle<()>, deadline: Duration) {
     match tokio::time::timeout(deadline, &mut task).await {
         Ok(Ok(())) => {}
@@ -1566,6 +1588,7 @@ pub async fn stop_system_audio_capture(
     // discard visible to the take being stopped.
     latch_discard_intent(&state.discard_take, discard.unwrap_or(false));
     state.stop_flag.store(true, Ordering::Release);
+    wake_capture_for_stop(&state);
     tracing::info!("System-audio capture stop requested (discard={})", discard.unwrap_or(false));
 
     // A start is still setting up: there is no task to take yet. The start

@@ -443,12 +443,41 @@ impl Stream for SpeakerStream {
     }
 }
 
+/// Ends a capture stream from outside the task reading it. The reader only
+/// looks at its stop flag when a sample arrives, and macOS sends none while
+/// nothing plays, so a stop must also wake it.
+pub(crate) struct StreamStopper {
+    should_terminate: Arc<AtomicBool>,
+    waker_state: Arc<Mutex<WakerState>>,
+}
+
+impl StreamStopper {
+    pub(crate) fn stop(&self) {
+        self.should_terminate.store(true, Ordering::Release);
+        let waker = {
+            let mut state = self.waker_state.lock().unwrap_or_else(|e| e.into_inner());
+            state.has_data = true;
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
 /// Samples dropped since the last call.
 fn take_dropped(dropped: &AtomicU64) -> u64 {
     dropped.swap(0, Ordering::Relaxed)
 }
 
 impl SpeakerStream {
+    pub(crate) fn stopper(&self) -> StreamStopper {
+        StreamStopper {
+            should_terminate: self._ctx.should_terminate.clone(),
+            waker_state: self.waker_state.clone(),
+        }
+    }
+
     /// Captured samples waiting to be read.
     pub fn backlog_samples(&self) -> usize {
         self.consumer.occupied_len()
@@ -580,6 +609,30 @@ mod tests {
                 &mut cx
             ),
             Poll::Ready(Some(0.5))
+        );
+    }
+
+    #[test]
+    fn a_stop_wakes_a_reader_waiting_on_silence_and_ends_the_stream() {
+        let (ctx, mut consumer) = test_buffer();
+        let mut cx = std::task::Context::from_waker(Waker::noop());
+        // Nothing playing: the reader parks.
+        assert_eq!(
+            poll_audio_sample(&mut consumer, &ctx.should_terminate, &ctx.waker_state, &mut cx),
+            Poll::Pending
+        );
+        assert!(ctx.waker_state.lock().unwrap().waker.is_some());
+
+        let stopper = StreamStopper {
+            should_terminate: ctx.should_terminate.clone(),
+            waker_state: ctx.waker_state.clone(),
+        };
+        stopper.stop();
+
+        assert!(ctx.waker_state.lock().unwrap().waker.is_none(), "reader was not woken");
+        assert_eq!(
+            poll_audio_sample(&mut consumer, &ctx.should_terminate, &ctx.waker_state, &mut cx),
+            Poll::Ready(None)
         );
     }
 }

@@ -176,7 +176,27 @@ impl Stream for SpeakerStream {
     }
 }
 
+/// Ends a running capture stream even while no audio is arriving.
+pub struct CaptureStopper {
+    #[cfg(target_os = "macos")]
+    inner: macos::StreamStopper,
+}
+
+impl CaptureStopper {
+    pub fn stop(&self) {
+        #[cfg(target_os = "macos")]
+        self.inner.stop();
+    }
+}
+
 impl SpeakerStream {
+    pub fn stopper(&self) -> CaptureStopper {
+        CaptureStopper {
+            #[cfg(target_os = "macos")]
+            inner: self.inner.stopper(),
+        }
+    }
+
     /// Captured samples waiting to be read: how far behind the reader is.
     /// Only macOS buffers capture this way; elsewhere it is always 0.
     pub fn backlog_samples(&self) -> usize {

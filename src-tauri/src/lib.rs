@@ -25,6 +25,9 @@ pub struct AudioState {
     /// Set alongside `stop_flag` when the user discards a manual take, so the
     /// capture task drops the audio instead of emitting it for transcription.
     discard_take: Arc<AtomicBool>,
+    /// Wakes the running capture's stream on stop, so a capture with no
+    /// audio arriving still notices it.
+    stream_stopper: Mutex<Option<speaker::CaptureStopper>>,
 }
 
 impl Default for AudioState {
@@ -35,6 +38,7 @@ impl Default for AudioState {
             is_capturing: Arc::new(Mutex::new(false)),
             stop_flag: Arc::new(AtomicBool::new(false)),
             discard_take: Arc::new(AtomicBool::new(false)),
+            stream_stopper: Mutex::new(None),
         }
     }
 }

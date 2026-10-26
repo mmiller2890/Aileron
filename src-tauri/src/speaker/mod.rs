@@ -7,6 +7,9 @@ pub mod mic;
 pub(crate) mod live_speakers;
 pub(crate) mod live_text;
 pub(crate) mod turn_feeds;
+// The per-hop resampler feeds Silero, which only runs on macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod resample;
 pub(crate) mod utterance_emitter;
 
 #[cfg(target_os = "macos")]

@@ -1,6 +1,8 @@
 // Assistant AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
 use crate::speaker::preprocessing::{apply_noise_gate, prepare_utterance, PreparedUtterance};
 use crate::speaker::live_text;
+#[cfg(target_os = "macos")]
+use crate::speaker::resample::StreamingResampler;
 use crate::speaker::utterance_emitter::UtteranceEmitter;
 use crate::speaker::{live_speakers, turn_feeds};
 use crate::speaker::{AudioDevice, SpeakerInput};
@@ -26,15 +28,18 @@ fn samples_for_local_asr(samples: &[f32], sample_rate: u32) -> Result<Vec<f32>, 
     fluidaudio_rs::resample_samples(samples, sample_rate as f64).map_err(|error| error.to_string())
 }
 
+/// One hop at 16 kHz (kept for live text) and the VAD frames it completed.
+/// Per-hop audio uses the streaming resampler; whole utterances for the
+/// final transcript use the native converter (`samples_for_local_asr`).
 #[cfg(target_os = "macos")]
 fn resampled_vad_frames(
+    resampler: &mut StreamingResampler,
     accumulator: &mut VadFrameAccumulator,
     samples: &[f32],
-    sample_rate: u32,
-) -> Result<(Vec<f32>, Vec<[f32; SILERO_CHUNK_SAMPLES]>), String> {
-    let samples_16k = samples_for_local_asr(samples, sample_rate)?;
+) -> (Vec<f32>, Vec<[f32; SILERO_CHUNK_SAMPLES]>) {
+    let samples_16k = resampler.push(samples);
     let frames = accumulator.push(&samples_16k);
-    Ok((samples_16k, frames))
+    (samples_16k, frames)
 }
 
 /// Hysteresis thresholds mirroring the microphone path (@ricky0123/vad-react
@@ -884,7 +889,8 @@ async fn run_vad_capture(
     #[cfg(target_os = "macos")]
     let mut last_hop_end = session_start;
     let mut vad_accumulator = VadFrameAccumulator::default();
-    let mut vad_resample_error_reported = false;
+    #[cfg(target_os = "macos")]
+    let mut hop_resampler = StreamingResampler::new(sr);
     let mut vad_processing_error_reported = false;
     // macOS assumes silence until the first Silero result; elsewhere Silero
     // never runs, so start at None to engage the threshold fallback.
@@ -989,6 +995,7 @@ async fn run_vad_capture(
                             let _ = stt_state.reset_vad_stream();
                         }
                         pending_silero_prob = Some(0.0);
+                        hop_resampler = StreamingResampler::new(sr);
                         drain_monitor.last_hop = Instant::now();
                         last_hop_end = drain_monitor.last_hop;
                     }
@@ -1040,36 +1047,20 @@ async fn run_vad_capture(
                 // The 16 kHz samples are kept for live text; VAD only needs
                 // the complete frames.
                 let (hop_16k, frames) =
-                    match resampled_vad_frames(&mut vad_accumulator, &raw_mono, sr) {
-                        Ok((samples_16k, frames)) => (samples_16k, Ok(frames)),
-                        Err(error) => (Vec::new(), Err(error)),
-                    };
+                    resampled_vad_frames(&mut hop_resampler, &mut vad_accumulator, &raw_mono);
                 let resample_duration = resample_started.elapsed();
                 let vad_started = Instant::now();
-                match frames {
-                    Ok(frames) => {
-                        for frame in frames {
-                            let (probability, error) = consume_vad_probability(
-                                get_silero_vad_probability(&app, &frame),
-                                &mut vad_processing_error_reported,
-                            );
-                            pending_silero_prob = probability;
-                            if let Some(error) = error {
-                                let _ = app.emit(
-                                    "stt-error",
-                                    format!("FluidAudio VAD processing failed: {error}"),
-                                );
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        if take_first_error(&mut vad_resample_error_reported) {
-                            let _ = app.emit(
-                                "stt-error",
-                                format!("Failed to resample VAD audio: {error}"),
-                            );
-                        }
-                        pending_silero_prob = None;
+                for frame in frames {
+                    let (probability, error) = consume_vad_probability(
+                        get_silero_vad_probability(&app, &frame),
+                        &mut vad_processing_error_reported,
+                    );
+                    pending_silero_prob = probability;
+                    if let Some(error) = error {
+                        let _ = app.emit(
+                            "stt-error",
+                            format!("FluidAudio VAD processing failed: {error}"),
+                        );
                     }
                 }
                 (resample_duration, vad_started.elapsed(), hop_16k)
@@ -1846,8 +1837,9 @@ mod tests {
     #[test]
     fn vad_resampling_also_returns_the_16k_samples() {
         let mut accumulator = VadFrameAccumulator::default();
+        let mut resampler = StreamingResampler::new(16_000);
         let (samples_16k, frames) =
-            resampled_vad_frames(&mut accumulator, &[0.0; 1024], 16_000).unwrap();
+            resampled_vad_frames(&mut resampler, &mut accumulator, &[0.0; 1024]);
         assert_eq!(samples_16k.len(), 1024);
         assert!(frames.is_empty());
     }
@@ -2056,12 +2048,12 @@ mod tests {
     fn system_vad_resampling_emits_exact_frames_at_supported_device_rates() {
         for sample_rate in [44_100, 48_000, 96_000] {
             let mut accumulator = VadFrameAccumulator::default();
+            let mut resampler = StreamingResampler::new(sample_rate);
             let (_, frames) = resampled_vad_frames(
+                &mut resampler,
                 &mut accumulator,
                 &vec![0.25; sample_rate as usize],
-                sample_rate,
-            )
-            .unwrap();
+            );
 
             assert_eq!(frames.len(), 3, "sample rate {sample_rate}");
             assert!(frames
@@ -2643,7 +2635,8 @@ async fn run_mic_dictation(
     let mut silence_hops = 0usize;
     let mut speech_hops = 0usize;
     let mut vad_accumulator = VadFrameAccumulator::default();
-    let mut vad_resample_error_reported = false;
+    #[cfg(target_os = "macos")]
+    let mut hop_resampler = StreamingResampler::new(sr);
     let mut vad_processing_error_reported = false;
     // macOS assumes silence until the first Silero result (mirrors the tap loop).
     let mut prob: Option<f32> = if cfg!(target_os = "macos") {
@@ -2667,30 +2660,17 @@ async fn run_mic_dictation(
         while pending.len() >= hop {
             let hop_chunk: Vec<f32> = pending.drain(..hop).collect();
             #[cfg(target_os = "macos")]
-            match resampled_vad_frames(&mut vad_accumulator, &hop_chunk, sr) {
-                Ok((_, frames)) => {
-                    for frame in frames {
-                        let (probability, error) = consume_vad_probability(
-                            get_silero_vad_probability_mic(&app, &frame),
-                            &mut vad_processing_error_reported,
-                        );
-                        prob = probability;
-                        if let Some(error) = error {
-                            let _ = app.emit(
-                                "stt-error",
-                                format!("FluidAudio microphone VAD processing failed: {error}"),
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    if take_first_error(&mut vad_resample_error_reported) {
-                        let _ = app.emit(
-                            "stt-error",
-                            format!("Failed to resample microphone VAD audio: {error}"),
-                        );
-                    }
-                    prob = None;
+            for frame in resampled_vad_frames(&mut hop_resampler, &mut vad_accumulator, &hop_chunk).1 {
+                let (probability, error) = consume_vad_probability(
+                    get_silero_vad_probability_mic(&app, &frame),
+                    &mut vad_processing_error_reported,
+                );
+                prob = probability;
+                if let Some(error) = error {
+                    let _ = app.emit(
+                        "stt-error",
+                        format!("FluidAudio microphone VAD processing failed: {error}"),
+                    );
                 }
             }
             let is_speech = match prob {

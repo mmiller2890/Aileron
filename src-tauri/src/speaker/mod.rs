@@ -194,11 +194,13 @@ impl Stream for SpeakerStream {
 pub struct CaptureStopper {
     #[cfg(target_os = "macos")]
     inner: macos::StreamStopper,
+    #[cfg(target_os = "linux")]
+    inner: linux::StreamStopper,
 }
 
 impl CaptureStopper {
     pub fn stop(&self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         self.inner.stop();
     }
 }
@@ -206,7 +208,7 @@ impl CaptureStopper {
 impl SpeakerStream {
     pub fn stopper(&self) -> CaptureStopper {
         CaptureStopper {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             inner: self.inner.stopper(),
         }
     }
@@ -214,17 +216,17 @@ impl SpeakerStream {
     /// Captured samples waiting to be read: how far behind the reader is.
     /// Only macOS buffers capture this way; elsewhere it is always 0.
     pub fn backlog_samples(&self) -> usize {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         return self.inner.backlog_samples();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         0
     }
 
     /// Discard up to `count` of the oldest waiting samples; returns how many.
     pub fn skip_samples(&mut self, count: usize) -> usize {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         return self.inner.skip_samples(count);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = count;
             0
@@ -233,9 +235,9 @@ impl SpeakerStream {
 
     /// Samples lost to a full capture buffer since the last call.
     pub fn take_dropped_samples(&self) -> u64 {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         return self.inner.take_dropped_samples();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         0
     }
 

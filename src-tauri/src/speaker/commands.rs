@@ -928,6 +928,7 @@ async fn run_vad_capture(
     let mut vad_accumulator = VadFrameAccumulator::default();
     #[cfg(target_os = "macos")]
     let mut hop_resampler = StreamingResampler::new(sr);
+    #[cfg(target_os = "macos")]
     let mut vad_processing_error_reported = false;
     // macOS assumes silence until the first Silero result; elsewhere Silero
     // never runs, so start at None to engage the threshold fallback.
@@ -2744,6 +2745,7 @@ async fn run_mic_dictation(
     let mut vad_accumulator = VadFrameAccumulator::default();
     #[cfg(target_os = "macos")]
     let mut hop_resampler = StreamingResampler::new(sr);
+    #[cfg(target_os = "macos")]
     let mut vad_processing_error_reported = false;
     // macOS assumes silence until the first Silero result (mirrors the tap loop).
     let mut prob: Option<f32> = if cfg!(target_os = "macos") {

@@ -7,12 +7,12 @@ use libpulse_simple_binding as psimple;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::thread;
 use std::time::Duration;
 use tracing::error;
-use tracing::warn;
 
 use psimple::Simple;
 use pulse::context::introspect::Introspector;
@@ -22,6 +22,34 @@ use pulse::sample::{Format, Spec};
 use pulse::stream::Direction;
 
 const DEFAULT_SAMPLE_RATE: u32 = 44_100;
+
+/// How much audio the capture queue holds while the reader is stalled. The
+/// capture loop skips ahead long before it fills (see `catch_up_skip` in
+/// commands.rs); a full queue drops the oldest audio, counts it, and capture
+/// carries on.
+const CAPTURE_QUEUE_SECS: usize = 60;
+
+fn capture_queue_capacity(sample_rate: u32) -> usize {
+    sample_rate as usize * CAPTURE_QUEUE_SECS
+}
+
+/// Append captured samples, dropping the oldest past `capacity` and adding
+/// how many to `dropped`. The reader reports drops; this never logs, so a
+/// stall cannot flood the log.
+fn queue_captured(
+    queue: &Mutex<VecDeque<f32>>,
+    samples: &[f32],
+    capacity: usize,
+    dropped: &AtomicU64,
+) {
+    let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+    queue.extend(samples.iter());
+    if queue.len() > capacity {
+        let excess = queue.len() - capacity;
+        queue.drain(..excess);
+        dropped.fetch_add(excess as u64, Ordering::Relaxed);
+    }
+}
 
 pub fn get_input_devices() -> Result<Vec<AudioDevice>> {
     let devices = Rc::new(RefCell::new(Vec::new()));
@@ -251,14 +279,17 @@ impl SpeakerInput {
         }));
         let (init_tx, init_rx) = std::sync::mpsc::channel();
 
+        let dropped = Arc::new(AtomicU64::new(0));
         let queue_clone = sample_queue.clone();
         let waker_clone = waker_state.clone();
+        let dropped_clone = dropped.clone();
         let source_name = self.source_name;
 
         let mut capture_thread = Some(thread::spawn(move || {
             if let Err(e) = SpeakerStream::capture_audio_loop(
                 queue_clone,
                 waker_clone,
+                dropped_clone,
                 source_name.as_deref(),
                 init_tx,
             ) {
@@ -301,6 +332,7 @@ impl SpeakerInput {
         Ok(SpeakerStream {
             sample_queue,
             waker_state,
+            dropped,
             capture_thread,
             sample_rate,
         })
@@ -316,8 +348,27 @@ struct WakerState {
 pub struct SpeakerStream {
     sample_queue: Arc<Mutex<VecDeque<f32>>>,
     waker_state: Arc<Mutex<WakerState>>,
+    dropped: Arc<AtomicU64>,
     capture_thread: Option<thread::JoinHandle<()>>,
     sample_rate: u32,
+}
+
+/// Ends a capture stream from outside the task reading it.
+pub(crate) struct StreamStopper {
+    waker_state: Arc<Mutex<WakerState>>,
+}
+
+impl StreamStopper {
+    pub(crate) fn stop(&self) {
+        let waker = {
+            let mut state = self.waker_state.lock().unwrap_or_else(|e| e.into_inner());
+            state.shutdown = true;
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
 }
 
 impl SpeakerStream {
@@ -325,9 +376,34 @@ impl SpeakerStream {
         self.sample_rate
     }
 
+    pub(crate) fn stopper(&self) -> StreamStopper {
+        StreamStopper {
+            waker_state: self.waker_state.clone(),
+        }
+    }
+
+    /// Captured samples waiting to be read.
+    pub fn backlog_samples(&self) -> usize {
+        self.sample_queue.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Discard up to `count` of the oldest waiting samples; returns how many.
+    pub fn skip_samples(&mut self, count: usize) -> usize {
+        let mut queue = self.sample_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let skipped = count.min(queue.len());
+        queue.drain(..skipped);
+        skipped
+    }
+
+    /// Samples the full queue dropped since the last call.
+    pub fn take_dropped_samples(&self) -> u64 {
+        self.dropped.swap(0, Ordering::Relaxed)
+    }
+
     fn capture_audio_loop(
         sample_queue: Arc<Mutex<VecDeque<f32>>>,
         waker_state: Arc<Mutex<WakerState>>,
+        dropped: Arc<AtomicU64>,
         source_name: Option<&str>,
         init_tx: std::sync::mpsc::Sender<Result<u32>>,
     ) -> Result<()> {
@@ -395,27 +471,12 @@ impl SpeakerStream {
                                 .collect();
 
                             if !samples.is_empty() {
-                                // Consistent buffer overflow handling
-                                let dropped = {
-                                    let mut queue =
-                                        sample_queue.lock().unwrap_or_else(|e| e.into_inner());
-                                    let max_buffer_size = 131072; // 128KB buffer (matching macOS/Windows)
-
-                                    queue.extend(samples.iter());
-
-                                    // If buffer exceeds maximum, drop oldest samples
-                                    if queue.len() > max_buffer_size {
-                                        let to_drop = queue.len() - max_buffer_size;
-                                        queue.drain(0..to_drop);
-                                        to_drop
-                                    } else {
-                                        0
-                                    }
-                                };
-
-                                if dropped > 0 {
-                                    warn!("[capture_audio_loop] Linux buffer overflow - dropped {} samples", dropped);
-                                }
+                                queue_captured(
+                                    &sample_queue,
+                                    &samples,
+                                    capture_queue_capacity(sample_rate),
+                                    &dropped,
+                                );
 
                                 // Wake up consumer
                                 {
@@ -486,5 +547,53 @@ impl Stream for SpeakerStream {
         state.has_data = false;
         state.waker = Some(cx.waker().clone());
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream_parts() -> (Arc<Mutex<VecDeque<f32>>>, Arc<Mutex<WakerState>>) {
+        (
+            Arc::new(Mutex::new(VecDeque::new())),
+            Arc::new(Mutex::new(WakerState {
+                waker: None,
+                has_data: false,
+                shutdown: false,
+            })),
+        )
+    }
+
+    #[test]
+    fn a_full_queue_drops_the_oldest_audio_and_counts_it() {
+        let (queue, _) = stream_parts();
+        let dropped = AtomicU64::new(0);
+        queue_captured(&queue, &[0.1, 0.2, 0.3], 4, &dropped);
+        queue_captured(&queue, &[0.4, 0.5, 0.6], 4, &dropped);
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        let kept: Vec<f32> = queue.lock().unwrap().iter().copied().collect();
+        assert_eq!(kept, vec![0.3, 0.4, 0.5, 0.6]);
+    }
+
+    #[test]
+    fn the_queue_holds_a_minute_at_the_capture_rate() {
+        assert_eq!(capture_queue_capacity(44_100), 44_100 * 60);
+        assert_eq!(capture_queue_capacity(48_000), 48_000 * 60);
+    }
+
+    #[test]
+    fn a_stop_wakes_a_parked_reader_and_ends_the_stream() {
+        let (queue, waker_state) = stream_parts();
+        waker_state.lock().unwrap().waker = Some(Waker::noop().clone());
+        let stopper = StreamStopper {
+            waker_state: waker_state.clone(),
+        };
+        stopper.stop();
+        let state = waker_state.lock().unwrap();
+        assert!(state.shutdown);
+        assert!(state.waker.is_none(), "reader was not woken");
+        drop(state);
+        assert!(queue.lock().unwrap().is_empty());
     }
 }

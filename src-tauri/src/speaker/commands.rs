@@ -1,6 +1,8 @@
 // Assistant AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
 use crate::speaker::preprocessing::{apply_noise_gate, prepare_utterance, PreparedUtterance};
 use crate::speaker::live_text;
+#[cfg(not(target_os = "macos"))]
+use crate::speaker::portable_vad::PortableVad;
 #[cfg(target_os = "macos")]
 use crate::speaker::resample::StreamingResampler;
 use crate::speaker::utterance_emitter::UtteranceEmitter;
@@ -930,13 +932,14 @@ async fn run_vad_capture(
     let mut hop_resampler = StreamingResampler::new(sr);
     #[cfg(target_os = "macos")]
     let mut vad_processing_error_reported = false;
-    // macOS assumes silence until the first Silero result; elsewhere Silero
-    // never runs, so start at None to engage the threshold fallback.
-    let mut pending_silero_prob: Option<f32> = if cfg!(target_os = "macos") {
-        Some(0.0)
-    } else {
-        None
-    };
+    // Silence until Silero's first result. Without Silero (it failed to
+    // start off macOS), None engages the loudness threshold.
+    #[cfg(not(target_os = "macos"))]
+    let mut portable_vad = start_portable_vad(sr, "system audio");
+    #[cfg(target_os = "macos")]
+    let mut pending_silero_prob: Option<f32> = Some(0.0);
+    #[cfg(not(target_os = "macos"))]
+    let mut pending_silero_prob: Option<f32> = portable_vad.as_ref().map(|_| 0.0);
     let mut utterance_start_time: f32 = 0.0;
     // Utterance times are positions in the captured audio, not wall-clock
     // readings: after a processing stall the loop catches up on buffered
@@ -1040,6 +1043,11 @@ async fn run_vad_capture(
                         drain_monitor.last_hop = Instant::now();
                         last_hop_end = drain_monitor.last_hop;
                     }
+                    #[cfg(not(target_os = "macos"))]
+                    if let Some(vad) = portable_vad.as_mut() {
+                        vad.reset();
+                        pending_silero_prob = Some(0.0);
+                    }
                     continue;
                 }
             }
@@ -1107,7 +1115,10 @@ async fn run_vad_capture(
                 (resample_duration, vad_started.elapsed(), hop_16k)
             };
             #[cfg(not(target_os = "macos"))]
-            let hop_16k: Vec<f32> = Vec::new();
+            let hop_16k: Vec<f32> = {
+                portable_vad_hop(&mut portable_vad, &mut pending_silero_prob, &raw_mono, "system audio");
+                Vec::new()
+            };
 
             let is_speech = match pending_silero_prob {
                 // Mic-style hysteresis on the raw probability.
@@ -1391,6 +1402,46 @@ fn catch_up_skip(backlog: usize, sr: u32) -> usize {
         0
     } else {
         backlog - CATCH_UP_TO_SECS * sr
+    }
+}
+
+/// Silero for a capture loop off macOS, or `None` (with a warning) to fall
+/// back to the loudness threshold.
+#[cfg(not(target_os = "macos"))]
+fn start_portable_vad(sr: u32, source: &str) -> Option<PortableVad> {
+    match PortableVad::new(sr) {
+        Ok(vad) => Some(vad),
+        Err(error) => {
+            warn!("Silero VAD unavailable for {source}; using the loudness threshold: {error}");
+            None
+        }
+    }
+}
+
+/// Feed one hop to the portable Silero. Updates `probability` when a step
+/// completed; on failure drops to the loudness threshold for the rest of the
+/// capture.
+#[cfg(not(target_os = "macos"))]
+fn portable_vad_hop(
+    vad: &mut Option<PortableVad>,
+    probability: &mut Option<f32>,
+    hop: &[f32],
+    source: &str,
+) {
+    let failed = match vad.as_mut().map(|vad| vad.process(hop)) {
+        Some(Ok(Some(p))) => {
+            *probability = Some(p);
+            false
+        }
+        Some(Err(error)) => {
+            warn!("Silero VAD failed for {source}; using the loudness threshold: {error}");
+            true
+        }
+        _ => false,
+    };
+    if failed {
+        *vad = None;
+        *probability = None;
     }
 }
 
@@ -2742,17 +2793,19 @@ async fn run_mic_dictation(
     let mut in_speech = false;
     let mut silence_hops = 0usize;
     let mut speech_hops = 0usize;
+    #[cfg(target_os = "macos")]
     let mut vad_accumulator = VadFrameAccumulator::default();
     #[cfg(target_os = "macos")]
     let mut hop_resampler = StreamingResampler::new(sr);
     #[cfg(target_os = "macos")]
     let mut vad_processing_error_reported = false;
-    // macOS assumes silence until the first Silero result (mirrors the tap loop).
-    let mut prob: Option<f32> = if cfg!(target_os = "macos") {
-        Some(0.0)
-    } else {
-        None
-    };
+    // Silence until Silero's first result (mirrors the tap loop).
+    #[cfg(not(target_os = "macos"))]
+    let mut portable_vad = start_portable_vad(sr, "dictation");
+    #[cfg(target_os = "macos")]
+    let mut prob: Option<f32> = Some(0.0);
+    #[cfg(not(target_os = "macos"))]
+    let mut prob: Option<f32> = portable_vad.as_ref().map(|_| 0.0);
 
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
@@ -2782,6 +2835,8 @@ async fn run_mic_dictation(
                     );
                 }
             }
+            #[cfg(not(target_os = "macos"))]
+            portable_vad_hop(&mut portable_vad, &mut prob, &hop_chunk, "dictation");
             let is_speech = match prob {
                 Some(p) => silero_is_speech(in_speech, p),
                 None => fallback_vad_is_speech(&hop_chunk, &config),

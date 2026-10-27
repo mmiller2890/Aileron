@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "title": "Aileron",
+        "width": 600,
+        "height": 64,
+        "decorations": false,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "resizable": false,
+        "visibleOnAllWorkspaces": true,
+        "skipTaskbar": true,
+        "visible": true,
+        "center": false,
+        "contentProtected": true,
+        "focus": false,
+        "acceptFirstMouse": true,
+        "shadow": false,
+        "backgroundColor": "#0d1310"
+      }
+    ]
+  }
+}

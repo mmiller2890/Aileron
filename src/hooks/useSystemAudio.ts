@@ -6,6 +6,13 @@ import { useApp } from "@/contexts";
 import { STORAGE_KEYS } from "@/config/constants";
 import { safeLocalStorage } from "@/lib/storage";
 import { getPlatform } from "@/lib/platform";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import {
+  checkLocalServer,
+  localServerDownMessage,
+  localServerHealthUrl,
+  type LocalServerState,
+} from "@/lib/local-stt-server";
 import { liveTextEndpointFor } from "@/lib/live-text-endpoint";
 import {
   fetchSTT,
@@ -1199,6 +1206,27 @@ export function useSystemAudio() {
               err,
             );
           }
+        }
+      }
+
+      // A local server that isn't up fails every utterance, so say why before
+      // starting a capture that cannot produce a transcript.
+      const localProvider =
+        getPlatform() !== "macos" &&
+        (selectedSttProvider.provider === "local-parakeet" ||
+          selectedSttProvider.provider === "local-whisper")
+          ? selectedSttProvider.provider
+          : null;
+      if (localProvider) {
+        const url = localServerHealthUrl(localProvider);
+        const state: LocalServerState = url
+          ? await checkLocalServer(url, tauriFetch)
+          : "down";
+        const message = localServerDownMessage(localProvider, state);
+        if (message) {
+          setError(message);
+          setIsPopoverOpen(true);
+          return;
         }
       }
 

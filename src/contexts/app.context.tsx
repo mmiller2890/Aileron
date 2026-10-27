@@ -5,6 +5,13 @@ import {
   STORAGE_KEYS,
 } from "@/config";
 import { getPlatform, safeLocalStorage, trackAppStart, isMacOS } from "@/lib";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import {
+  checkLocalServer,
+  localServerHealthUrl,
+  pickLinuxProvider,
+  type LocalServerState,
+} from "@/lib/local-stt-server";
 import { getShortcutsConfig } from "@/lib/storage";
 import { normalizeFluidAudioModel } from "@/lib/fluidaudio-model";
 import {
@@ -608,6 +615,34 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           provider: "local-whisper",
           variables: { MODEL: "openai/whisper-large-v3-turbo" },
         });
+      }
+
+      // Nothing on Linux installs a speech server, so the default provider can
+      // point at a port nobody is listening on. Pick the local server that is
+      // actually up, and keep a Whisper the user runs on purpose.
+      if (sttPlatform !== "macos") {
+        try {
+          const parakeetUrl = localServerHealthUrl("local-parakeet");
+          const whisperUrl = localServerHealthUrl("local-whisper");
+          const [parakeet, whisper] = await Promise.all([
+            parakeetUrl
+              ? checkLocalServer(parakeetUrl, tauriFetch)
+              : Promise.resolve<LocalServerState>("down"),
+            whisperUrl
+              ? checkLocalServer(whisperUrl, tauriFetch)
+              : Promise.resolve<LocalServerState>("down"),
+          ]);
+          const picked = pickLinuxProvider(
+            savedSttProvider,
+            parakeet,
+            whisper,
+          );
+          if (picked) {
+            onSetSelectedSttProvider({ provider: picked, variables: {} });
+          }
+        } catch (error) {
+          console.debug("Failed to check the local speech servers:", error);
+        }
       }
     };
     // Load data

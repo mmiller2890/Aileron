@@ -13,7 +13,10 @@ import {
   localServerHealthUrl,
   type LocalServerState,
 } from "@/lib/local-stt-server";
-import { liveTextEndpointFor } from "@/lib/live-text-endpoint";
+import {
+  liveSpeakersEndpointFor,
+  liveTextEndpointFor,
+} from "@/lib/live-text-endpoint";
 import {
   fetchSTT,
   fetchAIResponse,
@@ -1112,6 +1115,10 @@ export function useSystemAudio() {
                       selectedSttProviderRef.current.provider,
                       getPlatform(),
                     ),
+                    liveSpeakersUrl: liveSpeakersEndpointFor(
+                      selectedSttProviderRef.current.provider,
+                      getPlatform(),
+                    ),
                   });
                 },
               });
@@ -1272,6 +1279,10 @@ export function useSystemAudio() {
               vadConfig: vadConfig,
               deviceId: deviceId,
               liveTextUrl: liveTextEndpointFor(
+                selectedSttProviderRef.current.provider,
+                getPlatform(),
+              ),
+              liveSpeakersUrl: liveSpeakersEndpointFor(
                 selectedSttProviderRef.current.provider,
                 getPlatform(),
               ),
@@ -1652,6 +1663,10 @@ export function useSystemAudio() {
             vadConfig: vadConfig,
             deviceId: deviceId,
             liveTextUrl: liveTextEndpointFor(
+              selectedSttProviderRef.current.provider,
+              getPlatform(),
+            ),
+            liveSpeakersUrl: liveSpeakersEndpointFor(
               selectedSttProviderRef.current.provider,
               getPlatform(),
             ),

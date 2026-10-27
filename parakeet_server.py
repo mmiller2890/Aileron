@@ -39,7 +39,7 @@ try:
     import numpy as np
     import soundfile
     import torch
-    from nemo.collections.asr.models import ASRModel
+    from nemo.collections.asr.models import ASRModel, SortformerEncLabelModel
 except ImportError:
     print(INSTALL_HINT)
     sys.exit(1)
@@ -57,6 +57,89 @@ model_name = DEFAULT_MODEL
 device = "cpu"
 # Requests run on FastAPI's threadpool; one GPU model serves them one at a time.
 model_lock = threading.Lock()
+
+# --- Live speaker labels -------------------------------------------------
+#
+# NeMo 3.0 exposes Sortformer's streaming path as
+# `forward_streaming_step(processed_signal, processed_signal_length,
+# streaming_state, total_preds, left_offset, right_offset)`, with the state
+# created by `sortformer_modules.init_streaming_state(...)` and the chunks
+# produced by `sortformer_modules.streaming_feat_loader(...)`. Frame rate is
+# 80 ms: the preprocessor's 10 ms stride times `subsampling_factor: 8`.
+#
+# The state carries the speaker cache across requests, so identity survives
+# turns and memory stays bounded however long the interview runs. One session
+# exists at a time (one capture).
+SORTFORMER_MODEL = "nvidia/diar_streaming_sortformer_4spk-v2"
+SPEAKER_THRESHOLD = 0.5
+SPEAKER_FRAME_SECS = 0.08
+speaker_model = None
+speaker_state = None
+speaker_total_preds = None
+speaker_feat_offset = 0
+speaker_turn_start_frame = 0
+
+
+def load_speaker_model() -> None:
+    global speaker_model
+    if speaker_model is None:
+        print(f"Loading {SORTFORMER_MODEL} on {device}...")
+        loaded = SortformerEncLabelModel.from_pretrained(SORTFORMER_MODEL, map_location=device)
+        loaded.eval()
+        speaker_model = loaded
+
+
+def reset_speaker_session() -> None:
+    global speaker_state, speaker_total_preds, speaker_feat_offset, speaker_turn_start_frame
+    load_speaker_model()
+    if speaker_model is None:
+        raise RuntimeError("the sortformer model did not load")
+    speaker_state = speaker_model.sortformer_modules.init_streaming_state(
+        batch_size=1, async_streaming=speaker_model.async_streaming, device=device
+    )
+    speaker_total_preds = torch.zeros(
+        (1, 0, speaker_model.sortformer_modules.n_spk), device=device
+    )
+    speaker_feat_offset = 0
+    speaker_turn_start_frame = 0
+
+
+def current_turn_counts() -> list[int]:
+    """Active 80 ms frames per speaker slot since the turn began."""
+    if speaker_total_preds is None or speaker_total_preds.shape[1] == 0:
+        return [0, 0, 0, 0]
+    frames = speaker_total_preds[0][speaker_turn_start_frame :]
+    if frames.shape[0] == 0:
+        return [0, 0, 0, 0]
+    active = (frames > SPEAKER_THRESHOLD).sum(dim=0)
+    return [int(count) for count in active.tolist()]
+
+
+def feed_speaker_audio(audio: np.ndarray) -> list[int]:
+    """Diarize one more piece of the open turn."""
+    global speaker_state, speaker_total_preds, speaker_feat_offset
+    if speaker_model is None:
+        raise RuntimeError("the sortformer session was not started")
+    if audio.size == 0:
+        return current_turn_counts()
+    signal = torch.tensor(audio, dtype=torch.float32, device=device)[None, :]
+    length = torch.tensor([signal.shape[1]], device=device)
+    with torch.inference_mode():
+        feats, feat_len = speaker_model.preprocessor(input_signal=signal, length=length)
+        offset = torch.tensor([speaker_feat_offset], dtype=torch.long, device=device)
+        for _, chunk, chunk_len, left, right in speaker_model.sortformer_modules.streaming_feat_loader(
+            feat_seq=feats, feat_seq_length=feat_len, feat_seq_offset=offset
+        ):
+            speaker_state, speaker_total_preds = speaker_model.forward_streaming_step(
+                processed_signal=chunk,
+                processed_signal_length=chunk_len,
+                streaming_state=speaker_state,
+                total_preds=speaker_total_preds,
+                left_offset=left,
+                right_offset=right,
+            )
+        speaker_feat_offset += int(feats.shape[2])
+    return current_turn_counts()
 
 
 def load_model(name: str, requested_device: str) -> None:
@@ -80,6 +163,7 @@ def load_model(name: str, requested_device: str) -> None:
         with torch.inference_mode():
             loaded.transcribe([audio], batch_size=1, verbose=False)
     model, model_name = loaded, name
+    load_speaker_model()
 
 
 def decode_audio(audio_bytes: bytes) -> np.ndarray:
@@ -129,6 +213,41 @@ def transcribe(file: UploadFile = File(...)):
 @app.get("/health")
 def health():
     return {"status": "ok" if model is not None else "loading", "model": model_name, "device": device}
+
+
+@app.post("/v1/speakers/reset")
+def speakers_reset():
+    with model_lock:
+        reset_speaker_session()
+    return {}
+
+
+@app.post("/v1/speakers/feed")
+def speakers_feed(file: UploadFile = File(...)):
+    audio_bytes = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(audio_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Audio chunk exceeds the upload limit")
+    try:
+        audio = decode_audio(audio_bytes)
+    except Exception as error:  # unreadable or empty upload
+        raise HTTPException(status_code=400, detail=f"Could not read audio: {error}") from error
+    with model_lock:
+        if speaker_state is None:
+            reset_speaker_session()
+        counts = feed_speaker_audio(audio)
+    return {"counts": counts}
+
+
+@app.post("/v1/speakers/end_turn")
+def speakers_end_turn():
+    global speaker_turn_start_frame
+    with model_lock:
+        if speaker_state is None:
+            reset_speaker_session()
+        counts = current_turn_counts()
+        if speaker_total_preds is not None:
+            speaker_turn_start_frame = int(speaker_total_preds.shape[1])
+    return {"counts": counts}
 
 
 def main():

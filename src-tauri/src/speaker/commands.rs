@@ -568,6 +568,8 @@ pub async fn start_system_audio_capture(
     // Off macOS: a local transcription server (parakeet_server.py) to drive
     // live text. macOS uses FluidAudio's streaming model instead.
     live_text_url: Option<String>,
+    // Off macOS: the same server's speaker root, for live speaker labels.
+    live_speakers_url: Option<String>,
 ) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
     let reservation = state.stream_task.reserve("Capture already running")?;
@@ -657,6 +659,8 @@ pub async fn start_system_audio_capture(
     #[cfg(target_os = "macos")]
     let _ = live_text_url;
     #[cfg(target_os = "macos")]
+    let _ = live_speakers_url;
+    #[cfg(target_os = "macos")]
     let live_text = if vad_config.enabled && vad_config.live_text {
         app.try_state::<crate::stt::SttState>()
             .and_then(|stt_state| stt_state.live_text_model())
@@ -720,7 +724,31 @@ pub async fn start_system_audio_capture(
         None
     };
     #[cfg(not(target_os = "macos"))]
-    let live_speakers: Option<live_speakers::LiveSpeakerHandle> = None;
+    let live_speakers = match live_speakers_url.filter(|_| vad_config.enabled && vad_config.live_speakers)
+    {
+        Some(url) => match crate::speaker::remote_live_speakers::RemoteLiveSpeakerModel::new(url) {
+            Ok(model) => {
+                let emit_app = app.clone();
+                Some(live_speakers::LiveSpeakerHandle::spawn(
+                    Box::new(model),
+                    move |event| match event {
+                        live_speakers::LiveSpeakerEvent::Update(update) => {
+                            let _ = emit_app.emit("speech-speaker", update);
+                        }
+                        live_speakers::LiveSpeakerEvent::Error(error) => {
+                            error!("Speaker labels stopped: {error}");
+                            let _ = emit_app.emit("live-feature-stopped", "speakers");
+                        }
+                    },
+                ))
+            }
+            Err(error) => {
+                warn!("Speaker labels unavailable: {error}");
+                None
+            }
+        },
+        None => None,
+    };
 
     let started_summary = format!(
         "vad={}, live_text={}, live_speakers={}",

@@ -109,7 +109,7 @@ impl LiveTextModel for RemoteLiveTextModel {
 }
 
 /// 16-bit mono PCM WAV at 16 kHz.
-fn wav_16k(samples: &[f32]) -> Vec<u8> {
+pub(crate) fn wav_16k(samples: &[f32]) -> Vec<u8> {
     let data_len = (samples.len() * 2) as u32;
     let mut wav = Vec::with_capacity(44 + data_len as usize);
     wav.extend_from_slice(b"RIFF");

@@ -132,6 +132,7 @@ dependencies = [
  "cpal",
  "fluidaudio-rs",
  "futures-util",
+ "gtk",
  "hound",
  "image",
  "libpulse-binding",

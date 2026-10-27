@@ -70,6 +70,26 @@ pub fn center_window_completely(window: &WebviewWindow) -> Result<(), Box<dyn st
     Ok(())
 }
 
+/// Linux creates the overlay as a non-resizable GTK window, and GTK sizes
+/// those from their contents, ignoring resizes from code. The web view asks
+/// for no height, so GTK fell back to 200 px: on Nobara/KDE the bar sat at
+/// 600x200 instead of 64 (idle) or 600 (panel open). Allowing resizes from
+/// code fixes it (verified there: 600x64 idle, grows and shrinks back); the
+/// window has no edges to drag, so the user still cannot resize it.
+#[cfg(target_os = "linux")]
+fn prepare_linux_resize(window: &tauri::WebviewWindow) {
+    let target = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        use gtk::prelude::GtkWindowExt;
+        if let Ok(gtk_window) = target.gtk_window() {
+            if !gtk_window.is_resizable() {
+                gtk_window.set_resizable(true);
+                tracing::info!("Linux overlay window made resizable from code");
+            }
+        }
+    });
+}
+
 #[tauri::command]
 pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
     use tauri::{LogicalSize, Size};
@@ -88,6 +108,9 @@ pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<()
         })
         .unwrap_or(f64::MAX);
     let clamped = (height as f64).clamp(1.0, max_logical_height);
+
+    #[cfg(target_os = "linux")]
+    prepare_linux_resize(&window);
 
     let new_size = LogicalSize::new(600.0, clamped);
     window

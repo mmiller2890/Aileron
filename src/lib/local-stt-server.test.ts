@@ -128,11 +128,11 @@ describe("localServerDownMessage", () => {
 describe("transcriptionFailureMessage", () => {
   const raw = "error sending request for url (http://localhost:8001/v1/audio/transcriptions)";
 
-  it("says the Parakeet server stopped and that listening continues", () => {
+  it("says the server may be restarting itself, and that listening continues", () => {
     expect(
       transcriptionFailureMessage("local-parakeet", "linux", "down", raw),
     ).toBe(
-      "Parakeet speech server stopped. Start it with: systemctl --user start aileron-parakeet — listening continues, but nothing is transcribed until it's back.",
+      "Parakeet speech server isn't responding. If it crashed, it restarts by itself in about 20 s; otherwise start it with: systemctl --user start aileron-parakeet. Listening continues.",
     );
   });
 

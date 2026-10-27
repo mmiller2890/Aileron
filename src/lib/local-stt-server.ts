@@ -117,7 +117,7 @@ export function transcriptionFailureMessage(
   if (platform === "macos") return rawMessage;
   if (providerId === "local-parakeet") {
     if (state === "down") {
-      return "Parakeet speech server stopped. Start it with: systemctl --user start aileron-parakeet — listening continues, but nothing is transcribed until it's back.";
+      return "Parakeet speech server isn't responding. If it crashed, it restarts by itself in about 20 s; otherwise start it with: systemctl --user start aileron-parakeet. Listening continues.";
     }
     if (state === "loading") {
       return "Parakeet speech server is restarting. Transcription resumes in a few seconds; speech until then isn't transcribed.";

@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 /// sends about one request per batch.
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// After a failed request, wait this long before asking again. A crashed
+/// server is restarted by systemd (refused for ~12 s, then loading for ~20 s),
+/// so live text pauses through it rather than hammering the port.
+const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(2);
 const SAMPLE_RATE: u32 = 16_000;
 
 /// Whether `url` is an http endpoint on this machine. Turn audio is only ever
@@ -38,6 +42,8 @@ pub(crate) struct RemoteLiveTextModel {
     samples: Vec<f32>,
     last_request: Option<Instant>,
     last_text: String,
+    /// Set while the server is failing: when the next attempt may be made.
+    retry_at: Option<Instant>,
 }
 
 impl RemoteLiveTextModel {
@@ -56,6 +62,7 @@ impl RemoteLiveTextModel {
             samples: Vec::new(),
             last_request: None,
             last_text: String::new(),
+            retry_at: None,
         })
     }
 
@@ -94,16 +101,34 @@ impl LiveTextModel for RemoteLiveTextModel {
         Ok(())
     }
 
+    /// A failed request pauses live text instead of ending it: the turn's
+    /// audio keeps accumulating, the last text stands, and the server is asked
+    /// again after RETRY_AFTER_FAILURE. Final transcripts have their own path
+    /// and their own message to the user.
     fn feed(&mut self, samples_16k: &[f32]) -> Result<String, String> {
         self.samples.extend_from_slice(samples_16k);
         if self
             .last_request
             .is_some_and(|sent| sent.elapsed() < MIN_REQUEST_INTERVAL)
+            || self.retry_at.is_some_and(|at| Instant::now() < at)
         {
             return Ok(self.last_text.clone());
         }
         self.last_request = Some(Instant::now());
-        self.last_text = self.transcribe()?;
+        match self.transcribe() {
+            Ok(text) => {
+                if self.retry_at.take().is_some() {
+                    tracing::info!("Live text server is back; live text resumed");
+                }
+                self.last_text = text;
+            }
+            Err(error) => {
+                if self.retry_at.is_none() {
+                    tracing::warn!("Live text paused, server unreachable: {error}");
+                }
+                self.retry_at = Some(Instant::now() + RETRY_AFTER_FAILURE);
+            }
+        }
         Ok(self.last_text.clone())
     }
 }
@@ -141,7 +166,14 @@ mod tests {
     /// A local server answering every request with `{"text": "<n> requests"}`
     /// and recording each request's body length and first WAV bytes.
     fn fake_server() -> (String, Arc<Mutex<Vec<(usize, Vec<u8>)>>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        fake_server_on(TcpListener::bind("127.0.0.1:0").unwrap(), 200)
+    }
+
+    /// The same server on `listener`, answering with `status`.
+    fn fake_server_on(
+        listener: TcpListener,
+        status: u16,
+    ) -> (String, Arc<Mutex<Vec<(usize, Vec<u8>)>>>) {
         let url = format!("http://{}/v1/audio/transcriptions", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
@@ -171,7 +203,7 @@ mod tests {
                 let json = format!("{{\"text\": \" {count} requests \"}}");
                 write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
                     json.len()
                 )
                 .unwrap();
@@ -243,11 +275,35 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_server_is_an_error_not_a_hang() {
+    fn an_unreachable_server_pauses_live_text_instead_of_ending_it() {
+        // A crashed Parakeet comes back under systemd; live text must not
+        // stop for the rest of the capture because of it.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/x", listener.local_addr().unwrap());
+        let addr = listener.local_addr().unwrap();
         drop(listener);
+        let url = format!("http://{addr}/v1/audio/transcriptions");
         let mut model = RemoteLiveTextModel::new(url).unwrap();
-        assert!(model.feed(&[0.0; 160]).is_err());
+        assert_eq!(model.feed(&[0.1; 160]).unwrap(), "");
+
+        // The server is back on the same port.
+        let (_, seen) = fake_server_on(TcpListener::bind(addr).unwrap(), 200);
+        std::thread::sleep(RETRY_AFTER_FAILURE);
+        assert_eq!(model.feed(&[0.1; 160]).unwrap(), "1 requests");
+        // The turn's audio from the outage is still part of the turn.
+        let data_len = u32::from_le_bytes(seen.lock().unwrap()[0].1[40..44].try_into().unwrap());
+        assert_eq!(data_len, 160 * 2 * 2);
+    }
+
+    #[test]
+    fn a_failing_server_is_retried_slowly_not_on_every_feed() {
+        let (url, seen) = fake_server_on(TcpListener::bind("127.0.0.1:0").unwrap(), 503);
+        let mut model = RemoteLiveTextModel::new(url).unwrap();
+        assert_eq!(model.feed(&[0.1; 160]).unwrap(), "");
+        std::thread::sleep(MIN_REQUEST_INTERVAL);
+        assert_eq!(model.feed(&[0.1; 160]).unwrap(), "");
+        assert_eq!(seen.lock().unwrap().len(), 1, "retried inside the back-off");
+        std::thread::sleep(RETRY_AFTER_FAILURE);
+        model.feed(&[0.1; 160]).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 }

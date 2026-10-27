@@ -9,9 +9,13 @@ import "@fontsource/geist-mono/400.css";
 import "@fontsource/geist-mono/500.css";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppRoutes from "./routes";
+import { getPlatform } from "./lib/platform";
+import { applyLinuxOpaqueBackground } from "./lib/linux-background";
 
 const currentWindow = getCurrentWindow();
 const windowLabel = currentWindow.label;
+
+applyLinuxOpaqueBackground(document.body, getPlatform(), windowLabel);
 
 // Render different components based on window label
 if (windowLabel.startsWith("capture-overlay-")) {

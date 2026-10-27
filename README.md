@@ -201,6 +201,8 @@ One-click presets exist for **OpenAI Whisper, Groq Whisper, ElevenLabs, Google, 
 
 Every shortcut is rebindable in the dashboard. On Windows and Linux, use `Ctrl` in place of `⌘`.
 
+**Linux and Wayland:** the shortcut backend (`global-hotkey`) registers X11 grabs only, so on a Wayland session the keys reach Aileron through XWayland. That works on the compositors that emulate X11 grabs — verified on KDE Plasma 6.7 (KWin 6.7.5), Wayland, with a native Wayland window focused (Konsole): `Ctrl+Shift+M` started and stopped capture. GNOME behaves the same way. On a compositor without XWayland there is no shortcut path yet.
+
 ## 🔒 Privacy
 
 - **No telemetry, analytics, or tracking** — the code that phoned home is gone.

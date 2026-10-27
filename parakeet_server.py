@@ -19,9 +19,11 @@ Install deps first (Python 3.10-3.12):
 
 import argparse
 import io
+import os
 import sys
 import threading
 import time
+import traceback
 
 DEFAULT_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
 SAMPLE_RATE = 16_000
@@ -196,11 +198,11 @@ def speakers_feed(file: UploadFile = File(...)):
     except Exception as error:  # unreadable or empty upload
         raise HTTPException(status_code=400, detail=f"Could not read audio: {error}") from error
     with model_lock:
-        trimmed = speaker_samples.size + audio.size > MAX_SPEAKER_SESSION_SAMPLES
+        dropped = max(0, speaker_samples.size + audio.size - MAX_SPEAKER_SESSION_SAMPLES)
         speaker_samples = np.concatenate([speaker_samples, audio])[-MAX_SPEAKER_SESSION_SAMPLES:]
-        if trimmed:
-            # The window slid past the turn's start: count from what is left.
-            speaker_turn_start_sample = 0
+        # The window slid by `dropped`: the turn starts that much earlier in
+        # what is left, or at its start if it began before the window.
+        speaker_turn_start_sample = max(0, speaker_turn_start_sample - dropped)
     # Diarizing happens when the turn ends: a partial label is not worth a
     # model run per 320 ms of audio.
     return {"counts": [0, 0, 0, 0]}
@@ -231,8 +233,17 @@ def main():
     # server is starting rather than telling them it is not running (which is
     # what happened when the models loaded before uvicorn bound the port).
     def warm() -> None:
-        with model_lock:
-            load_model(args.model, args.device)
+        try:
+            with model_lock:
+                load_model(args.model, args.device)
+        except BaseException:
+            # Exit rather than serve "loading" forever: Aileron will not start
+            # a capture while the server says it is loading, and a process
+            # that keeps running is never restarted by systemd's
+            # Restart=on-failure (e.g. CUDA not ready yet at login).
+            traceback.print_exc()
+            sys.stdout.flush()
+            os._exit(1)
         print(f"Model ready on {device}. Requests are served from now on.")
 
     threading.Thread(target=warm, name="model-warmup", daemon=True).start()

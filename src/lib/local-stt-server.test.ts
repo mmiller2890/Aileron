@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   checkLocalServer,
   localServerDownMessage,
+  transcriptionFailureMessage,
   localServerHealthUrl,
   pickLinuxProvider,
 } from "./local-stt-server";
@@ -121,5 +122,48 @@ describe("localServerDownMessage", () => {
     expect(localServerDownMessage("local-parakeet", "up")).toBeNull();
     expect(localServerDownMessage("local-whisper", "loading")).toBeNull();
     expect(localServerDownMessage("openai-whisper", "down")).toBeNull();
+  });
+});
+
+describe("transcriptionFailureMessage", () => {
+  const raw = "error sending request for url (http://localhost:8001/v1/audio/transcriptions)";
+
+  it("says the Parakeet server stopped and that listening continues", () => {
+    expect(
+      transcriptionFailureMessage("local-parakeet", "linux", "down", raw),
+    ).toBe(
+      "Parakeet speech server stopped. Start it with: systemctl --user start aileron-parakeet — listening continues, but nothing is transcribed until it's back.",
+    );
+  });
+
+  it("says a restarting server will pick transcription back up", () => {
+    expect(
+      transcriptionFailureMessage("local-parakeet", "linux", "loading", raw),
+    ).toBe(
+      "Parakeet speech server is restarting. Transcription resumes in a few seconds; speech until then isn't transcribed.",
+    );
+  });
+
+  it("says Local Whisper stopped", () => {
+    expect(
+      transcriptionFailureMessage("local-whisper", "linux", "down", raw),
+    ).toBe(
+      "Local Whisper stopped responding on port 8000. Restart whisper_server.py — listening continues, but nothing is transcribed until it's back.",
+    );
+  });
+
+  it("keeps the real error when the server is up", () => {
+    expect(
+      transcriptionFailureMessage("local-parakeet", "linux", "up", "HTTP 400: bad audio"),
+    ).toBe("HTTP 400: bad audio");
+  });
+
+  it("leaves cloud providers and macOS alone", () => {
+    expect(transcriptionFailureMessage("groq", "linux", "down", "HTTP 429")).toBe(
+      "HTTP 429",
+    );
+    expect(
+      transcriptionFailureMessage("local-parakeet", "macos", "down", raw),
+    ).toBe(raw);
   });
 });

@@ -101,3 +101,30 @@ export function localServerDownMessage(
   }
   return null;
 }
+
+/**
+ * What to tell the user when a turn fails to transcribe mid-capture. A local
+ * server that is down or restarting gets a message that says so, and that
+ * listening goes on (systemd restarts a crashed Parakeet, and transcription
+ * resumes by itself). Anything else keeps the error as it was.
+ */
+export function transcriptionFailureMessage(
+  providerId: string,
+  platform: "macos" | "windows" | "linux",
+  state: LocalServerState,
+  rawMessage: string,
+): string {
+  if (platform === "macos") return rawMessage;
+  if (providerId === "local-parakeet") {
+    if (state === "down") {
+      return "Parakeet speech server stopped. Start it with: systemctl --user start aileron-parakeet — listening continues, but nothing is transcribed until it's back.";
+    }
+    if (state === "loading") {
+      return "Parakeet speech server is restarting. Transcription resumes in a few seconds; speech until then isn't transcribed.";
+    }
+  }
+  if (providerId === "local-whisper" && state === "down") {
+    return "Local Whisper stopped responding on port 8000. Restart whisper_server.py — listening continues, but nothing is transcribed until it's back.";
+  }
+  return rawMessage;
+}

@@ -10,6 +10,7 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import {
   checkLocalServer,
   localServerDownMessage,
+  transcriptionFailureMessage,
   localServerHealthUrl,
   type LocalServerState,
 } from "@/lib/local-stt-server";
@@ -119,6 +120,12 @@ export function useSystemAudio() {
   }, []);
   const [lastAIResponse, setLastAIResponse] = useState<string>("");
   const [error, setError] = useState<string>("");
+  // The error on screen, for callbacks that must not reopen the panel for a
+  // message the user is already looking at.
+  const errorRef = useRef("");
+  useEffect(() => {
+    errorRef.current = error;
+  }, [error]);
   // Whatever the bar tells the user also lands in aileron.log, so a session
   // that went wrong can be read back afterwards.
   useEffect(() => {
@@ -625,12 +632,33 @@ export function useSystemAudio() {
                   return;
                 }
                 console.error("STT Error:", sttError);
-                if (sttAbortController.signal.aborted) {
-                  setError("Speech transcription timed out (30s)");
-                } else {
-                  setError(sttError.message || "Failed to transcribe audio");
+                let message = sttAbortController.signal.aborted
+                  ? "Speech transcription timed out (30s)"
+                  : sttError?.message || "Failed to transcribe audio";
+                // A local server that went away mid-capture: ask it how it is
+                // rather than showing a transport error, and keep listening —
+                // a restarted server picks transcription back up.
+                const platform = getPlatform();
+                const healthUrl =
+                  platform === "macos"
+                    ? null
+                    : localServerHealthUrl(currentSelected.provider);
+                if (healthUrl) {
+                  const state = await checkLocalServer(healthUrl, tauriFetch);
+                  if (!captureSessionWorkRef.current.isCurrent(generation)) {
+                    return;
+                  }
+                  message = transcriptionFailureMessage(
+                    currentSelected.provider,
+                    platform,
+                    state,
+                    message,
+                  );
                 }
-                setIsPopoverOpen(true);
+                // Every failed turn repeats the message; open the panel only
+                // when it changes, not once per turn.
+                if (errorRef.current !== message) setIsPopoverOpen(true);
+                setError(message);
               } finally {
                 clearTimeout(timeoutId);
               }

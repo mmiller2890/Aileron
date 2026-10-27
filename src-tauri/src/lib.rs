@@ -1,5 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod capture;
+#[cfg(target_os = "linux")]
+mod linux_compat;
 mod logging;
 mod db;
 mod shortcuts;
@@ -50,6 +52,9 @@ fn get_app_version() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    linux_compat::apply();
+
     let mut builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_sql::Builder::default()

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { SPEECH_TO_TEXT_PROVIDERS } from "@/config/stt.constants";
-import { provider_visible_on, sttFallbackFor } from "./provider-platform";
+import {
+  liveFeaturesAvailableOn,
+  provider_visible_on,
+  sttFallbackFor,
+} from "./provider-platform";
 
 const providerPlatform = (id: string) =>
   SPEECH_TO_TEXT_PROVIDERS.find((p) => p.id === id)?.platform;
@@ -40,5 +44,18 @@ describe("a Mac saved on the Linux Parakeet provider", () => {
       true,
     );
     expect(sttFallbackFor("linux").provider).toBe("local-whisper");
+  });
+});
+
+describe("liveFeaturesAvailableOn", () => {
+  it("works with any provider on macOS", () => {
+    expect(liveFeaturesAvailableOn("macos", "local-fluidaudio")).toBe(true);
+    expect(liveFeaturesAvailableOn("macos", "groq")).toBe(true);
+  });
+
+  it("needs the Parakeet server elsewhere", () => {
+    expect(liveFeaturesAvailableOn("linux", "local-parakeet")).toBe(true);
+    expect(liveFeaturesAvailableOn("linux", "local-whisper")).toBe(false);
+    expect(liveFeaturesAvailableOn("linux", "groq")).toBe(false);
   });
 });

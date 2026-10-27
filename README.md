@@ -4,9 +4,9 @@
 
 **A private, on-device AI copilot for your meetings, interviews, and calls.**
 
-It listens to a conversation, transcribes it locally, and quietly answers questions the moment they're asked — all from a translucent overlay that stays out of the way and off your screen shares.
+It listens to a conversation, transcribes it locally, and quietly answers questions the moment they're asked — from a translucent overlay that stays out of the way, and on macOS and Windows off your screen shares too.
 
-<img src="images/app-hero.svg" alt="Aileron — the session dashboard with live transcript and answers, and the screen-share-invisible pop-out bar above it" width="820" />
+<img src="images/app-hero.svg" alt="Aileron — the session dashboard with live transcript and answers, and the pop-out bar above it" width="820" />
 
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
 ![Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)
@@ -26,13 +26,13 @@ Aileron is a **local-only fork** of the excellent open-source [Pluely](https://g
 - **Accessibility & note-taking** — live local captioning of system audio and your own voice, with searchable history.
 - **Research & study** — screenshot a diagram or paste a prompt and ask a vision-capable model about it.
 
-Because the overlay is **invisible to screen recording and screen sharing**, it stays personal to you.
+On macOS and Windows the overlay is **invisible to screen recording and screen sharing**, so it stays personal to you. **Linux has no such mechanism** — nothing on Wayland or X11 can exclude one window from a capture. If you share your screen on Linux, share a single window or browser tab rather than the whole screen.
 
 ## ✨ Features
 
 | | |
 |---|---|
-| 🫥 **Stealth overlay** | Translucent, always-on-top window that's hidden from screen shares and recordings. |
+| 🫥 **Stealth overlay** | Translucent, always-on-top window, hidden from screen shares and recordings on macOS and Windows. Linux has no way to exclude a window from a capture, so share a window, not the screen. |
 | 🧠 **Bring your own AI** | Ollama out of the box, one-click presets for the major APIs, or **any provider at all via a `curl` command**. Full streaming support. |
 | 🎧 **On-device speech-to-text** | Default **FluidAudio** engine runs in-process on Apple Silicon — no server, no Python, nothing to install. |
 | ❓ **Smart answering** | Every utterance is transcribed, but only *questions* trigger an automatic answer. Anything skipped is one hotkey away (`⌘⇧⏎`). |
@@ -45,7 +45,9 @@ Because the overlay is **invisible to screen recording and screen sharing**, it 
 
 ## 🚀 Quick Start
 
-> **No prebuilt download yet** — Aileron is built from source (a signed, drag-to-Applications installer is [on the roadmap](docs/shipping-plan.md)). You'll need a dev toolchain, but you don't have to hunt for it: `npm run setup` checks everything and tells you exactly what's missing.
+> **Fedora package:** `scripts/build-fedora-rpm.sh` builds `Aileron-<version>.x86_64.rpm` in a Fedora 44 container (a binary built on Arch links a newer glibc and will not start on Fedora). Install it with `sudo dnf install ./Aileron-*.x86_64.rpm`. The package contains no speech server: install one of the local servers below, or point Aileron at a cloud provider.
+>
+> **macOS:** built from source (a signed installer is [on the roadmap](docs/shipping-plan.md)). `npm run setup` checks the toolchain and tells you exactly what's missing.
 
 **Prerequisites**
 
@@ -144,18 +146,41 @@ Models: `faster-whisper-tiny` · `base` · `small` · `medium` · `large-v2` · 
 </details>
 
 <details>
-<summary><b>mlx-audio / Parakeet TDT</b> — Apple Silicon, with real-time streaming partials</summary>
+<summary><b>parakeet_server.py</b> — NVIDIA Parakeet TDT v3 on a CUDA GPU (Linux and Windows)</summary>
+
+The model the Mac runs in-process, served over loopback. It also drives live
+text and speaker labels on Linux, so a capture shows words as they are spoken
+and names who said them.
 
 ```bash
-python3.12 -m venv .mlx-asr-venv
-.mlx-asr-venv/bin/pip install "git+https://github.com/Blaizzy/mlx-audio.git" \
-  parakeet-mlx fastapi uvicorn python-multipart websockets requests soxr librosa
-
-. .mlx-asr-venv/bin/activate
-python3.12 mlx_asr_server.py
+python3.12 -m venv ~/.local/share/aileron-asr/venv
+~/.local/share/aileron-asr/venv/bin/pip install "nemo_toolkit[asr]" fastapi uvicorn python-multipart
+~/.local/share/aileron-asr/venv/bin/python parakeet_server.py --port 8001
 ```
 
-Batch at `http://localhost:8001/v1/audio/transcriptions`, live streaming at `ws://localhost:8001/v1/audio/stream`. Select **`local-parakeet`** and transcriptions appear *as you speak* (~1s latency). Model: `mlx-community/parakeet-tdt-0.6b-v3`. Nemotron and other models load in batch-only mode.
+Batch at `http://localhost:8001/v1/audio/transcriptions`, and
+`/v1/speakers/{reset,feed,end_turn}` for speaker labels. Select **`local-parakeet`**
+in speech settings. `/health` reports `loading` while the models warm up.
+
+To keep it running across logins, a user unit (`~/.config/systemd/user/aileron-parakeet.service`):
+
+```ini
+[Unit]
+Description=Aileron local Parakeet speech server
+[Service]
+WorkingDirectory=%h/.local/share/aileron-asr
+ExecStart=%h/.local/share/aileron-asr/venv/bin/python %h/.local/share/aileron-asr/parakeet_server.py --host 127.0.0.1 --port 8001
+Restart=on-failure
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now aileron-parakeet
+```
+
+Aileron picks Local Parakeet itself when Local Whisper is not running, and says
+what to start if the server is down when you begin listening.
 </details>
 
 ### Cloud STT

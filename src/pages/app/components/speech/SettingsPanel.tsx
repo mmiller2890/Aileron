@@ -30,6 +30,9 @@ import {
   getPromptTemplateById,
 } from "@/lib/platform-instructions";
 import { cn } from "@/lib/utils";
+import { useApp } from "@/contexts";
+import { getPlatform } from "@/lib/platform";
+import { liveFeaturesAvailableOn } from "@/lib/provider-platform";
 
 // Sensitivity presets for simpler UX
 const SENSITIVITY_PRESETS = {
@@ -76,6 +79,15 @@ export const SettingsPanel = ({
   contextContent,
   setContextContent,
 }: SettingsPanelProps) => {
+  const { selectedSttProvider } = useApp();
+  const platform = getPlatform();
+  const liveFeaturesAvailable = liveFeaturesAvailableOn(
+    platform,
+    selectedSttProvider.provider,
+  );
+  const liveFeaturesHint = liveFeaturesAvailable
+    ? null
+    : "Needs Local Parakeet (NVIDIA GPU) on Linux";
   const [isOpen, setIsOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<string>("");
@@ -187,6 +199,9 @@ export const SettingsPanel = ({
             {vadConfig.enabled && (
               <div className="space-y-2">
                 <Label className="text-xs font-medium">While listening</Label>
+                {!liveFeaturesAvailable && (
+                  <p className="text-[10px] text-muted-foreground">{liveFeaturesHint}</p>
+                )}
                 <div className="divide-y divide-border/50 rounded-md border border-border/50">
                   <div className="flex items-start justify-between gap-3 p-2.5">
                     <div className="space-y-0.5">
@@ -198,6 +213,7 @@ export const SettingsPanel = ({
                     </div>
                     <Switch
                       aria-label="Live text"
+                      disabled={!liveFeaturesAvailable}
                       checked={vadConfig.live_text}
                       onCheckedChange={(checked) =>
                         onUpdateVadConfig({ ...vadConfig, live_text: checked })
@@ -213,6 +229,7 @@ export const SettingsPanel = ({
                     </div>
                     <Switch
                       aria-label="Speaker labels"
+                      disabled={!liveFeaturesAvailable}
                       checked={vadConfig.live_speakers}
                       onCheckedChange={(checked) =>
                         onUpdateVadConfig({
@@ -227,6 +244,14 @@ export const SettingsPanel = ({
                   Changes apply to the next capture.
                 </p>
               </div>
+            )}
+
+            {platform === "linux" && (
+              <p className="text-[10px] leading-relaxed text-muted-foreground">
+                Screen-share hiding isn't available on Linux. If you share your
+                screen, share a single window or browser tab, not the whole
+                screen.
+              </p>
             )}
 
             {/* Max Duration - Only for Manual mode */}

@@ -35,3 +35,16 @@ export function sttFallbackFor(platform: AppPlatform): {
     variables: { MODEL: "openai/whisper-large-v3-turbo" },
   };
 }
+
+/**
+ * Whether the live previews (live text and speaker labels) can run with this
+ * provider. macOS has them in-process; elsewhere they come from the local
+ * Parakeet server, so any other provider leaves them inert.
+ */
+export function liveFeaturesAvailableOn(
+  platform: AppPlatform,
+  providerId: string,
+): boolean {
+  if (platform === "macos") return true;
+  return providerId === "local-parakeet";
+}

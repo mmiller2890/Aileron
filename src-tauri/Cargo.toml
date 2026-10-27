@@ -79,6 +79,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 gtk = "0.18"
 libpulse-binding = "2.30.1"
 libpulse-simple-binding = "2.29.0"
+# One Aileron at a time: a second launch brings the running one forward.
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2.5.0"

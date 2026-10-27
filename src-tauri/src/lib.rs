@@ -55,7 +55,23 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     linux_compat::apply();
 
-    let mut builder = tauri::Builder::default()
+    // Registered before every other plugin, so a second launch exits before it
+    // can touch the database, the log or a capture.
+    #[cfg(target_os = "linux")]
+    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(
+        |app, _argv, _cwd| {
+            // The overlay's visibility is the user's: bring the dashboard
+            // forward and leave the bar as it is.
+            if let Err(error) = window::show_dashboard_window(app) {
+                tracing::warn!("Second launch could not show the dashboard: {error}");
+            }
+            tracing::info!("Second launch: brought the running Aileron forward");
+        },
+    ));
+    #[cfg(not(target_os = "linux"))]
+    let builder = tauri::Builder::default();
+
+    let builder = builder
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations("sqlite:assistant.db", db::migrations())
@@ -77,10 +93,8 @@ pub fn run() {
         .plugin(tauri_plugin_keychain::init())
         .plugin(tauri_plugin_shell::init()); // Add shell plugin
     #[cfg(target_os = "macos")]
-    {
-        builder = builder.plugin(tauri_nspanel::init());
-    }
-    let mut builder = builder
+    let builder = builder.plugin(tauri_nspanel::init());
+    let builder = builder
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             window::set_window_height,
@@ -224,9 +238,7 @@ pub fn run() {
 
     // Add macOS-specific permissions plugin
     #[cfg(target_os = "macos")]
-    {
-        builder = builder.plugin(tauri_plugin_macos_permissions::init());
-    }
+    let builder = builder.plugin(tauri_plugin_macos_permissions::init());
 
     let app = builder
         .build(tauri::generate_context!())

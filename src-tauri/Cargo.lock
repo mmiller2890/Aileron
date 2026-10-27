@@ -139,6 +139,7 @@ dependencies = [
  "libpulse-simple-binding",
  "objc2 0.6.2",
  "objc2-app-kit",
+ "reqwest",
  "ringbuf",
  "serde",
  "serde_json",

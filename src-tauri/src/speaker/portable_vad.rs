@@ -36,14 +36,14 @@ impl PortableVad {
 
     /// Feed one hop of capture audio. Returns the probability of the most
     /// recent 32 ms step it completed, or `None` if it completed none (keep
-    /// the previous probability).
-    pub(crate) fn process(&mut self, hop: &[f32]) -> Result<Option<f32>, String> {
+    /// the previous probability), and the hop at 16 kHz for live text.
+    pub(crate) fn process(&mut self, hop: &[f32]) -> Result<(Option<f32>, Vec<f32>), String> {
         let samples_16k = self.resampler.push(hop);
         let probabilities = self
             .model
             .push(&samples_16k)
             .map_err(|error| error.to_string())?;
-        Ok(probabilities.last().copied())
+        Ok((probabilities.last().copied(), samples_16k))
     }
 
     /// Forget all state, as after a skip in the audio.
@@ -60,7 +60,7 @@ mod tests {
     fn run(vad: &mut PortableVad, audio: &[f32]) -> Vec<f32> {
         audio
             .chunks(1024)
-            .filter_map(|hop| vad.process(hop).unwrap())
+            .filter_map(|hop| vad.process(hop).unwrap().0)
             .collect()
     }
 
@@ -78,6 +78,15 @@ mod tests {
         // 16,000 samples at 16 kHz in 512-sample steps; the resampler holds
         // back a few samples, so the last step may not have completed yet.
         assert!((30..=31).contains(&probabilities.len()), "{}", probabilities.len());
+    }
+
+    #[test]
+    fn each_hop_also_comes_back_at_16k_for_live_text() {
+        let mut vad = PortableVad::new(48_000).unwrap();
+        let total: usize = (0..47).map(|_| vad.process(&[0.0; 1024]).unwrap().1.len()).sum();
+        // 47 hops of 1024 at 48 kHz is 16,042 samples at 16 kHz, less the
+        // few the resampler holds back.
+        assert!((16_000..=16_042).contains(&total), "{total}");
     }
 
     #[test]

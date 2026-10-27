@@ -71,6 +71,8 @@ wasapi = "0.19.0"
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # Silero VAD without FluidAudio: a C port with embedded weights, no runtime deps.
 silero-vad-crs = "0.4.0"
+# Already in the tree through tauri-plugin-http: live text from a local server.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Already in the tree through tao/wry: lets the overlay resize on Linux.

@@ -11,6 +11,8 @@ pub(crate) mod turn_feeds;
 pub(crate) mod resample;
 #[cfg(not(target_os = "macos"))]
 pub(crate) mod portable_vad;
+#[cfg(not(target_os = "macos"))]
+pub(crate) mod remote_live_text;
 pub(crate) mod utterance_emitter;
 
 #[cfg(target_os = "macos")]

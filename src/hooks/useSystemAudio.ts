@@ -5,6 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { STORAGE_KEYS } from "@/config/constants";
 import { safeLocalStorage } from "@/lib/storage";
+import { getPlatform } from "@/lib/platform";
+import { liveTextEndpointFor } from "@/lib/live-text-endpoint";
 import {
   fetchSTT,
   fetchAIResponse,
@@ -1099,6 +1101,10 @@ export function useSystemAudio() {
                   await invoke<string>("start_system_audio_capture", {
                     vadConfig: vadConfigRef.current,
                     deviceId: null,
+                    liveTextUrl: liveTextEndpointFor(
+                      selectedSttProviderRef.current.provider,
+                      getPlatform(),
+                    ),
                   });
                 },
               });
@@ -1237,6 +1243,10 @@ export function useSystemAudio() {
             await invoke<string>("start_system_audio_capture", {
               vadConfig: vadConfig,
               deviceId: deviceId,
+              liveTextUrl: liveTextEndpointFor(
+                selectedSttProviderRef.current.provider,
+                getPlatform(),
+              ),
             });
           },
           commitStarted: () => {
@@ -1613,6 +1623,10 @@ export function useSystemAudio() {
           await invoke<string>("start_system_audio_capture", {
             vadConfig: vadConfig,
             deviceId: deviceId,
+            liveTextUrl: liveTextEndpointFor(
+              selectedSttProviderRef.current.provider,
+              getPlatform(),
+            ),
           });
         }
         // Switching to manual: stay armed; the Record button starts a take.

@@ -566,6 +566,9 @@ pub async fn start_system_audio_capture(
     app: AppHandle,
     vad_config: Option<VadConfig>,
     device_id: Option<String>,
+    // Off macOS: a local transcription server (parakeet_server.py) to drive
+    // live text. macOS uses FluidAudio's streaming model instead.
+    live_text_url: Option<String>,
 ) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
     let reservation = state.stream_task.reserve("Capture already running")?;
@@ -653,6 +656,8 @@ pub async fn start_system_audio_capture(
         .map_err(|e| format!("Failed to set capturing state: {}", e))? = true;
 
     #[cfg(target_os = "macos")]
+    let _ = live_text_url;
+    #[cfg(target_os = "macos")]
     let live_text = if vad_config.enabled && vad_config.live_text {
         app.try_state::<crate::stt::SttState>()
             .and_then(|stt_state| stt_state.live_text_model())
@@ -674,7 +679,27 @@ pub async fn start_system_audio_capture(
         None
     };
     #[cfg(not(target_os = "macos"))]
-    let live_text: Option<live_text::LiveTextHandle> = None;
+    let live_text = match live_text_url.filter(|_| vad_config.enabled && vad_config.live_text) {
+        Some(url) => match crate::speaker::remote_live_text::RemoteLiveTextModel::new(url) {
+            Ok(model) => {
+                let emit_app = app.clone();
+                Some(live_text::LiveTextHandle::spawn(Box::new(model), move |event| match event {
+                    live_text::LiveTextEvent::Partial(partial) => {
+                        let _ = emit_app.emit("speech-partial", partial);
+                    }
+                    live_text::LiveTextEvent::Error(error) => {
+                        error!("Live text stopped: {error}");
+                        let _ = emit_app.emit("live-feature-stopped", "live-text");
+                    }
+                }))
+            }
+            Err(error) => {
+                warn!("Live text unavailable: {error}");
+                None
+            }
+        },
+        None => None,
+    };
 
     #[cfg(target_os = "macos")]
     let live_speakers = if vad_config.enabled && vad_config.live_speakers {
@@ -1115,10 +1140,8 @@ async fn run_vad_capture(
                 (resample_duration, vad_started.elapsed(), hop_16k)
             };
             #[cfg(not(target_os = "macos"))]
-            let hop_16k: Vec<f32> = {
+            let hop_16k: Vec<f32> =
                 portable_vad_hop(&mut portable_vad, &mut pending_silero_prob, &raw_mono, "system audio");
-                Vec::new()
-            };
 
             let is_speech = match pending_silero_prob {
                 // Mic-style hysteresis on the raw probability.
@@ -1142,7 +1165,10 @@ async fn run_vad_capture(
                         samples_for_local_asr(&lead_in, sr).unwrap_or_default()
                     };
                     #[cfg(not(target_os = "macos"))]
-                    let lead_in_16k = Vec::new();
+                    let lead_in_16k = {
+                        let lead_in: Vec<f32> = pre_speech.iter().copied().collect();
+                        to_16k(&lead_in, sr)
+                    };
                     live_turns.begin(lead_in_16k);
 
                     // Include pre-speech buffer for natural sound
@@ -1180,7 +1206,7 @@ async fn run_vad_capture(
                     #[cfg(target_os = "macos")]
                     let carried_16k = samples_for_local_asr(&carried, sr).unwrap_or_default();
                     #[cfg(not(target_os = "macos"))]
-                    let carried_16k = Vec::new();
+                    let carried_16k = to_16k(&carried, sr);
                     live_turns.begin(carried_16k);
                     speech_chunks = carried.len() / config.hop_size;
                     speech_buffer = carried;
@@ -1419,30 +1445,37 @@ fn start_portable_vad(sr: u32, source: &str) -> Option<PortableVad> {
 }
 
 /// Feed one hop to the portable Silero. Updates `probability` when a step
-/// completed; on failure drops to the loudness threshold for the rest of the
-/// capture.
+/// completed and returns the hop at 16 kHz (empty without Silero); on failure
+/// drops to the loudness threshold for the rest of the capture.
 #[cfg(not(target_os = "macos"))]
 fn portable_vad_hop(
     vad: &mut Option<PortableVad>,
     probability: &mut Option<f32>,
     hop: &[f32],
     source: &str,
-) {
-    let failed = match vad.as_mut().map(|vad| vad.process(hop)) {
-        Some(Ok(Some(p))) => {
-            *probability = Some(p);
-            false
+) -> Vec<f32> {
+    match vad.as_mut().map(|vad| vad.process(hop)) {
+        Some(Ok((step, samples_16k))) => {
+            if let Some(p) = step {
+                *probability = Some(p);
+            }
+            samples_16k
         }
         Some(Err(error)) => {
             warn!("Silero VAD failed for {source}; using the loudness threshold: {error}");
-            true
+            *vad = None;
+            *probability = None;
+            Vec::new()
         }
-        _ => false,
-    };
-    if failed {
-        *vad = None;
-        *probability = None;
+        None => Vec::new(),
     }
+}
+
+/// Capture audio at 16 kHz for a live-text lead-in or carry-over, off macOS
+/// (macOS uses the native converter).
+#[cfg(not(target_os = "macos"))]
+fn to_16k(samples: &[f32], sr: u32) -> Vec<f32> {
+    crate::speaker::resample::StreamingResampler::new(sr).push(samples)
 }
 
 fn fallback_vad_is_speech(samples: &[f32], config: &VadConfig) -> bool {
@@ -2836,7 +2869,7 @@ async fn run_mic_dictation(
                 }
             }
             #[cfg(not(target_os = "macos"))]
-            portable_vad_hop(&mut portable_vad, &mut prob, &hop_chunk, "dictation");
+            let _ = portable_vad_hop(&mut portable_vad, &mut prob, &hop_chunk, "dictation");
             let is_speech = match prob {
                 Some(p) => silero_is_speech(in_speech, p),
                 None => fallback_vad_is_speech(&hop_chunk, &config),

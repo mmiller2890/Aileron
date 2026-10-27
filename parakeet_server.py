@@ -26,7 +26,9 @@ import time
 DEFAULT_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
 SAMPLE_RATE = 16_000
 
-# Cap audio uploads at 50 MiB so a local/LAN peer cannot OOM the machine.
+# Cap audio uploads at 50 MiB. Starlette spools the body to a temp file
+# before the handler runs, so this bounds what is read into memory, not the
+# disk a peer can fill; binding to loopback by default is the real guard.
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 INSTALL_HINT = (

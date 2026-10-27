@@ -19,6 +19,11 @@ pub fn setup_main_window(app: &mut App) -> Result<(), Box<dyn std::error::Error>
 
     position_window_top_center(&window, TOP_OFFSET)?;
 
+    // GTK sizes a non-resizable window from its contents and ignores resizes
+    // from code, so allow resizes once here instead of on every height change.
+    #[cfg(target_os = "linux")]
+    prepare_linux_resize(&window);
+
     // Set window as non-focusable on Windows
     // #[cfg(target_os = "windows")]
     // {
@@ -109,9 +114,6 @@ pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<()
         .unwrap_or(f64::MAX);
     let clamped = (height as f64).clamp(1.0, max_logical_height);
 
-    #[cfg(target_os = "linux")]
-    prepare_linux_resize(&window);
-
     let new_size = LogicalSize::new(600.0, clamped);
     window
         .set_size(Size::Logical(new_size))
@@ -187,6 +189,11 @@ pub fn create_dashboard_window<R: Runtime>(
         .min_inner_size(800.0, 600.0)
         .content_protected(true)
         .visible(true);
+
+    // Linux windows are opaque, and WebKit paints its default white before the
+    // page does: paint the theme background instead of flashing.
+    #[cfg(target_os = "linux")]
+    let base_builder = base_builder.background_color(tauri::window::Color(13, 19, 16, 255));
 
     #[cfg(debug_assertions)]
     let base_builder = base_builder.devtools(true);

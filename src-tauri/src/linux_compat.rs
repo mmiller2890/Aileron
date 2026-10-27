@@ -16,6 +16,10 @@ pub(crate) fn needs_dmabuf_workaround(nvidia_driver_loaded: bool, already_set: b
 /// before anything else starts threads or initialises GTK.
 pub(crate) fn apply() {
     const VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+    // Deliberately broad: any loaded NVIDIA driver, not just the one drawing
+    // the session. A missed trigger means the app does not open at all, while
+    // an extra one only turns off DMA-BUF rendering for a small UI. A value the
+    // user set is left alone.
     let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
     if needs_dmabuf_workaround(nvidia, std::env::var_os(VAR).is_some()) {
         std::env::set_var(VAR, "1");

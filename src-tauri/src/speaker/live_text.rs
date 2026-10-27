@@ -9,7 +9,10 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// About two seconds of capture hops (one message per ~21 ms hop).
+/// About two seconds of capture hops (one message per ~21 ms hop). A remote
+/// model can hold the worker for a whole request, so one slow call is enough
+/// to overflow this and drop live-text audio until the next turn; the final
+/// transcript is unaffected.
 pub(crate) const LIVE_TEXT_QUEUE_MESSAGES: usize = 96;
 /// Hops are gathered into pieces of this size before the model sees them:
 /// 320 ms at 16 kHz, the size of the model's own chunks. Feeding every ~21 ms

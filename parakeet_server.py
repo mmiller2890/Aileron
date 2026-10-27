@@ -26,9 +26,7 @@ import time
 DEFAULT_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
 SAMPLE_RATE = 16_000
 
-# Cap audio uploads at 50 MiB. Starlette spools the body to a temp file
-# before the handler runs, so this bounds what is read into memory, not the
-# disk a peer can fill; binding to loopback by default is the real guard.
+# Cap audio uploads at 50 MiB so a local/LAN peer cannot OOM the machine.
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 INSTALL_HINT = (
@@ -60,26 +58,24 @@ device = "cpu"
 # Requests run on FastAPI's threadpool; one GPU model serves them one at a time.
 model_lock = threading.Lock()
 
+
 # --- Live speaker labels -------------------------------------------------
 #
-# NeMo 3.0 exposes Sortformer's streaming path as
-# `forward_streaming_step(processed_signal, processed_signal_length,
-# streaming_state, total_preds, left_offset, right_offset)`, with the state
-# created by `sortformer_modules.init_streaming_state(...)` and the chunks
-# produced by `sortformer_modules.streaming_feat_loader(...)`. Frame rate is
-# 80 ms: the preprocessor's 10 ms stride times `subsampling_factor: 8`.
-#
-# The state carries the speaker cache across requests, so identity survives
-# turns and memory stays bounded however long the interview runs. One session
-# exists at a time (one capture).
+# NeMo's streaming entry point is `forward_streaming_step`, but its step is
+# `chunk_len * subsampling_factor` feature frames (188 * 8 here, about 10 s of
+# audio): it is built for large chunks, not for 80 ms updates, and a smaller
+# chunk fails in the encoder's fixed-width pre-encode. `forward_streaming` is
+# the model's own whole-input path and chunks internally, so a turn is
+# diarized by running it over the session so far. Inference over a prefix is
+# deterministic, which is what keeps a slot bound to the same voice across
+# turns.
 SORTFORMER_MODEL = "nvidia/diar_streaming_sortformer_4spk-v2"
 SPEAKER_THRESHOLD = 0.5
 SPEAKER_FRAME_SECS = 0.08
+MAX_SPEAKER_SESSION_SAMPLES = SAMPLE_RATE * 150
 speaker_model = None
-speaker_state = None
-speaker_total_preds = None
-speaker_feat_offset = 0
-speaker_turn_start_frame = 0
+speaker_samples = np.zeros(0, dtype=np.float32)
+speaker_turn_start_sample = 0
 
 
 def load_speaker_model() -> None:
@@ -91,57 +87,20 @@ def load_speaker_model() -> None:
         speaker_model = loaded
 
 
-def reset_speaker_session() -> None:
-    global speaker_state, speaker_total_preds, speaker_feat_offset, speaker_turn_start_frame
-    load_speaker_model()
-    if speaker_model is None:
-        raise RuntimeError("the sortformer model did not load")
-    speaker_state = speaker_model.sortformer_modules.init_streaming_state(
-        batch_size=1, async_streaming=speaker_model.async_streaming, device=device
-    )
-    speaker_total_preds = torch.zeros(
-        (1, 0, speaker_model.sortformer_modules.n_spk), device=device
-    )
-    speaker_feat_offset = 0
-    speaker_turn_start_frame = 0
-
-
-def current_turn_counts() -> list[int]:
-    """Active 80 ms frames per speaker slot since the turn began."""
-    if speaker_total_preds is None or speaker_total_preds.shape[1] == 0:
+def diarize_counts(start_sample: int) -> list[int]:
+    """Active 80 ms frames per speaker slot from `start_sample` to the end."""
+    if speaker_model is None or speaker_samples.size == 0:
         return [0, 0, 0, 0]
-    frames = speaker_total_preds[0][speaker_turn_start_frame :]
-    if frames.shape[0] == 0:
-        return [0, 0, 0, 0]
-    active = (frames > SPEAKER_THRESHOLD).sum(dim=0)
-    return [int(count) for count in active.tolist()]
-
-
-def feed_speaker_audio(audio: np.ndarray) -> list[int]:
-    """Diarize one more piece of the open turn."""
-    global speaker_state, speaker_total_preds, speaker_feat_offset
-    if speaker_model is None:
-        raise RuntimeError("the sortformer session was not started")
-    if audio.size == 0:
-        return current_turn_counts()
-    signal = torch.tensor(audio, dtype=torch.float32, device=device)[None, :]
+    signal = torch.tensor(speaker_samples, dtype=torch.float32, device=device)[None, :]
     length = torch.tensor([signal.shape[1]], device=device)
     with torch.inference_mode():
         feats, feat_len = speaker_model.preprocessor(input_signal=signal, length=length)
-        offset = torch.tensor([speaker_feat_offset], dtype=torch.long, device=device)
-        for _, chunk, chunk_len, left, right in speaker_model.sortformer_modules.streaming_feat_loader(
-            feat_seq=feats, feat_seq_length=feat_len, feat_seq_offset=offset
-        ):
-            speaker_state, speaker_total_preds = speaker_model.forward_streaming_step(
-                processed_signal=chunk,
-                processed_signal_length=chunk_len,
-                streaming_state=speaker_state,
-                total_preds=speaker_total_preds,
-                left_offset=left,
-                right_offset=right,
-            )
-        speaker_feat_offset += int(feats.shape[2])
-    return current_turn_counts()
+        preds = speaker_model.forward_streaming(feats, feat_len)
+    first_frame = int(start_sample / (SAMPLE_RATE * SPEAKER_FRAME_SECS))
+    frames = preds[0][first_frame:]
+    if frames.shape[0] == 0:
+        return [0, 0, 0, 0]
+    return [int(count) for count in (frames > SPEAKER_THRESHOLD).sum(dim=0).tolist()]
 
 
 def load_model(name: str, requested_device: str) -> None:
@@ -219,13 +178,16 @@ def health():
 
 @app.post("/v1/speakers/reset")
 def speakers_reset():
+    global speaker_samples, speaker_turn_start_sample
     with model_lock:
-        reset_speaker_session()
+        speaker_samples = np.zeros(0, dtype=np.float32)
+        speaker_turn_start_sample = 0
     return {}
 
 
 @app.post("/v1/speakers/feed")
 def speakers_feed(file: UploadFile = File(...)):
+    global speaker_samples, speaker_turn_start_sample
     audio_bytes = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(audio_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Audio chunk exceeds the upload limit")
@@ -234,21 +196,22 @@ def speakers_feed(file: UploadFile = File(...)):
     except Exception as error:  # unreadable or empty upload
         raise HTTPException(status_code=400, detail=f"Could not read audio: {error}") from error
     with model_lock:
-        if speaker_state is None:
-            reset_speaker_session()
-        counts = feed_speaker_audio(audio)
-    return {"counts": counts}
+        trimmed = speaker_samples.size + audio.size > MAX_SPEAKER_SESSION_SAMPLES
+        speaker_samples = np.concatenate([speaker_samples, audio])[-MAX_SPEAKER_SESSION_SAMPLES:]
+        if trimmed:
+            # The window slid past the turn's start: count from what is left.
+            speaker_turn_start_sample = 0
+    # Diarizing happens when the turn ends: a partial label is not worth a
+    # model run per 320 ms of audio.
+    return {"counts": [0, 0, 0, 0]}
 
 
 @app.post("/v1/speakers/end_turn")
 def speakers_end_turn():
-    global speaker_turn_start_frame
+    global speaker_turn_start_sample
     with model_lock:
-        if speaker_state is None:
-            reset_speaker_session()
-        counts = current_turn_counts()
-        if speaker_total_preds is not None:
-            speaker_turn_start_frame = int(speaker_total_preds.shape[1])
+        counts = diarize_counts(speaker_turn_start_sample)
+        speaker_turn_start_sample = int(speaker_samples.size)
     return {"counts": counts}
 
 

@@ -226,9 +226,17 @@ def main():
     parser.add_argument("--device", default="auto", help="Device: auto, cuda or cpu")
     args = parser.parse_args()
 
-    with model_lock:
-        load_model(args.model, args.device)
-    print(f"Model ready on {device}. Server starting on http://{args.host}:{args.port}")
+    # Serve immediately and load in the background: /health can then report
+    # "loading" for the ~20 s the models take, and Aileron tells the user the
+    # server is starting rather than telling them it is not running (which is
+    # what happened when the models loaded before uvicorn bound the port).
+    def warm() -> None:
+        with model_lock:
+            load_model(args.model, args.device)
+        print(f"Model ready on {device}. Requests are served from now on.")
+
+    threading.Thread(target=warm, name="model-warmup", daemon=True).start()
+    print(f"Server starting on http://{args.host}:{args.port} while the models load")
     uvicorn.run(app, host=args.host, port=args.port)
 
 

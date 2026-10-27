@@ -20,6 +20,7 @@ Both platforms are first-class. The **Linux** build is what runs on the intervie
 - macOS: FluidAudio's streaming ASR and Sortformer, in-process.
 - Linux/Windows: the same model family through `parakeet_server.py` over loopback — `src-tauri/src/speaker/remote_live_text.rs` re-transcribes the turn in progress for live text, `remote_live_speakers.rs` asks the server for per-slot activity from a persistent Sortformer streaming state. Both are previews: the final transcript comes from `fetchSTT`.
 - With any other provider (cloud, or Local Whisper) the two switches are disabled on Linux; they say why.
+- **Off-macOS speaker labels are best-effort and currently poor.** Measured on a real two-speaker recording: 43 model runs, 3 of 14 transcript lines labelled, and consecutive turns landed on slots 1, 3 and 4 — Sortformer assigns a slot per run instead of keeping one bound to a voice. It is left enabled but nobody should trust the labels. Making it right means the persistent step design (the streaming step is `chunk_len * subsampling_factor` = 188 * 8 feature frames, about 10 s, not the 80 ms the capture loop emits) rather than threshold tuning. Live text on Linux has no such caveat: it is re-transcribed from Rust every ~320 ms and matched the audio in use.
 
 ## Commands
 

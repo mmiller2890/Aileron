@@ -34,7 +34,7 @@ impl RemoteLiveSpeakerModel {
         Ok(Self { base_url, client })
     }
 
-    fn post(&self, path: &str, body: Option<Vec<u8>>) -> Result<SlotCounts, String> {
+    fn post(&self, path: &str, body: Option<Vec<u8>>) -> Result<serde_json::Value, String> {
         let url = format!("{}{path}", self.base_url.trim_end_matches('/'));
         let request = self.client.post(url);
         let request = match body {
@@ -52,24 +52,29 @@ impl RemoteLiveSpeakerModel {
             if !response.status().is_success() {
                 return Err(format!("Speaker server returned {}", response.status()));
             }
-            let value: serde_json::Value =
-                response.json().await.map_err(|error| error.to_string())?;
-            slot_counts_from(&value)
+            response
+                .json()
+                .await
+                .map_err(|error| error.to_string())
         })
     }
 }
 
 impl LiveSpeakerModel for RemoteLiveSpeakerModel {
+    /// Starts a session. The server answers `{}`: there is nothing to count
+    /// yet, so the body is ignored rather than parsed as slot counts.
     fn reset(&mut self) -> Result<(), String> {
         self.post("/reset", None).map(|_| ())
     }
 
     fn feed(&mut self, samples_16k: &[f32]) -> Result<SlotCounts, String> {
-        self.post("/feed", Some(multipart(samples_16k)))
+        let value = self.post("/feed", Some(multipart(samples_16k)))?;
+        slot_counts_from(&value)
     }
 
     fn end_turn(&mut self) -> Result<SlotCounts, String> {
-        self.post("/end_turn", None)
+        let value = self.post("/end_turn", None)?;
+        slot_counts_from(&value)
     }
 }
 
@@ -144,8 +149,13 @@ mod tests {
                 }
                 let mut body = vec![0u8; length];
                 reader.read_exact(&mut body).unwrap();
+                let is_reset = path.ends_with("/reset");
                 log.lock().unwrap().push((path, body.len()));
-                let json = format!("{{\"counts\":{counts}}}");
+                let json = if is_reset {
+                    "{}".to_string()
+                } else {
+                    format!("{{\"counts\":{counts}}}")
+                };
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
@@ -162,6 +172,15 @@ mod tests {
         let (base, _) = fake_server("[1,2,3,4]");
         let mut model = RemoteLiveSpeakerModel::new(base).unwrap();
         assert_eq!(model.feed(&vec![0.1; 5_120]).unwrap(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_reset_is_not_parsed_as_slot_counts() {
+        // The server answers a reset with `{}`; treating that as a missing
+        // count would stop speaker labels for the whole session.
+        let (base, _) = fake_server("[0,0,0,0]");
+        let mut model = RemoteLiveSpeakerModel::new(base).unwrap();
+        assert!(model.reset().is_ok());
     }
 
     #[test]

@@ -771,9 +771,13 @@ pub async fn start_system_audio_capture(
         None => None,
     };
 
+    // What is actually running, not what was asked for: off macOS a live
+    // feature with no server behind it is asked for but never starts.
     let started_summary = format!(
         "vad={}, live_text={}, live_speakers={}",
-        vad_config.enabled, vad_config.live_text, vad_config.live_speakers
+        vad_config.enabled,
+        live_text.is_some(),
+        live_speakers.is_some()
     );
     let task = tokio::spawn(async move {
         if vad_config.enabled {

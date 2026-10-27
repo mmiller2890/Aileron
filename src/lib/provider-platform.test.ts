@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { SPEECH_TO_TEXT_PROVIDERS } from "@/config/stt.constants";
 import {
   liveFeaturesAvailableOn,
+  liveSpeakersAvailableOn,
   provider_visible_on,
   sttFallbackFor,
 } from "./provider-platform";
@@ -57,5 +58,18 @@ describe("liveFeaturesAvailableOn", () => {
     expect(liveFeaturesAvailableOn("linux", "local-parakeet")).toBe(true);
     expect(liveFeaturesAvailableOn("linux", "local-whisper")).toBe(false);
     expect(liveFeaturesAvailableOn("linux", "groq")).toBe(false);
+  });
+});
+
+describe("liveSpeakersAvailableOn", () => {
+  it("offers speaker labels on macOS with any provider", () => {
+    expect(liveSpeakersAvailableOn("macos", "local-fluidaudio")).toBe(true);
+    expect(liveSpeakersAvailableOn("macos", "groq")).toBe(true);
+  });
+
+  it("offers none off macOS until the server's labels can be trusted", () => {
+    expect(liveSpeakersAvailableOn("linux", "local-parakeet")).toBe(false);
+    expect(liveSpeakersAvailableOn("windows", "local-parakeet")).toBe(false);
+    expect(liveSpeakersAvailableOn("linux", "local-whisper")).toBe(false);
   });
 });

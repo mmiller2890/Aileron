@@ -149,8 +149,8 @@ Models: `faster-whisper-tiny` · `base` · `small` · `medium` · `large-v2` · 
 <summary><b>parakeet_server.py</b> — NVIDIA Parakeet TDT v3 on a CUDA GPU (Linux and Windows)</summary>
 
 The model the Mac runs in-process, served over loopback. It also drives live
-text and speaker labels on Linux, so a capture shows words as they are spoken
-and names who said them.
+text on Linux, so a capture shows words as they are spoken. Speaker labels are
+not available on Linux yet.
 
 ```bash
 python3.12 -m venv ~/.local/share/aileron-asr/venv
@@ -158,8 +158,8 @@ python3.12 -m venv ~/.local/share/aileron-asr/venv
 ~/.local/share/aileron-asr/venv/bin/python parakeet_server.py --port 8001
 ```
 
-Batch at `http://localhost:8001/v1/audio/transcriptions`, and
-`/v1/speakers/{reset,feed,end_turn}` for speaker labels. Select **`local-parakeet`**
+Batch at `http://localhost:8001/v1/audio/transcriptions` (the
+`/v1/speakers/*` endpoints are experimental and unused). Select **`local-parakeet`**
 in speech settings. `/health` reports `loading` while the models warm up.
 
 To keep it running across logins, a user unit (`~/.config/systemd/user/aileron-parakeet.service`):

@@ -1,4 +1,5 @@
 import { SPEECH_TO_TEXT_PROVIDERS } from "@/config/stt.constants";
+import { liveSpeakersAvailableOn } from "@/lib/provider-platform";
 
 const PARAKEET_ID = "local-parakeet";
 
@@ -34,13 +35,16 @@ export function liveTextEndpointFor(
 /**
  * Where the capture loop gets live speaker labels off macOS: the same local
  * server's speaker root (see remote_live_speakers.rs), which owns Sortformer's
- * streaming state so a slot keeps naming the same voice across turns.
+ * streaming state so a slot keeps naming the same voice across turns. Null
+ * while REMOTE_SPEAKER_LABELS is off.
  */
 export function liveSpeakersEndpointFor(
   providerId: string,
   platform: "macos" | "windows" | "linux",
 ): string | null {
-  if (platform === "macos" || providerId !== PARAKEET_ID) return null;
+  if (platform === "macos" || !liveSpeakersAvailableOn(platform, providerId)) {
+    return null;
+  }
   const origin = parakeetOrigin();
   return origin ? `${origin}/v1/speakers` : null;
 }

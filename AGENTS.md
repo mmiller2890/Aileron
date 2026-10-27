@@ -4,7 +4,7 @@
 
 Assistant is a local-only fork of an open-source Pluely project — a Tauri 2 + React desktop app that provides a stealth AI assistant overlay for meetings, interviews, and conversations. This fork removes all cloud features (hosted API, license activation, auto-updater, telemetry) and defaults to local providers (Ollama for AI; fluidaudio-rs on macOS, or a local speech server on Linux/Windows).
 
-Both platforms are first-class. The **Linux** build is what runs on the interview machine (Nobara 44, KDE Plasma, Wayland, RTX 3080) and gets the Fedora `.rpm`; it uses a local NeMo server for transcription, live text and speaker labels. macOS keeps the same model family in-process through FluidAudio.
+Both platforms are first-class. The **Linux** build is what runs on the interview machine (Nobara 44, KDE Plasma, Wayland, RTX 3080) and gets the Fedora `.rpm`; it uses a local NeMo server for transcription and live text (speaker labels are off on Linux, see below). macOS keeps the same model family in-process through FluidAudio.
 
 ## Tech Stack
 
@@ -20,7 +20,7 @@ Both platforms are first-class. The **Linux** build is what runs on the intervie
 - macOS: FluidAudio's streaming ASR and Sortformer, in-process.
 - Linux/Windows: the same model family through `parakeet_server.py` over loopback — `src-tauri/src/speaker/remote_live_text.rs` re-transcribes the turn in progress for live text, `remote_live_speakers.rs` asks the server for per-slot activity from a persistent Sortformer streaming state. Both are previews: the final transcript comes from `fetchSTT`.
 - With any other provider (cloud, or Local Whisper) the two switches are disabled on Linux; they say why.
-- **Off-macOS speaker labels are best-effort and currently poor.** Measured on a real two-speaker recording: 43 model runs, 3 of 14 transcript lines labelled, and consecutive turns landed on slots 1, 3 and 4 — Sortformer assigns a slot per run instead of keeping one bound to a voice. It is left enabled but nobody should trust the labels. Making it right means the persistent step design (the streaming step is `chunk_len * subsampling_factor` = 188 * 8 feature frames, about 10 s, not the 80 ms the capture loop emits) rather than threshold tuning. Live text on Linux has no such caveat: it is re-transcribed from Rust every ~320 ms and matched the audio in use.
+- **Off-macOS speaker labels are best-effort and currently poor.** Measured on a real two-speaker recording: 43 model runs, 3 of 14 transcript lines labelled, and consecutive turns landed on slots 1, 3 and 4 — Sortformer assigns a slot per run instead of keeping one bound to a voice. So they are turned off: `REMOTE_SPEAKER_LABELS` in `src/lib/provider-platform.ts` is `false`, the app sends no speaker audio off macOS, and the settings switch says "Not available on Linux yet". Each turn's diarizing also took ~0.3 s under the server's single model lock, delaying that turn's final transcript; turning labels back on must fix that too. Making it right means the persistent step design (the streaming step is `chunk_len * subsampling_factor` = 188 * 8 feature frames, about 10 s, not the 80 ms the capture loop emits) rather than threshold tuning. Live text on Linux has no such caveat: it is re-transcribed from Rust every ~320 ms and matched the audio in use.
 
 ## Commands
 
@@ -113,7 +113,7 @@ src-tauri/
 ### Local STT
 
 - **macOS (default):** `local-fluidaudio` uses fluidaudio-rs in-process CoreML ASR on macOS 14+ Apple Silicon. No Python server required. The pipeline is: VAD detects speech → Rust emits `speech-detected` with a base64 WAV → frontend `fetchSTT()` invokes `stt_transcribe_speech` → Rust returns final text.
-- **Linux/Windows:** `local-parakeet` uses `parakeet_server.py` (NeMo Parakeet TDT v3 on CUDA) on `localhost:8001` and is what live text and speaker labels run through; `local-whisper` uses faster-whisper via `whisper_server.py` on `localhost:8000` and gives final transcripts only. Neither server is packaged — the app checks both at startup, picks Parakeet when Whisper is not running, and says what to start when a capture begins with the server down.
+- **Linux/Windows:** `local-parakeet` uses `parakeet_server.py` (NeMo Parakeet TDT v3 on CUDA) on `localhost:8001` and is what live text runs through; `local-whisper` uses faster-whisper via `whisper_server.py` on `localhost:8000` and gives final transcripts only. Neither server is packaged — the app checks both at startup, picks Parakeet when Whisper is not running, and says what to start when a capture begins with the server down.
 - **Linux specifics:** PulseAudio/PipeWire capture from the sink's monitor source, GTK window sizing workaround, opaque windows (`tauri.linux.conf.json`), `WEBKIT_DISABLE_DMABUF_RENDERER=1` when an NVIDIA driver is loaded. Global shortcuts go through X11 grabs, which KDE and GNOME honour under Wayland via XWayland. **Screen-share hiding does not exist on Linux** (`contentProtected` is a no-op in tao) — do not claim it.
 - `whisper_server.py` exposes `POST /v1/audio/transcriptions` (OpenAI-compatible).
 - Tauri capabilities in `src-tauri/capabilities/` whitelist `localhost:8000` for the whisper server.

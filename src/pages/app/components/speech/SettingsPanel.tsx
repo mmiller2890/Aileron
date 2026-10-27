@@ -32,7 +32,10 @@ import {
 import { cn } from "@/lib/utils";
 import { useApp } from "@/contexts";
 import { getPlatform } from "@/lib/platform";
-import { liveFeaturesAvailableOn } from "@/lib/provider-platform";
+import {
+  liveFeaturesAvailableOn,
+  liveSpeakersAvailableOn,
+} from "@/lib/provider-platform";
 
 // Sensitivity presets for simpler UX
 const SENSITIVITY_PRESETS = {
@@ -87,7 +90,11 @@ export const SettingsPanel = ({
   );
   const liveFeaturesHint = liveFeaturesAvailable
     ? null
-    : "Needs Local Parakeet (NVIDIA GPU) on Linux";
+    : "Live text needs Local Parakeet (NVIDIA GPU) on Linux";
+  const liveSpeakersAvailable = liveSpeakersAvailableOn(
+    platform,
+    selectedSttProvider.provider,
+  );
   const [isOpen, setIsOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<string>("");
@@ -224,13 +231,15 @@ export const SettingsPanel = ({
                     <div className="space-y-0.5">
                       <p className="text-xs font-medium">Speaker labels</p>
                       <p className="text-[10px] text-muted-foreground">
-                        Marks each line with who said it, up to four speakers.
+                        {liveSpeakersAvailable
+                          ? "Marks each line with who said it, up to four speakers."
+                          : "Not available on Linux yet."}
                       </p>
                     </div>
                     <Switch
                       aria-label="Speaker labels"
-                      disabled={!liveFeaturesAvailable}
-                      checked={vadConfig.live_speakers}
+                      disabled={!liveSpeakersAvailable}
+                      checked={liveSpeakersAvailable && vadConfig.live_speakers}
                       onCheckedChange={(checked) =>
                         onUpdateVadConfig({
                           ...vadConfig,

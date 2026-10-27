@@ -27,10 +27,11 @@ describe("liveTextEndpointFor", () => {
 });
 
 describe("liveSpeakersEndpointFor", () => {
-  it("labels speakers through the same local server off macOS", () => {
-    expect(liveSpeakersEndpointFor("local-parakeet", "linux")).toBe(
-      "http://localhost:8001/v1/speakers",
-    );
+  it("sends no speaker audio off macOS while the server's labels are unreliable", () => {
+    // Measured on the PC: 3 of 14 lines labelled, slots jumping between turns,
+    // and ~0.3 s of diarizing per turn holding the lock finals need.
+    expect(liveSpeakersEndpointFor("local-parakeet", "linux")).toBeNull();
+    expect(liveSpeakersEndpointFor("local-parakeet", "windows")).toBeNull();
   });
 
   it("leaves macOS to FluidAudio's streaming diarizer", () => {

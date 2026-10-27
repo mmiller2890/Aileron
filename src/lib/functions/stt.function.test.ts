@@ -461,3 +461,51 @@ describe("https STT provider URLs use the global fetch", () => {
     expect(form.get("media")).toBeInstanceOf(Blob);
   });
 });
+
+describe("local Parakeet final transcripts", () => {
+  const parakeet = {
+    id: "local-parakeet",
+    curl: `curl -X POST "http://localhost:8001/v1/audio/transcriptions" \\\n      -F "file={{AUDIO}}"`,
+    responseContentPath: "text",
+    platform: "windows-linux",
+  } as TYPE_PROVIDER;
+
+  const withUtterance = {
+    provider: parakeet,
+    selectedProvider: {
+      provider: "local-parakeet",
+      variables: {},
+    },
+    audio: new Blob(["wav"], { type: "audio/wav" }),
+    utteranceId: "utterance-9",
+  };
+
+  it("transcribes from Rust and never uploads the audio", async () => {
+    invokeMock.mockResolvedValueOnce("hello there");
+
+    await expect(fetchSTT(withUtterance)).resolves.toBe("hello there");
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "stt_transcribe_via_local_server",
+      {
+        utteranceId: "utterance-9",
+        endpoint: "http://localhost:8001/v1/audio/transcriptions",
+      },
+    );
+    expect(tauriFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uploads instead when the utterance has aged out of the cache", async () => {
+    invokeMock.mockRejectedValueOnce(
+      new Error("UTTERANCE_CACHE_MISS: Utterance utterance-9 is no longer cached"),
+    );
+    tauriFetchMock.mockResolvedValueOnce({
+      ok: true,
+      text: vi.fn().mockResolvedValue(JSON.stringify({ text: "uploaded" })),
+    });
+
+    await expect(fetchSTT(withUtterance)).resolves.toBe("uploaded");
+
+    expect(tauriFetchMock).toHaveBeenCalled();
+  });
+});

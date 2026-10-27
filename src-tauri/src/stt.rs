@@ -1220,6 +1220,181 @@ pub async fn stt_transcribe_utterance(
         .map_err(|e| e.to_string())?
 }
 
+/// Transcribe a cached utterance through a local OpenAI-compatible server.
+///
+/// The UI used to decode the utterance's WAV and hand every sample back over
+/// IPC for this; Rust posts a 16 kHz WAV itself, so nothing crosses IPC but the
+/// id and the text.
+#[tauri::command]
+pub async fn stt_transcribe_via_local_server(
+    utterance_id: String,
+    endpoint: String,
+    store: State<'_, UtteranceStore>,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (utterance_id, endpoint, store);
+        return Err("A local server only transcribes off macOS".to_string());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        transcribe_cached_via_local_server(&store, &utterance_id, &endpoint).await
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn transcribe_cached_via_local_server(
+    store: &UtteranceStore,
+    utterance_id: &str,
+    endpoint: &str,
+) -> Result<String, String> {
+    if !crate::speaker::remote_live_text::is_local_endpoint(endpoint) {
+        return Err(format!("Only a local server is used, not {endpoint}"));
+    }
+    let cached = store.take(utterance_id).ok_or_else(|| {
+        format!("{UTTERANCE_CACHE_MISS_PREFIX} Utterance {utterance_id} is no longer cached")
+    })?;
+    // The cache holds capture-rate samples; the server wants 16 kHz mono.
+    let samples_16k = crate::speaker::resample::StreamingResampler::new(cached.source_sample_rate)
+        .push(&cached.source_samples);
+    post_wav_to_local_server(endpoint, &samples_16k).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn post_wav_to_local_server(endpoint: &str, samples_16k: &[f32]) -> Result<String, String> {
+    const BOUNDARY: &str = "aileron-final-boundary";
+    let mut body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"turn.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&crate::speaker::remote_live_text::wav_16k(samples_16k));
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post(endpoint)
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Speech server returned {}", response.status()));
+    }
+    let value: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
+    Ok(value["text"].as_str().unwrap_or_default().trim().to_string())
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod local_server_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// Answers every request with `{"text":" hello "}` and records the WAV
+    /// bytes it was sent.
+    fn fake_server() -> (String, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/audio/transcriptions", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).unwrap();
+                log.lock().unwrap().push(body);
+                let json = "{\"text\":\" hello \"}";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                )
+                .unwrap();
+            }
+        });
+        (url, seen)
+    }
+
+    fn store_with(samples: Vec<f32>, rate: u32) -> UtteranceStore {
+        let store = UtteranceStore::default();
+        let duration = samples.len() as f64 / rate as f64;
+        store
+            .put_capture(samples.clone(), None, rate, duration, samples)
+            .expect("utterance cached");
+        store
+    }
+
+    #[test]
+    fn a_cached_capture_rate_utterance_is_posted_as_16k_and_returns_the_text() {
+        let (url, seen) = fake_server();
+        let store = UtteranceStore::default();
+        let mut samples = vec![0.1f32; 48_000];
+        let id = store
+            .put_capture(samples.clone(), None, 48_000, 1.0, samples.clone())
+            .expect("cached");
+        let text = tauri::async_runtime::block_on(transcribe_cached_via_local_server(
+            &store, &id, &url,
+        ))
+        .expect("transcribed");
+        assert_eq!(text, "hello");
+
+        let body = seen.lock().unwrap()[0].clone();
+        let riff = body.windows(4).position(|w| w == b"RIFF").expect("wav");
+        let header = &body[riff..riff + 44];
+        assert_eq!(u32::from_le_bytes(header[24..28].try_into().unwrap()), 16_000);
+        // A second at 48 kHz is 16 000 samples at 16 kHz, in 2-byte PCM.
+        let data_len = u32::from_le_bytes(header[40..44].try_into().unwrap());
+        assert!((31_000..=32_000).contains(&data_len), "{data_len}");
+        samples.clear();
+    }
+
+    #[test]
+    fn a_missing_utterance_reports_the_cache_miss_the_ui_falls_back_on() {
+        let store = UtteranceStore::default();
+        let error = tauri::async_runtime::block_on(transcribe_cached_via_local_server(
+            &store,
+            "gone",
+            "http://127.0.0.1:8001/v1/audio/transcriptions",
+        ))
+        .expect_err("must fail");
+        assert!(error.starts_with(UTTERANCE_CACHE_MISS_PREFIX), "{error}");
+    }
+
+    #[test]
+    fn a_remote_endpoint_is_refused() {
+        let store = store_with(vec![0.1; 1_600], 16_000);
+        let error = tauri::async_runtime::block_on(transcribe_cached_via_local_server(
+            &store,
+            "whatever",
+            "http://127.0.0.1:8001@evil.com/v1/audio/transcriptions",
+        ))
+        .expect_err("must fail");
+        assert!(error.contains("Only a local server"), "{error}");
+    }
+}
+
 /// The WAV a remote provider uploads for a cached utterance, as base64.
 ///
 /// Reading it leaves the utterance cached. Encoded on demand because the

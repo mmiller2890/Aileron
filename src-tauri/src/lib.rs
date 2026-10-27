@@ -132,6 +132,7 @@ pub fn run() {
             stt::stt_init_live_speakers,
             stt::stt_transcribe_speech,
             stt::stt_transcribe_utterance,
+            stt::stt_transcribe_via_local_server,
             stt::stt_get_status,
             stt::stt_utterance_wav,
             logging::log_ui_message,

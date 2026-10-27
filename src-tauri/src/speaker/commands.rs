@@ -233,9 +233,21 @@ fn emit_speech_detected(
             None
         }
     };
+    // Off macOS the utterance is cached at capture rate as well: a local
+    // server can transcribe it from Rust, without the UI decoding the WAV and
+    // sending every sample back over IPC.
     #[cfg(not(target_os = "macos"))]
-    let utterance_id: Option<String> = None;
+    let utterance_id = app.state::<crate::stt::UtteranceStore>().put_capture(
+        processed.clone(),
+        None,
+        sr,
+        samples.len() as f64 / sr as f64,
+        processed.clone(),
+    );
 
+    // macOS sends the id alone and transcribes from it. Off macOS the id is an
+    // extra option, so other providers still get the audio inline.
+    #[cfg(target_os = "macos")]
     let b64 = if utterance_id.is_some() {
         None
     } else {
@@ -246,6 +258,15 @@ fn emit_speech_detected(
                 let _ = app.emit("audio-encoding-error", "Failed to encode speech");
                 return;
             }
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let b64 = match samples_to_wav_b64(sr, &processed) {
+        Ok(b64) => Some(b64),
+        Err(_) => {
+            error!("Failed to encode speech to WAV");
+            let _ = app.emit("audio-encoding-error", "Failed to encode speech");
+            return;
         }
     };
 

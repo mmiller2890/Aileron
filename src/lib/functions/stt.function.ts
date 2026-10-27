@@ -129,6 +129,29 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       return resolvedAudio;
     };
 
+    if (provider.id === "local-parakeet" && utteranceId) {
+      // Rust holds the utterance at capture rate and posts a 16 kHz WAV to the
+      // local server itself, so nothing is decoded here and no samples cross
+      // IPC. Any other provider keeps the upload path below.
+      try {
+        return await invoke<string>("stt_transcribe_via_local_server", {
+          utteranceId,
+          endpoint: resolveCurlUrl(
+            curl2Json(provider.curl),
+            selectedProvider.variables,
+          ),
+        });
+      } catch (error) {
+        if (!isUtteranceCacheMiss(error)) throw error;
+        // The utterance can age out of the cache during a burst of speech;
+        // fall through and upload the audio we were handed instead.
+        console.warn(
+          "Utterance no longer cached, falling back to upload:",
+          error,
+        );
+      }
+    }
+
     if (provider.id === "local-fluidaudio") {
       // Fastest path: Rust already holds these samples, so transcribe in
       // place. Nothing is decoded and nothing crosses IPC but the id.

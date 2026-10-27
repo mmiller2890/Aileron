@@ -16,6 +16,15 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
     platform: "windows-linux",
   },
   {
+    // parakeet_server.py: the model FluidAudio runs on macOS, on an NVIDIA GPU.
+    id: "local-parakeet",
+    name: "Local Parakeet v3 (NVIDIA GPU, NeMo)",
+    curl: `curl -X POST "http://localhost:8001/v1/audio/transcriptions" \\
+      -F "file={{AUDIO}}"`,
+    responseContentPath: "text",
+    platform: "windows-linux",
+  },
+  {
     id: "openai-whisper",
     name: "OpenAI Whisper",
     curl: `curl -X POST "https://api.openai.com/v1/audio/transcriptions" \\

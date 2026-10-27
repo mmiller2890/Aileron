@@ -77,24 +77,31 @@ pub(crate) fn list_output_devices() -> Result<Vec<AudioDevice>> {
     Ok(vec![])
 }
 
-/// UID of the current default output device, or None where it can't be
-/// determined. Used by the capture loop to detect a mid-session output-device
-/// switch. Only implemented for macOS today; other platforms return None
-/// (no monitoring), which is safe — it just disables the auto-restart.
-/// Whether a saved output device is connected. Only macOS can check;
-/// elsewhere the saved device is trusted as before.
+/// Whether a saved output device is still connected, so capture can follow
+/// the system default instead of failing to open it. macOS asks CoreAudio;
+/// Linux checks the PulseAudio sink list. Elsewhere it is trusted.
 pub(crate) fn output_device_connected(uid: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
         macos::output_device_connected(uid)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::get_output_devices()
+            .map(|devices| linux::device_listed(uid, &devices))
+            .unwrap_or(true)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = uid;
         true
     }
 }
 
+/// UID of the current default output device, or None where it can't be
+/// determined. Used by the capture loop to detect a mid-session output-device
+/// switch. Only implemented for macOS today; other platforms return None
+/// (no monitoring), which is safe — it just disables the auto-restart.
 pub(crate) fn default_output_uid() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
@@ -217,7 +224,7 @@ impl SpeakerStream {
     }
 
     /// Captured samples waiting to be read: how far behind the reader is.
-    /// Only macOS buffers capture this way; elsewhere it is always 0.
+    /// macOS and Linux buffer capture this way; elsewhere it is always 0.
     pub fn backlog_samples(&self) -> usize {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         return self.inner.backlog_samples();

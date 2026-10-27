@@ -16,11 +16,20 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const SAMPLE_RATE: u32 = 16_000;
 
 /// Whether `url` is an http endpoint on this machine. Turn audio is only ever
-/// sent to a server the user runs locally.
+/// sent to a server the user runs locally, so the address is parsed rather
+/// than prefix-matched: `http://127.0.0.1:8001@evil.com/x` starts with a local
+/// prefix but connects to `evil.com`.
 pub(crate) fn is_local_endpoint(url: &str) -> bool {
-    ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
-        .iter()
-        .any(|prefix| url.starts_with(prefix))
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    matches!(
+        parsed.host_str(),
+        Some("127.0.0.1") | Some("localhost") | Some("[::1]") | Some("::1")
+    )
 }
 
 pub(crate) struct RemoteLiveTextModel {
@@ -175,9 +184,25 @@ mod tests {
     fn only_servers_on_this_machine_are_accepted() {
         assert!(is_local_endpoint("http://127.0.0.1:8001/v1/audio/transcriptions"));
         assert!(is_local_endpoint("http://localhost:8001/v1/audio/transcriptions"));
+        assert!(is_local_endpoint("http://[::1]:8001/v1/audio/transcriptions"));
         assert!(!is_local_endpoint("https://api.example.com/v1/audio/transcriptions"));
         assert!(!is_local_endpoint("http://127.0.0.1.example.com:8001/"));
         assert!(RemoteLiveTextModel::new("https://api.example.com/x".into()).is_err());
+    }
+
+    #[test]
+    fn a_local_looking_address_cannot_smuggle_another_host() {
+        // Userinfo, not a host: this reaches evil.com, so the guard must miss it.
+        assert!(!is_local_endpoint("http://127.0.0.1:8001@evil.com/x"));
+        assert!(!is_local_endpoint("http://localhost@evil.com/x"));
+        assert!(RemoteLiveTextModel::new("http://127.0.0.1:1@evil.com/x".into()).is_err());
+    }
+
+    #[test]
+    fn only_http_is_accepted() {
+        assert!(!is_local_endpoint("https://localhost:8001/x"));
+        assert!(!is_local_endpoint("file:///tmp/socket"));
+        assert!(!is_local_endpoint("not a url"));
     }
 
     #[test]

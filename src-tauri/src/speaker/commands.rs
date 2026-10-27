@@ -3,7 +3,6 @@ use crate::speaker::preprocessing::{apply_noise_gate, prepare_utterance, Prepare
 use crate::speaker::live_text;
 #[cfg(not(target_os = "macos"))]
 use crate::speaker::portable_vad::PortableVad;
-#[cfg(target_os = "macos")]
 use crate::speaker::resample::StreamingResampler;
 use crate::speaker::utterance_emitter::UtteranceEmitter;
 use crate::speaker::{live_speakers, turn_feeds};
@@ -965,6 +964,10 @@ async fn run_vad_capture(
     let mut pending_silero_prob: Option<f32> = Some(0.0);
     #[cfg(not(target_os = "macos"))]
     let mut pending_silero_prob: Option<f32> = portable_vad.as_ref().map(|_| 0.0);
+    // Only used when the portable VAD is unavailable: while it runs, its own
+    // resampled hop feeds live text, so this would resample twice.
+    #[cfg(not(target_os = "macos"))]
+    let mut live_text_resampler: Option<StreamingResampler> = None;
     let mut utterance_start_time: f32 = 0.0;
     // Utterance times are positions in the captured audio, not wall-clock
     // readings: after a processing stall the loop catches up on buffered
@@ -1069,9 +1072,12 @@ async fn run_vad_capture(
                         last_hop_end = drain_monitor.last_hop;
                     }
                     #[cfg(not(target_os = "macos"))]
-                    if let Some(vad) = portable_vad.as_mut() {
-                        vad.reset();
-                        pending_silero_prob = Some(0.0);
+                    {
+                        if let Some(vad) = portable_vad.as_mut() {
+                            vad.reset();
+                            pending_silero_prob = Some(0.0);
+                        }
+                        live_text_resampler = None;
                     }
                     continue;
                 }
@@ -1140,8 +1146,17 @@ async fn run_vad_capture(
                 (resample_duration, vad_started.elapsed(), hop_16k)
             };
             #[cfg(not(target_os = "macos"))]
-            let hop_16k: Vec<f32> =
-                portable_vad_hop(&mut portable_vad, &mut pending_silero_prob, &raw_mono, "system audio");
+            let hop_16k: Vec<f32> = live_text_hop(
+                portable_vad_hop(
+                    &mut portable_vad,
+                    &mut pending_silero_prob,
+                    &raw_mono,
+                    "system audio",
+                ),
+                &mut live_text_resampler,
+                &raw_mono,
+                sr,
+            );
 
             let is_speech = match pending_silero_prob {
                 // Mic-style hysteresis on the raw probability.
@@ -1476,6 +1491,24 @@ fn portable_vad_hop(
 #[cfg(not(target_os = "macos"))]
 fn to_16k(samples: &[f32], sr: u32) -> Vec<f32> {
     crate::speaker::resample::StreamingResampler::new(sr).push(samples)
+}
+
+/// The hop at 16 kHz for live text. The portable VAD resamples every hop
+/// already, so that output is reused while it runs; when Silero is unavailable
+/// live text keeps working through a resampler of its own.
+#[cfg(not(target_os = "macos"))]
+fn live_text_hop(
+    vad_hop: Vec<f32>,
+    resampler: &mut Option<StreamingResampler>,
+    raw: &[f32],
+    sr: u32,
+) -> Vec<f32> {
+    if !vad_hop.is_empty() {
+        return vad_hop;
+    }
+    resampler
+        .get_or_insert_with(|| StreamingResampler::new(sr))
+        .push(raw)
 }
 
 fn fallback_vad_is_speech(samples: &[f32], config: &VadConfig) -> bool {
@@ -2034,6 +2067,27 @@ mod tests {
             resampled_vad_frames(&mut resampler, &mut accumulator, &[0.0; 1024]);
         assert_eq!(samples_16k.len(), 1024);
         assert!(frames.is_empty());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn live_text_still_gets_16k_audio_when_silero_is_unavailable() {
+        let mut resampler = None;
+        let hop = vec![0.25f32; 1024];
+        let out = live_text_hop(Vec::new(), &mut resampler, &hop, 48_000);
+        // 1024 samples at 48 kHz is 341 at 16 kHz, less the filter's tail.
+        assert!((300..=342).contains(&out.len()), "{}", out.len());
+        assert!(resampler.is_some(), "no resampler kept for live text");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn live_text_reuses_the_resampled_hop_the_vad_produced() {
+        let mut resampler = None;
+        let vad_hop = vec![0.5f32; 341];
+        let out = live_text_hop(vad_hop.clone(), &mut resampler, &[0.0; 1024], 48_000);
+        assert_eq!(out, vad_hop);
+        assert!(resampler.is_none(), "resampled twice");
     }
 
     #[test]

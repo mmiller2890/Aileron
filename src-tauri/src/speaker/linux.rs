@@ -33,6 +33,13 @@ fn capture_queue_capacity(sample_rate: u32) -> usize {
     sample_rate as usize * CAPTURE_QUEUE_SECS
 }
 
+/// Whether a saved output device (a PulseAudio sink name) is still present.
+/// A sink that was unplugged would otherwise be tapped as `<name>.monitor`
+/// and fail to open; the caller can follow the default instead.
+pub(crate) fn device_listed(uid: &str, devices: &[AudioDevice]) -> bool {
+    devices.iter().any(|device| device.id == uid)
+}
+
 /// Append captured samples, dropping the oldest past `capacity` and adding
 /// how many to `dropped`. The reader reports drops; this never logs, so a
 /// stall cannot flood the log.
@@ -574,6 +581,23 @@ mod tests {
         assert_eq!(dropped.load(Ordering::Relaxed), 2);
         let kept: Vec<f32> = queue.lock().unwrap().iter().copied().collect();
         assert_eq!(kept, vec![0.3, 0.4, 0.5, 0.6]);
+    }
+
+    fn sink(id: &str) -> AudioDevice {
+        AudioDevice {
+            id: id.into(),
+            name: id.into(),
+            is_default: false,
+        }
+    }
+
+    #[test]
+    fn a_saved_sink_that_is_gone_is_not_listed() {
+        let devices = vec![sink("alsa_output.hdmi-stereo"), sink("alsa_output.analog")];
+        assert!(device_listed("alsa_output.analog", &devices));
+        assert!(!device_listed("alsa_output.usb-gone", &devices));
+        assert!(!device_listed("", &devices));
+        assert!(!device_listed("alsa_output.analog.monitor", &devices));
     }
 
     #[test]

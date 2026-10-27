@@ -12,6 +12,7 @@ import {
   pickLinuxProvider,
   type LocalServerState,
 } from "@/lib/local-stt-server";
+import { provider_visible_on, sttFallbackFor } from "@/lib/provider-platform";
 import { getShortcutsConfig } from "@/lib/storage";
 import { normalizeFluidAudioModel } from "@/lib/fluidaudio-model";
 import {
@@ -100,7 +101,7 @@ const validateAndProcessCurlProviders = (
         try {
           curl2Json(p.curl);
           return true;
-        } catch (e) {
+        } catch {
           return false;
         }
       })
@@ -560,7 +561,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       const safeType = type || "invisible";
       const cursorValue = type === "invisible" ? "none" : safeType;
       document.documentElement.style.setProperty("--cursor-type", cursorValue);
-    } catch (error) {
+    } catch {
       document.documentElement.style.setProperty("--cursor-type", "default");
     }
   };
@@ -888,31 +889,23 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     ...customAiProviders,
   ];
 
-  // Computed all STT providers
+  // Computed all STT providers, minus the ones this platform cannot run.
   const allSttProviders: TYPE_PROVIDER[] = [
-    ...SPEECH_TO_TEXT_PROVIDERS,
+    ...SPEECH_TO_TEXT_PROVIDERS.filter((provider) =>
+      provider_visible_on(getPlatform(), provider.platform),
+    ),
     ...customSttProviders,
   ];
 
   // Validate selected STT provider exists in the available providers.
-  // Handles migration when providers are removed (e.g., local-parakeet, local-nemotron).
+  // Handles migration when a provider was removed, or does not exist on this
+  // platform (a Mac saved on the Linux Parakeet server).
   useEffect(() => {
     if (
       selectedSttProvider.provider &&
       !allSttProviders.some((p) => p.id === selectedSttProvider.provider)
     ) {
-      const fallback = isMacOS()
-        ? {
-            provider: "local-fluidaudio" as const,
-            variables: { MODEL: "v3" } as Record<string, string>,
-          }
-        : {
-            provider: "local-whisper" as const,
-            variables: { MODEL: "openai/whisper-large-v3-turbo" } as Record<
-              string,
-              string
-            >,
-          };
+      const fallback = sttFallbackFor(getPlatform());
       console.warn(
         `Saved STT provider "${selectedSttProvider.provider}" no longer exists; falling back to "${fallback.provider}"`,
       );

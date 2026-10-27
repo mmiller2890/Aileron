@@ -205,6 +205,18 @@ export interface PersistDecision {
   emit: boolean;
 }
 
+/**
+ * Whether `current` is still the built-in default a provider state starts with,
+ * before storage has been read. Compared by identity: a saved or chosen
+ * selection is a new object even when it names the same provider, and is real.
+ */
+export function isStartupDefault(
+  current: ProviderSelection,
+  startupDefault: ProviderSelection,
+): boolean {
+  return current === startupDefault;
+}
+
 export function serializeProviderSelection(value: ProviderSelection): string {
   return JSON.stringify({
     provider: value.provider,

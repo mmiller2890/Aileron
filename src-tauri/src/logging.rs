@@ -68,11 +68,17 @@ pub fn init(log_dir: &Path) {
 const MAX_UI_MESSAGE_CHARS: usize = 500;
 
 /// Record an error or notice the UI showed, so the log explains what the
-/// user saw. Logged as a warning under `assistant_lib::ui`.
+/// user saw. Logged as a warning under `assistant_lib::ui`. With level
+/// `"info"` it records UI state instead (such as which provider a window is
+/// on), at info.
 #[tauri::command]
-pub fn log_ui_message(message: String) {
+pub fn log_ui_message(message: String, level: Option<String>) {
     let message: String = message.chars().take(MAX_UI_MESSAGE_CHARS).collect();
-    tracing::warn!(target: "assistant_lib::ui", "UI showed: {message}");
+    if level.as_deref() == Some("info") {
+        tracing::info!(target: "assistant_lib::ui", "UI state: {message}");
+    } else {
+        tracing::warn!(target: "assistant_lib::ui", "UI showed: {message}");
+    }
 }
 
 #[cfg(test)]

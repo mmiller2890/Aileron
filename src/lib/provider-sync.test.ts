@@ -25,6 +25,7 @@ const {
   emitProviderConfigChanged,
   listenForProviderConfigChange,
   decideProviderPersist,
+  isStartupDefault,
   serializeProviderSelection,
   PROVIDER_CONFIG_CHANGED,
   providerSecretKey,
@@ -400,5 +401,22 @@ describe("shouldFallbackSttProvider", () => {
 
   it("never falls back when nothing is saved", () => {
     expect(shouldFallbackSttProvider("", "macos", false)).toBe(false);
+  });
+});
+
+describe("isStartupDefault", () => {
+  // Before storage is read, the state holds a built-in default (Local Whisper
+  // on Linux). Persisting that first render overwrote the saved provider and
+  // told the other window to reload it.
+  it("recognises the untouched startup default", () => {
+    const startup = { provider: "local-whisper", variables: { MODEL: "m" } };
+    expect(isStartupDefault(startup, startup)).toBe(true);
+  });
+
+  it("treats a loaded or chosen selection as real, even if it matches", () => {
+    const startup = { provider: "local-whisper", variables: { MODEL: "m" } };
+    const chosen = { provider: "local-whisper", variables: { MODEL: "m" } };
+    expect(isStartupDefault(chosen, startup)).toBe(false);
+    expect(isStartupDefault({ provider: "local-parakeet" }, startup)).toBe(false);
   });
 });

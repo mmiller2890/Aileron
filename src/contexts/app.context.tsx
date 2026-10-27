@@ -27,6 +27,7 @@ import {
   createSerializedAsyncWriter,
   createStartupProviderSecretReader,
   decideProviderPersist,
+  isStartupDefault,
   emitProviderConfigChanged,
   hydrateProviderSwitch,
   listenForProviderConfigChange,
@@ -163,7 +164,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [customSttProviders, setCustomSttProviders] = useState<TYPE_PROVIDER[]>(
     [],
   );
-  const [selectedSttProvider, setSelectedSttProvider] = useState<{
+  // The selection before storage is read. Kept so the persist effect can tell
+  // it apart from a real one: saving it on the first render overwrote the
+  // user's provider (Local Parakeet became Local Whisper on Linux).
+  const startupSttSelectionRef = useRef<{
     provider: string;
     variables: Record<string, string>;
   }>({
@@ -172,6 +176,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       MODEL: isMacOS() ? "v3" : "openai/whisper-large-v3-turbo",
     },
   });
+  const [selectedSttProvider, setSelectedSttProvider] = useState<{
+    provider: string;
+    variables: Record<string, string>;
+  }>(startupSttSelectionRef.current);
 
   const [screenshotConfiguration, setScreenshotConfiguration] =
     useState<ScreenshotConfig>({
@@ -854,6 +862,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   // Persist selected STT: provider id in localStorage, secrets in the keychain.
   useEffect(() => {
     if (!selectedSttProvider.provider) return;
+    if (isStartupDefault(selectedSttProvider, startupSttSelectionRef.current)) {
+      return;
+    }
 
     const decision = decideProviderPersist(
       lastSttPersistRef.current,
@@ -896,6 +907,21 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     ),
     ...customSttProviders,
   ];
+
+  // Record which speech provider each window is on, so the log explains a
+  // capture that used an unexpected one. The startup default is not a choice.
+  // Keyed on the selection, not its id: a provider loaded from storage can
+  // have the same id as the startup default and must still be logged.
+  const loggedSttProviderRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (isStartupDefault(selectedSttProvider, startupSttSelectionRef.current)) {
+      return;
+    }
+    if (loggedSttProviderRef.current === selectedSttProvider.provider) return;
+    loggedSttProviderRef.current = selectedSttProvider.provider;
+    const message = `Speech provider in ${getCurrentWindow().label}: ${selectedSttProvider.provider || "(none)"}`;
+    void invoke("log_ui_message", { message, level: "info" }).catch(() => {});
+  }, [selectedSttProvider]);
 
   // Validate selected STT provider exists in the available providers.
   // Handles migration when a provider was removed, or does not exist on this

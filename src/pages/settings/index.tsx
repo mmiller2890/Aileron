@@ -4,6 +4,7 @@ import {
   AppIconToggle,
   AutostartToggle,
   DeleteChats,
+  SetupGuide,
 } from "./components";
 import { useSettings } from "@/hooks";
 import { PageLayout } from "@/layouts";
@@ -24,6 +25,9 @@ const Settings = () => {
 
       {/* Always On Top Toggle */}
       <AlwaysOnTopToggle />
+
+      {/* First-launch checklist, on request */}
+      <SetupGuide />
 
       {/* Danger Zone */}
       <DeleteChats {...settings} />

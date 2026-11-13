@@ -75,7 +75,7 @@ npm run tauri dev      # develop — the first build takes a few minutes
 npm run tauri build    # produce a native app
 ```
 
-`npm run setup` also runs automatically before every `tauri` command, so a missing tool is caught up front with a clear fix instead of a cryptic failure deep in the build. On first launch, open the dashboard with **`⌘⇧D`** (`Ctrl+Shift+D` on Windows/Linux) and connect an AI provider — the only required step.
+`npm run setup` also runs automatically before every `tauri` command, so a missing tool is caught up front with a clear fix instead of a cryptic failure deep in the build. On first launch the dashboard opens on a short setup checklist: allow audio access, choose an AI (a free local Ollama model, an API key, or the advanced view for any provider or custom endpoint), and let the on-device speech models download. Reopen it any time from **Settings → Setup Guide**; the dashboard is **`⌘⇧D`** (`Ctrl+Shift+D` on Windows/Linux).
 
 ## 🧠 Connect an AI
 

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { getRecentConversations } from "@/lib";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
@@ -22,6 +22,10 @@ import { RecentSessions } from "./components/RecentSessions";
 import { SessionSummaryCard } from "./components/SessionSummaryCard";
 import { ProviderStatus } from "./components/ProviderStatus";
 import { DashboardHome } from "./components/DashboardHome";
+import { FirstRunSetup } from "./components/FirstRunSetup";
+import { shouldShowSetup } from "@/lib/first-run";
+import { STORAGE_KEYS } from "@/config/constants";
+import { safeLocalStorage } from "@/lib/storage";
 import { PanelRightCloseIcon, PanelRightOpenIcon } from "lucide-react";
 
 const Dashboard = () => {
@@ -35,6 +39,22 @@ const Dashboard = () => {
   const { selectedAIProvider, selectedSttProvider } = useApp();
   const navigate = useNavigate();
   const [railCollapsed, setRailCollapsed] = useState(false);
+  // Decided once: a brand-new install opens on the setup checklist (read from
+  // storage), as does "Open setup guide" in Settings. It stays up until
+  // finished or skipped.
+  const location = useLocation();
+  const [showSetup, setShowSetup] = useState(
+    () =>
+      (location.state as { setup?: boolean } | null)?.setup === true ||
+      shouldShowSetup(
+      safeLocalStorage.getItem(STORAGE_KEYS.SETUP_COMPLETED),
+      safeLocalStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER),
+    ),
+  );
+  const finishSetup = () => {
+    safeLocalStorage.setItem(STORAGE_KEYS.SETUP_COMPLETED, "1");
+    setShowSetup(false);
+  };
   // Overlay visibility drives the embedded bar's popped-in/out rendering.
   const [overlayVisible, setOverlayVisible] = useState(false);
 
@@ -126,6 +146,20 @@ const Dashboard = () => {
 
   // Nothing running and nothing to show: the quiet starting screen. Past
   // sessions live in Chats, not on the opening page.
+  if (source === "home" && showSetup) {
+    return (
+      <div className="flex h-screen w-full flex-col overflow-hidden bg-background">
+        <FirstRunSetup
+          onStartListening={() => {
+            finishSetup();
+            sendCommand({ action: "start-capture" });
+          }}
+          onSkip={finishSetup}
+        />
+      </div>
+    );
+  }
+
   if (source === "home") {
     return (
       <div className="flex h-screen w-full flex-col overflow-hidden bg-background">

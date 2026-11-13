@@ -20,6 +20,8 @@ export const STORAGE_KEYS = {
   SELECTED_AUDIO_DEVICES: "selected_audio_devices",
   RESPONSE_SETTINGS: "response_settings",
   SUPPORTS_IMAGES: "supports_images",
+  // Set once the first-launch setup has been finished or skipped.
+  SETUP_COMPLETED: "setup_completed",
 } as const;
 
 // Max number of files that can be attached to a message

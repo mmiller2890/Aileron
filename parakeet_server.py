@@ -81,6 +81,12 @@ speaker_turn_start_sample = 0
 
 
 def load_speaker_model() -> None:
+    """Load Sortformer on first use (call with `model_lock` held).
+
+    Not loaded at startup: Aileron has speaker labels switched off on Linux,
+    so loading it there cost startup time and GPU memory for nothing, and a
+    Sortformer that failed to load took transcription down with it.
+    """
     global speaker_model
     if speaker_model is None:
         print(f"Loading {SORTFORMER_MODEL} on {device}...")
@@ -126,7 +132,6 @@ def load_model(name: str, requested_device: str) -> None:
         with torch.inference_mode():
             loaded.transcribe([audio], batch_size=1, verbose=False)
     model, model_name = loaded, name
-    load_speaker_model()
 
 
 def decode_audio(audio_bytes: bytes) -> np.ndarray:
@@ -212,6 +217,7 @@ def speakers_feed(file: UploadFile = File(...)):
 def speakers_end_turn():
     global speaker_turn_start_sample
     with model_lock:
+        load_speaker_model()
         counts = diarize_counts(speaker_turn_start_sample)
         speaker_turn_start_sample = int(speaker_samples.size)
     return {"counts": counts}
@@ -229,7 +235,7 @@ def main():
     args = parser.parse_args()
 
     # Serve immediately and load in the background: /health can then report
-    # "loading" for the ~20 s the models take, and Aileron tells the user the
+    # "loading" for the ~20 s the model takes, and Aileron tells the user the
     # server is starting rather than telling them it is not running (which is
     # what happened when the models loaded before uvicorn bound the port).
     def warm() -> None:
@@ -247,7 +253,7 @@ def main():
         print(f"Model ready on {device}. Requests are served from now on.")
 
     threading.Thread(target=warm, name="model-warmup", daemon=True).start()
-    print(f"Server starting on http://{args.host}:{args.port} while the models load")
+    print(f"Server starting on http://{args.host}:{args.port} while the model loads")
     uvicorn.run(app, host=args.host, port=args.port)
 
 

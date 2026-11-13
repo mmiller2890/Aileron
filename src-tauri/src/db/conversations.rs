@@ -146,11 +146,25 @@ pub(crate) async fn apply_conversation(
         }
     }
 
-    sqlx::query("DELETE FROM messages WHERE conversation_id = ?")
+    // Write only what changed. A capture session is saved after every
+    // utterance, and rewriting the whole conversation each time (one session
+    // reached 3,697 messages) meant thousands of deletes, inserts and trigger
+    // runs per save. The result is the same rows either way.
+    type StoredMessage = (String, String, i64, Option<String>, Option<String>);
+    let stored: Vec<(String, String, String, i64, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT id, role, content, timestamp, attached_files, speaker FROM messages WHERE conversation_id = ?",
+        )
         .bind(&conversation.id)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(ConversationError::Database)?;
+    let mut stored: std::collections::HashMap<String, StoredMessage> = stored
+        .into_iter()
+        .map(|(id, role, content, timestamp, attached_files, speaker)| {
+            (id, (role, content, timestamp, attached_files, speaker))
+        })
+        .collect();
 
     for message in &conversation.messages {
         let attached_files = message
@@ -161,19 +175,72 @@ pub(crate) async fn apply_conversation(
             .map_err(|error| {
                 ConversationError::Invalid(format!("attached files: {error}"))
             })?;
-        sqlx::query(
-            "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files, speaker) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&message.id)
-        .bind(&conversation.id)
-        .bind(&message.role)
-        .bind(&message.content)
-        .bind(message.timestamp)
-        .bind(attached_files)
-        .bind(message.speaker.as_deref().filter(|speaker| !speaker.is_empty()))
-        .execute(&mut *tx)
-        .await
-        .map_err(ConversationError::Database)?;
+        let speaker = message
+            .speaker
+            .as_deref()
+            .filter(|speaker| !speaker.is_empty());
+        match stored.remove(&message.id) {
+            Some((role, content, timestamp, old_files, old_speaker))
+                if role == message.role
+                    && content == message.content
+                    && timestamp == message.timestamp
+                    && old_files == attached_files
+                    && old_speaker.as_deref() == speaker => {}
+            Some(_) => {
+                sqlx::query(
+                    "UPDATE messages SET role = ?, content = ?, timestamp = ?, attached_files = ?, speaker = ? WHERE id = ? AND conversation_id = ?",
+                )
+                .bind(&message.role)
+                .bind(&message.content)
+                .bind(message.timestamp)
+                .bind(attached_files)
+                .bind(speaker)
+                .bind(&message.id)
+                .bind(&conversation.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(ConversationError::Database)?;
+            }
+            // An id already used by another conversation fails here, on the
+            // primary key, and the whole save rolls back.
+            None => {
+                sqlx::query(
+                    "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files, speaker) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&message.id)
+                .bind(&conversation.id)
+                .bind(&message.role)
+                .bind(&message.content)
+                .bind(message.timestamp)
+                .bind(attached_files)
+                .bind(speaker)
+                .execute(&mut *tx)
+                .await
+                .map_err(ConversationError::Database)?;
+            }
+        }
+    }
+
+    // What is left was stored but is no longer in the conversation.
+    for id in stored.keys() {
+        sqlx::query("DELETE FROM messages WHERE id = ? AND conversation_id = ?")
+            .bind(id)
+            .bind(&conversation.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(ConversationError::Database)?;
+    }
+
+    // The message triggers set `updated_at` to the timestamp of whichever
+    // message was written last. Rewriting every message left it at the final
+    // message's timestamp; keep that now that most saves write only a few.
+    if let Some(last) = conversation.messages.last() {
+        sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+            .bind(last.timestamp)
+            .bind(&conversation.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(ConversationError::Database)?;
     }
 
     tx.commit().await.map_err(ConversationError::Database)?;
@@ -314,6 +381,119 @@ mod tests {
         let (title, messages) = fetch_conversation(&pool, "c1").await;
         assert_eq!(title, "Old title");
         assert_eq!(messages, vec!["m-old".to_string()]);
+
+        cleanup(&path);
+    }
+
+    /// (id, rowid, content) in timestamp order. A row that was deleted and
+    /// inserted again gets a new rowid; one left alone keeps its own.
+    async fn rows(pool: &Pool<Sqlite>, id: &str) -> Vec<(String, i64, String)> {
+        sqlx::query_as(
+            "SELECT id, rowid, content FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn updated_at(pool: &Pool<Sqlite>, id: &str) -> i64 {
+        let (value,): (i64,) =
+            sqlx::query_as("SELECT updated_at FROM conversations WHERE id = ?")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        value
+    }
+
+    #[tokio::test]
+    async fn a_save_writes_only_the_messages_that_changed() {
+        let (pool, path) = test_pool(1).await;
+        let first = conversation(
+            "c1",
+            "Session",
+            vec![message("m1", "one", 100), message("m2", "two", 200)],
+        );
+        apply_conversation(&pool, &first, Operation::Upsert).await.unwrap();
+        let before = rows(&pool, "c1").await;
+
+        // The next utterance arrives: one new message, two untouched.
+        let grown = conversation(
+            "c1",
+            "Session",
+            vec![
+                message("m1", "one", 100),
+                message("m2", "two", 200),
+                message("m3", "three", 300),
+            ],
+        );
+        apply_conversation(&pool, &grown, Operation::Upsert).await.unwrap();
+        let after = rows(&pool, "c1").await;
+        assert_eq!(after.len(), 3);
+        assert_eq!(&after[..2], &before[..], "unchanged messages were rewritten");
+        assert_eq!(after[2].2, "three");
+        // As when every message was rewritten: the last message's time.
+        assert_eq!(updated_at(&pool, "c1").await, 300);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn a_save_applies_edits_and_removals() {
+        let (pool, path) = test_pool(1).await;
+        let first = conversation(
+            "c1",
+            "Session",
+            vec![
+                message("m1", "one", 100),
+                message("m2", "two", 200),
+                message("m3", "three", 300),
+            ],
+        );
+        apply_conversation(&pool, &first, Operation::Upsert).await.unwrap();
+        let before = rows(&pool, "c1").await;
+
+        // m2 gains a speaker label and new text; m3 is gone.
+        let mut edited = message("m2", "two, corrected", 200);
+        edited.speaker = Some("Speaker 1".to_string());
+        let second =
+            conversation("c1", "Session", vec![message("m1", "one", 100), edited]);
+        apply_conversation(&pool, &second, Operation::Upsert).await.unwrap();
+
+        let after = rows(&pool, "c1").await;
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1].0, "m2");
+        assert_eq!(after[1].1, before[1].1, "an edit must update in place");
+        assert_eq!(after[1].2, "two, corrected");
+        let (speaker,): (Option<String>,) =
+            sqlx::query_as("SELECT speaker FROM messages WHERE id = 'm2'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(speaker.as_deref(), Some("Speaker 1"));
+        assert_eq!(updated_at(&pool, "c1").await, 200);
+
+        // Saving the same thing again changes nothing.
+        apply_conversation(&pool, &second, Operation::Upsert).await.unwrap();
+        assert_eq!(rows(&pool, "c1").await, after);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn a_save_never_touches_another_conversations_messages() {
+        let (pool, path) = test_pool(1).await;
+        let other = conversation("c2", "Other", vec![message("x1", "theirs", 50)]);
+        apply_conversation(&pool, &other, Operation::Upsert).await.unwrap();
+        let mine = conversation("c1", "Mine", vec![message("m1", "one", 100)]);
+        apply_conversation(&pool, &mine, Operation::Upsert).await.unwrap();
+
+        let emptied = conversation("c1", "Mine", vec![]);
+        apply_conversation(&pool, &emptied, Operation::Upsert).await.unwrap();
+        assert!(rows(&pool, "c1").await.is_empty());
+        assert_eq!(rows(&pool, "c2").await.len(), 1);
 
         cleanup(&path);
     }

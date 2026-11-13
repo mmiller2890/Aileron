@@ -28,7 +28,7 @@ Both platforms are first-class. The **Linux** build is what runs on the intervie
 
 ```bash
 npm install
-npm run setup        # Preflight: checks Node 18+, Rust, Swift 6+/Xcode 16 (macOS), Ollama. SKIP_ENV_CHECK=1 to bypass.
+npm run setup        # Preflight: checks Node 20.19+/22.12+/24+, Rust, Swift 6+ (macOS), Ollama. SKIP_ENV_CHECK=1 to bypass.
 ```
 
 ### Development
@@ -63,7 +63,7 @@ No linter is configured. Run `npx tsc --noEmit` and `npm run build` to verify ch
 
 ### Prerequisites
 
-- **macOS:** Xcode 16 + Swift 6+ required (fluidaudio-rs builds a Swift package during the Rust build).
+- **macOS:** Swift 6+ required (fluidaudio-rs builds a Swift package during the Rust build); Command Line Tools are enough. `cidre` runs `xcodebuild`, so without full Xcode `scripts/install-macos.sh` puts `scripts/macos/xcodebuild` (a clang stand-in for cidre's pomace targets) first on PATH. `./scripts/install-macos.sh` takes a bare Mac to an installed app. Releases: `scripts/release-macos.sh` builds HEAD in a clean checkout, signs it (with the "Aileron Signing" certificate when present, else ad-hoc) and publishes it to GitHub Releases, where `install.sh` downloads it.
 - Optional: Ollama for local AI. Any cloud/curl AI provider works without it.
 - `npm run setup` (auto-run before `npm run tauri ...` via the `pretauri` hook) verifies these.
 

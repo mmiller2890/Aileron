@@ -35,3 +35,4 @@ docs/superpowers/plans/2026-07-28-release-candidate.md
 *.sln
 *.sw?
 dist-fedora
+dist-release

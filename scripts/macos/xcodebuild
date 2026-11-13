@@ -1,0 +1,67 @@
+#!/bin/bash
+# Stand-in for `xcodebuild` on a Mac with only the Command Line Tools.
+#
+# The `cidre` crate's build script runs
+#   xcodebuild -project ./pomace/pomace.xcodeproj -sdk macosx -arch <arch>
+#     -configuration <cfg> -target <t>... build [VAR=value...] SYMROOT=<dir>
+# and links the resulting <SYMROOT>/<cfg>/lib<t>.a. Each pomace target is a
+# single pomace/<t>/<t>.m, so clang builds the same libraries without Xcode.
+# scripts/install-macos.sh puts this directory first on PATH only when full
+# Xcode is missing; anything other than that one call is refused.
+
+set -euo pipefail
+shopt -s nullglob
+
+# scripts/check-env.mjs probes for a usable xcodebuild this way.
+if [ "${1:-}" = -version ]; then
+  echo "xcodebuild stand-in (Command Line Tools, cidre pomace only)"
+  exit 0
+fi
+
+project= sdk= arch= configuration= symroot= deployment=
+targets=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -project) project=$2; shift 2 ;;
+    -sdk) sdk=$2; shift 2 ;;
+    -arch) arch=$2; shift 2 ;;
+    -configuration) configuration=$2; shift 2 ;;
+    -target) targets+=("$2"); shift 2 ;;
+    build) shift ;;
+    SYMROOT=*) symroot=${1#SYMROOT=}; shift ;;
+    MACOSX_DEPLOYMENT_TARGET=*) deployment=${1#MACOSX_DEPLOYMENT_TARGET=}; shift ;;
+    *=*) shift ;;
+    *)
+      echo "xcodebuild stand-in: unsupported argument '$1'. Install Xcode for this build." >&2
+      exit 1 ;;
+  esac
+done
+
+if [ "$(basename "$project")" != pomace.xcodeproj ] || [ "$sdk" != macosx ] || [ -z "$symroot" ]; then
+  echo "xcodebuild stand-in only builds cidre's pomace for macOS. Install Xcode for this build." >&2
+  exit 1
+fi
+
+src=$(dirname "$project")
+out="$symroot/$configuration"
+obj="$symroot/pomace-objects"
+mkdir -p "$out" "$obj"
+sysroot=$(xcrun --sdk macosx --show-sdk-path)
+if [ "$configuration" = Release ]; then opt=-Os; else opt=-O0; fi
+
+for target in "${targets[@]}"; do
+  # A cidre upgrade that adds sources to a target must fail here, not link a
+  # library that is silently missing symbols.
+  sources=("$src/$target"/*.m "$src/$target"/*.mm "$src/$target"/*.c "$src/$target"/*.swift)
+  if [ "${#sources[@]}" -ne 1 ] || [ "${sources[0]}" != "$src/$target/$target.m" ]; then
+    echo "xcodebuild stand-in: pomace target '$target' is no longer a single $target.m. Install Xcode for this build." >&2
+    exit 1
+  fi
+  clang -c -x objective-c -std=gnu17 -fobjc-arc -fobjc-weak -fmodules \
+    "$opt" -arch "$arch" -isysroot "$sysroot" \
+    ${deployment:+-mmacosx-version-min="$deployment"} \
+    "$src/$target/$target.m" -o "$obj/$target.o"
+  rm -f "$out/lib$target.a"
+  libtool -static -no_warning_for_no_symbols -o "$out/lib$target.a" "$obj/$target.o"
+done
+echo "** BUILD SUCCEEDED ** (${#targets[@]} pomace targets built with clang)"

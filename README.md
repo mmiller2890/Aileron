@@ -47,16 +47,22 @@ On macOS and Windows the overlay is **invisible to screen recording and screen s
 
 > **Fedora package:** `scripts/build-fedora-rpm.sh` builds `Aileron-<version>.x86_64.rpm` in a Fedora 44 container (a binary built on Arch links a newer glibc and will not start on Fedora). Install it with `sudo dnf install ./Aileron-*.x86_64.rpm`. The package contains no speech server: install one of the local servers below, or point Aileron at a cloud provider.
 >
-> **macOS:** built from source (a signed installer is [on the roadmap](docs/shipping-plan.md)). `npm run setup` checks the toolchain and tells you exactly what's missing.
+> **macOS (Apple Silicon, macOS 14+):** paste this into Terminal. It needs no developer tools and no password, and running it again updates Aileron:
+>
+> ```bash
+> curl -fsSL https://github.com/mmiller2890/Aileron/releases/latest/download/install.sh | bash
+> ```
+>
+> To build from source on a Mac with nothing installed, clone the project and run `./scripts/install-macos.sh`: it installs whatever is missing (Apple's Command Line Tools, Rust, Node.js), builds Aileron and copies it to `/Applications`.
 
 **Prerequisites**
 
 | Tool | Notes |
 |---|---|
-| [Node.js](https://nodejs.org/) 18+ | Frontend and tooling |
+| [Node.js](https://nodejs.org/) 20.19+ / 22.12+ / 24+ | Frontend and tooling |
 | [Rust](https://rustup.rs) (stable) | Auto-installed from `rust-toolchain.toml` on the first build |
 | [Tauri 2 system deps](https://tauri.app/start/prerequisites/) | Platform build tools / webview libraries |
-| **Xcode 16** *(macOS only)* | The local speech engine compiles a **Swift 6** package during the build — older toolchains fail with a confusing error |
+| **Swift 6** *(macOS only)* | The local speech engine compiles a **Swift 6** package during the build. Apple's Command Line Tools 16+ (`xcode-select --install`) are enough with `./scripts/install-macos.sh`; running `npm run tauri` directly also needs full Xcode, or `scripts/macos` first on `PATH` |
 
 For the zero-setup local speech engine you'll want **macOS 14+ on Apple Silicon**; everything else runs fine with a cloud or self-hosted STT provider.
 

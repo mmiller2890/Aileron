@@ -76,7 +76,9 @@ if (cargo) {
   fail(
     "Rust toolchain",
     "cargo not found",
-    "Install rustup from https://rustup.rs (rust-toolchain.toml pins the version)"
+    process.platform === "darwin"
+      ? "Run ./scripts/install-macos.sh, or install rustup from https://rustup.rs"
+      : "Install rustup from https://rustup.rs (rust-toolchain.toml pins the version)"
   );
 }
 
@@ -86,18 +88,28 @@ if (process.platform === "darwin") {
   const swiftRaw = run("swift --version");
   const m = swiftRaw && swiftRaw.match(/Swift version (\d+)\.(\d+)/i);
   if (m && Number(m[1]) >= 6) {
-    pass("Swift 6+ (Xcode 16)", `v${m[1]}.${m[2]}`);
+    pass("Swift 6+", `v${m[1]}.${m[2]}`);
   } else if (m) {
     fail(
-      "Swift 6+ (Xcode 16)",
+      "Swift 6+",
       `found v${m[1]}.${m[2]}`,
-      "Install Xcode 16, then: sudo xcode-select -s /Applications/Xcode_16.app"
+      "Update the Command Line Tools in Software Update (or install Xcode 16+). On macOS, ./scripts/install-macos.sh sets everything up."
     );
   } else {
     fail(
-      "Swift 6+ (Xcode 16)",
+      "Swift 6+",
       "swift not found",
-      "Install Xcode 16 from the App Store, then: sudo xcode-select -s /Applications/Xcode_16.app"
+      "Run: xcode-select --install  (or ./scripts/install-macos.sh, which sets everything up)"
+    );
+  }
+
+  // The cidre crate runs xcodebuild, which the Command Line Tools lack.
+  // scripts/macos/xcodebuild stands in for it when put first on PATH.
+  if (run("xcodebuild -version") === null) {
+    fail(
+      "xcodebuild",
+      "full Xcode isn't installed",
+      "Run ./scripts/install-macos.sh, or prefix the command: PATH=\"$PWD/scripts/macos:$PATH\" npm run tauri dev"
     );
   }
 

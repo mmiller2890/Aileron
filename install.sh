@@ -45,11 +45,14 @@ main() {
   else dest="$HOME/Applications"; fi
   mkdir -p "$dest"
 
-  if pgrep -xq Aileron; then
+  # Only the copy being replaced: another Aileron (a dev build, a copy
+  # elsewhere) is left running.
+  aileron_running() { pgrep -qf "^$dest/Aileron.app/Contents/MacOS/"; }
+  if aileron_running; then
     echo "Closing Aileron to update it…"
     osascript -e 'quit app "Aileron"' >/dev/null 2>&1 || true
     local waited=0
-    while pgrep -xq Aileron; do
+    while aileron_running; do
       [ "$waited" -lt 15 ] || die "Aileron didn't close. Quit it (⌘Q), then run this again."
       sleep 1
       waited=$((waited + 1))

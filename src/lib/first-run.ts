@@ -94,11 +94,12 @@ export const SIMPLE_KEY_PROVIDERS: {
   { id: "groq", label: "Groq", modelHint: "the model id from console.groq.com" },
 ];
 
-export type SimpleAiChoice = "local" | "key" | null;
+export type SimpleAiChoice = "local" | "lm-studio" | "key" | null;
 
 /** Which simple-setup choice a selected provider belongs to, if any. */
 export function simpleAiChoice(providerId: string): SimpleAiChoice {
   if (providerId === "ollama") return "local";
+  if (providerId === "lm-studio") return "lm-studio";
   if (SIMPLE_KEY_PROVIDERS.some((provider) => provider.id === providerId)) {
     return "key";
   }
@@ -107,9 +108,69 @@ export function simpleAiChoice(providerId: string): SimpleAiChoice {
 
 /**
  * The simple setup can only show a provider it offers. Anything else (a
- * custom endpoint, LM Studio) was chosen in the advanced view, so reopen it
- * there rather than hide the user's choice.
+ * custom endpoint, another preset) was chosen in the advanced view, so reopen
+ * it there rather than hide the user's choice.
  */
 export function startsInAdvanced(providerId: string): boolean {
   return providerId !== "" && simpleAiChoice(providerId) === null;
+}
+
+/** What the setup found running on this machine when it opened. */
+export interface LocalAiFound {
+  /** Models Ollama has installed; `null` when Ollama is not answering. */
+  ollamaModels: string[] | null;
+  /** Ollama is on this machine, running or not. */
+  ollamaInstalled: boolean;
+  /** Models LM Studio's server offers; `null` when it is not answering. */
+  lmStudioModels: string[] | null;
+}
+
+/**
+ * The provider to select by itself when the setup opens, or `null` to leave
+ * the choice to the user. Only ever fills an empty selection, and only with
+ * something that is running and has a model: Ollama first, then LM Studio.
+ */
+export function preselectLocalAi(
+  currentProviderId: string,
+  found: LocalAiFound,
+): { provider: string; variables: Record<string, string> } | null {
+  if (currentProviderId) return null;
+  if (found.ollamaModels?.length) {
+    return { provider: "ollama", variables: { MODEL: found.ollamaModels[0] } };
+  }
+  if (found.lmStudioModels?.length) {
+    return {
+      provider: "lm-studio",
+      variables: { MODEL: found.lmStudioModels[0] },
+    };
+  }
+  return null;
+}
+
+/** Why Ollama has no model to offer, so the setup can say what to do next. */
+export type OllamaGap = "not-installed" | "not-running" | "no-models" | null;
+
+export function ollamaGap(found: LocalAiFound): OllamaGap {
+  if (found.ollamaModels === null) {
+    return found.ollamaInstalled ? "not-running" : "not-installed";
+  }
+  return found.ollamaModels.length === 0 ? "no-models" : null;
+}
+
+/** Model names from Ollama's `/api/tags` reply. */
+export function parseOllamaModels(body: unknown): string[] {
+  const models = (body as { models?: { name?: unknown }[] } | null)?.models;
+  if (!Array.isArray(models)) return [];
+  return models
+    .map((model) => model?.name)
+    .filter((name): name is string => typeof name === "string" && name !== "");
+}
+
+/** Model ids from an OpenAI-style `/v1/models` reply (LM Studio). */
+export function parseOpenAiModels(body: unknown): string[] {
+  const data = (body as { data?: { id?: unknown }[] } | null)?.data;
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((model) => model?.id)
+    .filter((id): id is string => typeof id === "string" && id !== "");
 }

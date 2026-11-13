@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { AI_PROVIDERS } from "@/config/ai-providers.constants";
 import {
   aiProviderReady,
+  ollamaGap,
+  parseOllamaModels,
+  parseOpenAiModels,
+  preselectLocalAi,
   shouldShowSetup,
   SIMPLE_KEY_PROVIDERS,
   simpleAiChoice,
@@ -119,14 +123,70 @@ describe("the simple AI choices", () => {
   it("sorts a selected provider into its choice", () => {
     expect(simpleAiChoice("ollama")).toBe("local");
     expect(simpleAiChoice("claude")).toBe("key");
-    expect(simpleAiChoice("lm-studio")).toBeNull();
+    expect(simpleAiChoice("lm-studio")).toBe("lm-studio");
+    expect(simpleAiChoice("mistral")).toBeNull();
     expect(simpleAiChoice("")).toBeNull();
   });
 
   it("opens the advanced view for a provider the simple one cannot show", () => {
-    expect(startsInAdvanced("lm-studio")).toBe(true);
+    expect(startsInAdvanced("mistral")).toBe(true);
+    expect(startsInAdvanced("lm-studio")).toBe(false);
     expect(startsInAdvanced("my-custom-endpoint")).toBe(true);
     expect(startsInAdvanced("ollama")).toBe(false);
     expect(startsInAdvanced("")).toBe(false);
+  });
+});
+
+describe("what is already on this machine", () => {
+  const nothing = {
+    ollamaModels: null,
+    ollamaInstalled: false,
+    lmStudioModels: null,
+  };
+
+  it("selects a running Ollama and its first model by itself", () => {
+    expect(
+      preselectLocalAi("", { ...nothing, ollamaModels: ["llama3.2", "qwen"] }),
+    ).toEqual({ provider: "ollama", variables: { MODEL: "llama3.2" } });
+  });
+
+  it("falls back to a running LM Studio", () => {
+    expect(
+      preselectLocalAi("", { ...nothing, lmStudioModels: ["phi-4"] }),
+    ).toEqual({ provider: "lm-studio", variables: { MODEL: "phi-4" } });
+    expect(
+      preselectLocalAi("", {
+        ...nothing,
+        ollamaModels: [],
+        lmStudioModels: ["phi-4"],
+      })?.provider,
+    ).toBe("lm-studio");
+  });
+
+  it("never replaces a choice already made, and picks nothing when nothing runs", () => {
+    expect(
+      preselectLocalAi("claude", { ...nothing, ollamaModels: ["llama3.2"] }),
+    ).toBeNull();
+    expect(preselectLocalAi("", nothing)).toBeNull();
+    expect(preselectLocalAi("", { ...nothing, ollamaModels: [] })).toBeNull();
+  });
+
+  it("tells not installed, not running and no models apart", () => {
+    expect(ollamaGap(nothing)).toBe("not-installed");
+    expect(ollamaGap({ ...nothing, ollamaInstalled: true })).toBe("not-running");
+    expect(ollamaGap({ ...nothing, ollamaModels: [] })).toBe("no-models");
+    expect(ollamaGap({ ...nothing, ollamaModels: ["llama3.2"] })).toBeNull();
+  });
+
+  it("reads model lists, ignoring anything malformed", () => {
+    expect(
+      parseOllamaModels({ models: [{ name: "a" }, { name: 3 }, {}, { name: "" }] }),
+    ).toEqual(["a"]);
+    expect(parseOllamaModels(null)).toEqual([]);
+    expect(parseOllamaModels({ models: "no" })).toEqual([]);
+    expect(parseOpenAiModels({ data: [{ id: "phi-4" }, { id: null }] })).toEqual([
+      "phi-4",
+    ]);
+    expect(parseOpenAiModels({})).toEqual([]);
   });
 });

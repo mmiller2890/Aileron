@@ -2,6 +2,7 @@
 mod capture;
 #[cfg(target_os = "linux")]
 mod linux_compat;
+mod local_ai;
 mod logging;
 mod db;
 mod shortcuts;
@@ -136,6 +137,8 @@ pub fn run() {
             stt::stt_get_status,
             stt::stt_utterance_wav,
             logging::log_ui_message,
+            local_ai::ollama_installed,
+            local_ai::launch_ollama,
             db::db_save_conversation,
         ])
         .setup(|app| {

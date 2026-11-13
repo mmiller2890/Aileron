@@ -4,8 +4,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 const invoke = vi.fn();
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (command: string) => tauriCommand(command),
+}));
 vi.mock("@/lib/platform", () => ({ isMacOS: () => true }));
+const tauriCommand = async (command: string) =>
+  command === "ollama_installed" ? ollamaInstalled : invoke(command);
 vi.mock("@/components/deco", () => ({
   AileronMark: () => null,
   ChevronRule: () => null,
@@ -16,9 +20,17 @@ vi.mock("@/pages/dev/components", () => ({
   AIProviders: () => <div data-testid="all-ai-providers" />,
   STTProviders: () => <div data-testid="speech-providers" />,
 }));
-vi.mock("@/pages/dev/components/ai-configs/OllamaModelPicker", () => ({
-  OllamaModelPicker: () => <div data-testid="ollama-models" />,
+// What answers on this machine: URL -> JSON body. Anything absent is down.
+let localServers: Record<string, unknown> = {};
+vi.mock("@tauri-apps/plugin-http", () => ({
+  fetch: async (url: string) => {
+    if (!(url in localServers)) throw new Error("connection refused");
+    return { ok: true, json: async () => localServers[url] };
+  },
 }));
+const OLLAMA = "http://localhost:11434/api/tags";
+const LM_STUDIO = "http://localhost:1234/v1/models";
+let ollamaInstalled = false;
 vi.mock("@/lib/functions/ai-response.function", () => ({
   fetchAIResponse: vi.fn(),
 }));
@@ -69,8 +81,9 @@ describe("FirstRunSetup", () => {
   const onStartListening = vi.fn();
   const onSkip = vi.fn();
 
+  // Async, so the look for local AI that runs on mount settles first.
   const render = () =>
-    act(() => {
+    act(async () => {
       root.render(
         <FirstRunSetup onStartListening={onStartListening} onSkip={onSkip} />,
       );
@@ -83,7 +96,7 @@ describe("FirstRunSetup", () => {
     await act(async () => {
       button(text)!.click();
     });
-    render();
+    await render();
   };
 
   beforeEach(() => {
@@ -91,6 +104,8 @@ describe("FirstRunSetup", () => {
       globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     selected = { provider: "", variables: {} };
+    localServers = {};
+    ollamaInstalled = false;
     stt.asrReady = true;
     vi.clearAllMocks();
     container = document.createElement("div");
@@ -104,33 +119,79 @@ describe("FirstRunSetup", () => {
   });
 
   it("will not start listening until an AI provider is ready, but can be skipped", async () => {
-    render();
+    await render();
     expect(button("start listening")!.disabled).toBe(true);
     await click("skip setup");
     expect(onSkip).toHaveBeenCalledTimes(1);
     expect(onStartListening).not.toHaveBeenCalled();
   });
 
-  it("sets up a free local model in one choice", async () => {
-    render();
-    await click("free, on this computer");
+  it("selects a running Ollama and its first model without being asked", async () => {
+    localServers[OLLAMA] = { models: [{ name: "llama3.2" }, { name: "qwen3" }] };
+    await render();
     expect(onSetSelectedAIProvider).toHaveBeenCalledWith({
       provider: "ollama",
-      variables: {},
+      variables: { MODEL: "llama3.2" },
     });
-    expect(container.querySelector('[data-testid="ollama-models"]')).not.toBeNull();
-    // No model picked yet: still not ready.
-    expect(button("start listening")!.disabled).toBe(true);
-
-    selected = { provider: "ollama", variables: { MODEL: "llama3.2" } };
-    render();
+    await render();
+    expect(container.querySelector("select")!.value).toBe("llama3.2");
     expect(button("start listening")!.disabled).toBe(false);
     await click("start listening");
     expect(onStartListening).toHaveBeenCalledTimes(1);
   });
 
+  it("says to install Ollama when it is not on this machine", async () => {
+    await render();
+    await click("free, on this computer");
+    expect(container.textContent).toContain("Ollama isn't installed");
+    expect(button("open ollama")).toBeUndefined();
+    expect(button("start listening")!.disabled).toBe(true);
+  });
+
+  it("offers to open an Ollama that is installed but not running", async () => {
+    ollamaInstalled = true;
+    await render();
+    await click("free, on this computer");
+    expect(container.textContent).toContain("installed but not running");
+    expect(button("open ollama")).toBeDefined();
+  });
+
+  it("says how to get a model when Ollama runs with none", async () => {
+    localServers[OLLAMA] = { models: [] };
+    await render();
+    await click("free, on this computer");
+    expect(container.textContent).toContain("ollama pull llama3.2");
+    expect(onSetSelectedAIProvider).toHaveBeenLastCalledWith({
+      provider: "ollama",
+      variables: {},
+    });
+  });
+
+  it("offers LM Studio only when its server is running", async () => {
+    await render();
+    expect(button("lm studio")).toBeUndefined();
+    act(() => root.unmount());
+    root = createRoot(container);
+
+    selected = { provider: "claude", variables: {} };
+    localServers[LM_STUDIO] = { data: [{ id: "phi-4" }] };
+    await render();
+    await click("lm studio");
+    expect(onSetSelectedAIProvider).toHaveBeenLastCalledWith({
+      provider: "lm-studio",
+      variables: { MODEL: "phi-4" },
+    });
+  });
+
+  it("never replaces a provider that was already chosen", async () => {
+    selected = { provider: "claude", variables: {} };
+    localServers[OLLAMA] = { models: [{ name: "llama3.2" }] };
+    await render();
+    expect(onSetSelectedAIProvider).not.toHaveBeenCalled();
+  });
+
   it("takes an API key for a hosted service, with Claude's model filled in", async () => {
-    render();
+    await render();
     await click("i have an api key");
     expect(onSetSelectedAIProvider).toHaveBeenLastCalledWith({
       provider: "openai",
@@ -146,7 +207,7 @@ describe("FirstRunSetup", () => {
       variables: { MODEL: "claude-sonnet-5-5" },
     });
     selected = { provider: "claude", variables: { MODEL: "claude-sonnet-5-5" } };
-    render();
+    await render();
     expect(container.querySelector('input[type="password"]')).not.toBeNull();
     // A hosted service is not ready without its key.
     expect(button("start listening")!.disabled).toBe(true);
@@ -154,12 +215,12 @@ describe("FirstRunSetup", () => {
       provider: "claude",
       variables: { MODEL: "claude-sonnet-5-5", API_KEY: "sk-test" },
     };
-    render();
+    await render();
     expect(button("start listening")!.disabled).toBe(false);
   });
 
   it("opens the full provider and speech controls in the advanced view, and comes back", async () => {
-    render();
+    await render();
     expect(container.querySelector('[data-testid="all-ai-providers"]')).toBeNull();
     await click("advanced");
     expect(container.querySelector('[data-testid="all-ai-providers"]')).not.toBeNull();
@@ -170,7 +231,7 @@ describe("FirstRunSetup", () => {
 
   it("asks macOS for audio access only when the button is pressed", async () => {
     invoke.mockResolvedValue(true);
-    render();
+    await render();
     expect(invoke).not.toHaveBeenCalled();
     await click("allow access");
     expect(invoke).toHaveBeenCalledWith("check_system_audio_access");
@@ -189,8 +250,8 @@ describe("FirstRunSetup", () => {
     expect(stt.initLiveSpeakers).toHaveBeenCalled();
   });
 
-  it("leaves ready speech models alone", () => {
-    render();
+  it("leaves ready speech models alone", async () => {
+    await render();
     expect(stt.init).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Speech is transcribed on this Mac");
   });

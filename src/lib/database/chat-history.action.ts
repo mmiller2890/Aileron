@@ -4,8 +4,10 @@ import { ChatConversation } from "@/types";
 import { safeLocalStorage } from "@/lib";
 import {
   DbConversation,
+  DbConversationSummary,
   DbMessage,
   rowsToConversations,
+  rowsToSummaries,
   safeJsonParse,
 } from "./chat-history.map";
 
@@ -155,8 +157,8 @@ async function assembleConversations(
 
 /**
  * Get all conversations with messages. Scans the entire history — use only
- * where that is intended (e.g. the full Chats page). For the dashboard, prefer
- * `getRecentConversations`.
+ * where every message is needed (an export). Lists use
+ * `getConversationSummaries` or `getRecentConversations`.
  */
 export async function getAllConversations(): Promise<ChatConversation[]> {
   const db = await getDatabase();
@@ -168,6 +170,25 @@ export async function getAllConversations(): Promise<ChatConversation[]> {
     return await assembleConversations(db, conversations);
   } catch (error) {
     console.error("Failed to get all conversations:", error);
+    throw error;
+  }
+}
+
+/**
+ * Every conversation as a list entry: no messages, just `messageCount`. What
+ * the Chats page shows. Open one with `getConversationById` to read it.
+ */
+export async function getConversationSummaries(): Promise<ChatConversation[]> {
+  const db = await getDatabase();
+
+  try {
+    const rows = await db.select<DbConversationSummary[]>(
+      `SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count
+       FROM conversations c ORDER BY c.updated_at DESC`,
+    );
+    return rowsToSummaries(rows);
+  } catch (error) {
+    console.error("Failed to list conversations:", error);
     throw error;
   }
 }

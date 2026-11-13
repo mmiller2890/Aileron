@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import {
-  getAllConversations,
+  getConversationSummaries,
   deleteConversation,
   DOWNLOAD_SUCCESS_DISPLAY_MS,
   safeLocalStorage,
@@ -62,7 +62,7 @@ export function useHistory(): UseHistoryReturn {
   const refreshConversations = useCallback(async () => {
     try {
       setIsLoading(true);
-      const loadedConversations = await getAllConversations();
+      const loadedConversations = await getConversationSummaries();
       setConversations(loadedConversations);
     } catch (error) {
       console.error("Failed to load conversations:", error);

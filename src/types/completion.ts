@@ -22,6 +22,11 @@ export interface ChatConversation {
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
+  /**
+   * Set on list entries loaded without their messages (`messages` is empty
+   * there): how many messages the conversation has.
+   */
+  messageCount?: number;
 }
 
 export interface CompletionState {

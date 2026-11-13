@@ -83,8 +83,8 @@ const Dashboard = () => {
                           </p>
                           <div className="flex items-center gap-1">
                             <Badge variant="outline" className="text-xs">
-                              {doc.messages.length}{" "}
-                              {doc.messages.length === 1
+                              {doc.messageCount ?? doc.messages.length}{" "}
+                              {(doc.messageCount ?? doc.messages.length) === 1
                                 ? "message"
                                 : "messages"}
                             </Badge>

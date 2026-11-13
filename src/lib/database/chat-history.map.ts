@@ -71,3 +71,26 @@ export function rowsToConversations(
       })) || [],
   }));
 }
+
+/** A conversation row with its message count, for lists. */
+export interface DbConversationSummary extends DbConversation {
+  message_count: number;
+}
+
+/**
+ * List entries: each conversation without its messages, carrying only how
+ * many it has. Lists show a title, a time and a count; loading every message
+ * for that made the Chats page read the whole history.
+ */
+export function rowsToSummaries(
+  rows: DbConversationSummary[],
+): ChatConversation[] {
+  return rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    messages: [],
+    messageCount: Number(row.message_count) || 0,
+  }));
+}

@@ -74,6 +74,18 @@ export type LiveSessionCommand =
   | { action: Exclude<LiveSessionCommandAction, "submit"> }
   | { action: "submit"; text: string };
 
+/**
+ * What leaving a session for the dashboard's starting screen sends: stop a
+ * running capture, then start fresh. The engine saves the session left behind as it is replaced.
+ */
+export function goHomeCommands(
+  snapshot: Pick<LiveSessionSnapshot, "capturing"> | null,
+): LiveSessionCommand[] {
+  return snapshot?.capturing
+    ? [{ action: "stop-capture" }, { action: "new-conversation" }]
+    : [{ action: "new-conversation" }];
+}
+
 /** The bar's conversation as the dashboard mirrors it. */
 export interface LiveChatSnapshot {
   /** Voice input is switched on. */

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useApp } from "@/contexts";
 import {
+  ArrowLeftIcon,
   CircleStopIcon,
   AudioLinesIcon,
   MicIcon,
@@ -30,6 +31,7 @@ export const EmbeddedBar = ({
   overlayVisible,
   onTogglePopOut,
   onOpenProviders,
+  onGoHome,
   statusOverride,
   noticeOverride,
 }: {
@@ -38,6 +40,8 @@ export const EmbeddedBar = ({
   overlayVisible: boolean;
   onTogglePopOut: () => void;
   onOpenProviders: () => void;
+  /** Leave this session for the dashboard's starting screen. */
+  onGoHome: () => void;
   /** Set while the feed shows the bar's own conversation, not the session. */
   statusOverride?: ReturnType<typeof deriveSessionStatus>;
   noticeOverride?: BarNotice;
@@ -74,18 +78,32 @@ export const EmbeddedBar = ({
     >
       {/* Status band */}
       <div className="flex items-center justify-between font-mono text-[10px] pointer-events-none">
-        <span className={`inline-flex items-center gap-1.5 ${status.cls}`}>
-          <span
-            className={`size-1.5 rounded-full ${status.dot} ${
-              status.word !== "idle" ? "animate-pulse" : ""
-            }`}
-          />
-          {status.word}
-          {capturing && snapshot?.sessionStartedAt ? (
-            <span className="text-muted-foreground">
-              · {formatElapsed(snapshot.sessionStartedAt, now)}
-            </span>
-          ) : null}
+        <span className="inline-flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onGoHome}
+            title={
+              capturing
+                ? "Stop capture and go back to the start"
+                : "Go back to the start"
+            }
+            className="pointer-events-auto inline-flex items-center gap-1 text-meta transition-colors hover:text-foreground"
+          >
+            <ArrowLeftIcon className="size-3" /> home
+          </button>
+          <span className={`inline-flex items-center gap-1.5 ${status.cls}`}>
+            <span
+              className={`size-1.5 rounded-full ${status.dot} ${
+                status.word !== "idle" ? "animate-pulse" : ""
+              }`}
+            />
+            {status.word}
+            {capturing && snapshot?.sessionStartedAt ? (
+              <span className="text-muted-foreground">
+                · {formatElapsed(snapshot.sessionStartedAt, now)}
+              </span>
+            ) : null}
+          </span>
         </span>
         <button
           type="button"

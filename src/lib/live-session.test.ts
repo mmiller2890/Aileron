@@ -9,6 +9,7 @@ import {
   greetingForHour,
   LiveChatSnapshot,
   LiveSessionSnapshot,
+  goHomeCommands,
 } from "./live-session";
 import { ChatConversation } from "@/types/completion";
 
@@ -324,5 +325,18 @@ describe("deriveChatStatus", () => {
     expect(
       deriveChatStatus(chat({ answering: true, error: "boom" })).word,
     ).toBe("error");
+  });
+});
+
+describe("goHomeCommands", () => {
+  test("starts a fresh session when nothing is capturing", () => {
+    expect(goHomeCommands(null)).toEqual([{ action: "new-conversation" }]);
+  });
+
+  test("stops a running capture before starting fresh", () => {
+    expect(goHomeCommands({ capturing: true })).toEqual([
+      { action: "stop-capture" },
+      { action: "new-conversation" },
+    ]);
   });
 });

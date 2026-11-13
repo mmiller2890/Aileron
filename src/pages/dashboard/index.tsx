@@ -9,6 +9,7 @@ import {
   deriveChatStatus,
   deriveDashboardSource,
   deriveLiveAnswerDraft,
+  goHomeCommands,
   LiveSessionCommand,
   TOGGLE_WINDOW_VISIBILITY,
 } from "@/lib/live-session";
@@ -121,6 +122,8 @@ const Dashboard = () => {
     [showsChat, sendChatCommand, sendSessionCommand],
   );
 
+  const goHome = () => goHomeCommands(snapshot).forEach(sendCommand);
+
   // Nothing running and nothing to show: the quiet starting screen. Past
   // sessions live in Chats, not on the opening page.
   if (source === "home") {
@@ -151,6 +154,7 @@ const Dashboard = () => {
         overlayVisible={overlayVisible}
         onTogglePopOut={togglePopOut}
         onOpenProviders={() => navigate("/dev-space")}
+        onGoHome={goHome}
         statusOverride={showsChat ? deriveChatStatus(chat) : undefined}
         noticeOverride={
           showsChat && chat.error

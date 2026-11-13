@@ -126,8 +126,8 @@ export async function createConversation(
 
 /**
  * Default number of recent conversations the dashboard loads on focus. Covers
- * RecentSessions' 6-item list plus the fallback displayed session, with buffer,
- * without scanning the full history on every window focus.
+ * its 6-item recent list with buffer, without scanning the full history on
+ * every window focus.
  */
 export const DEFAULT_RECENT_CONVERSATIONS_LIMIT = 15;
 
@@ -173,9 +173,11 @@ export async function getAllConversations(): Promise<ChatConversation[]> {
 }
 
 /**
- * Get the most-recently-updated conversations (with messages), bounded by
- * `limit`. This is what the dashboard loads on focus so a large history doesn't
- * make every window focus reload the whole database.
+ * Get the most-recently-updated conversations, bounded by `limit`, WITHOUT
+ * their messages (`messages` is empty). The dashboard lists these by title
+ * and time on every window focus; loading the messages too returned ~4,500
+ * rows and took 1.5-2.6 s each time on a real history. Open one with
+ * `getConversationById` to read it.
  */
 export async function getRecentConversations(
   limit = DEFAULT_RECENT_CONVERSATIONS_LIMIT,
@@ -187,7 +189,7 @@ export async function getRecentConversations(
       "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?",
       [limit],
     );
-    return await assembleConversations(db, conversations);
+    return rowsToConversations(conversations, []);
   } catch (error) {
     console.error("Failed to get recent conversations:", error);
     throw error;

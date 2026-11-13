@@ -374,7 +374,7 @@ export function useSystemAudio() {
             if (!capturingRef.current) return;
             setLiveNotice(
               event.payload === "speakers"
-                ? "Speaker labels stopped for this session. Transcription continues."
+                ? "Speaker labels are off for this session to keep transcription on time."
                 : "Live text stopped for this session. Final transcripts continue.",
             );
             if (event.payload === "speakers") {

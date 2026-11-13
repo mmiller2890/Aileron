@@ -33,6 +33,13 @@ pub(crate) fn live_feeds_behind(was_behind: bool, backlog_samples: usize, sr: u3
     }
 }
 
+/// How many times a capture may fall behind before speaker labels are given
+/// up for the rest of it. A machine that keeps falling behind is short of
+/// memory or compute, and of the two previews the labels cost a whole extra
+/// model and matter least: dropping them leaves more for the transcript and
+/// live text. (A 48-minute session on an 8 GB Mac fell behind 10 times.)
+const SPEAKERS_OFF_AFTER_STALLS: u32 = 3;
+
 pub(crate) struct TurnFeeds {
     text: Option<LiveTextHandle>,
     speakers: Option<LiveSpeakerHandle>,
@@ -44,6 +51,8 @@ pub(crate) struct TurnFeeds {
     /// behind and kept to the turn's end: resuming mid-turn would feed the
     /// models audio with a hole in it.
     paused: bool,
+    /// Times this capture has fallen behind.
+    stalls: u32,
 }
 
 impl TurnFeeds {
@@ -55,14 +64,34 @@ impl TurnFeeds {
             in_turn: false,
             behind: false,
             paused: false,
+            stalls: 0,
         }
     }
 
-    /// Report whether the capture loop is behind (see `live_feeds_behind`).
-    pub(crate) fn set_behind(&mut self, behind: bool) {
+    /// Report whether the capture loop is behind (see `live_feeds_behind`);
+    /// call it when that changes. Returns true when this stall was one too
+    /// many and speaker labels were just switched off for the capture.
+    pub(crate) fn set_behind(&mut self, behind: bool) -> bool {
+        let fell_behind = behind && !self.behind;
         self.behind = behind;
-        if behind {
-            self.paused = true;
+        if !behind {
+            return false;
+        }
+        self.paused = true;
+        if fell_behind {
+            self.stalls += 1;
+        }
+        if self.stalls < SPEAKERS_OFF_AFTER_STALLS {
+            return false;
+        }
+        match self.speakers.take() {
+            Some(speakers) => {
+                // No waiting: the loop is behind as it is. The worker is
+                // muted and finishes what it holds on its own.
+                speakers.stop(Duration::ZERO);
+                true
+            }
+            None => false,
         }
     }
 
@@ -207,6 +236,46 @@ mod tests {
             })
         };
         assert_eq!(finals, vec![expected(first), expected(second)]);
+    }
+
+    #[test]
+    fn a_capture_that_keeps_falling_behind_gives_up_speaker_labels_but_not_live_text() {
+        let (text_tx, text_rx) = mpsc::channel();
+        let (speaker_tx, speaker_rx) = mpsc::channel();
+        let text = LiveTextHandle::spawn(Box::new(CountingText(0)), move |event| {
+            let _ = text_tx.send(event);
+        });
+        let speakers = LiveSpeakerHandle::spawn(Box::new(FixedSpeaker), move |event| {
+            let _ = speaker_tx.send(event);
+        });
+        let mut feeds = TurnFeeds::new(Some(text), Some(speakers));
+        let piece = || vec![0.0; 6_000];
+
+        // Two stalls are tolerated; staying behind is not a new stall.
+        assert!(!feeds.set_behind(true));
+        assert!(!feeds.set_behind(true));
+        assert!(!feeds.set_behind(false));
+        assert!(!feeds.set_behind(true));
+        assert!(!feeds.set_behind(false));
+        // The third switches speaker labels off, once.
+        assert!(feeds.set_behind(true));
+        assert!(!feeds.set_behind(false));
+        assert!(!feeds.set_behind(true));
+        assert!(!feeds.set_behind(false));
+
+        let turn = feeds.begin(piece());
+        feeds.audio(piece());
+        feeds.stop(Duration::from_secs(2));
+
+        let texts: Vec<LiveTextEvent> = text_rx.try_iter().collect();
+        assert!(
+            texts.contains(&LiveTextEvent::Partial(LiveTextPartial {
+                turn,
+                text: "t1".into()
+            })),
+            "live text stopped too: {texts:?}"
+        );
+        assert_eq!(speaker_rx.try_iter().count(), 0, "speaker labels kept running");
     }
 
     #[test]

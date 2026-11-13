@@ -1067,7 +1067,10 @@ async fn run_vad_capture(
             let behind = turn_feeds::live_feeds_behind(live_behind, backlog, sr);
             if behind != live_behind {
                 live_behind = behind;
-                live_turns.set_behind(behind);
+                if live_turns.set_behind(behind) {
+                    warn!("Speaker labels switched off for this capture: it keeps falling behind");
+                    let _ = app.emit("live-feature-stopped", "speakers");
+                }
                 tracing::info!(
                     "Live text and speaker labels {} (capture {:.1}s behind)",
                     if behind { "paused" } else { "resume at the next turn" },

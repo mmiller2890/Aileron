@@ -6,7 +6,12 @@ import { useApp } from "@/contexts";
 import { STORAGE_KEYS } from "@/config/constants";
 import { safeLocalStorage } from "@/lib/storage";
 import { getPlatform } from "@/lib/platform";
-import { captureAnswerPrompt, isAudible } from "@/lib/capture-answer";
+import {
+  captureAnswerPrompt,
+  IDLE_STOP_NOTICE,
+  idleStopDue,
+  isAudible,
+} from "@/lib/capture-answer";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import {
   checkLocalServer,
@@ -155,6 +160,8 @@ export function useSystemAudio() {
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [captureSampleRate, setCaptureSampleRate] = useState<number>(48_000);
   const [noAudioDetected, setNoAudioDetected] = useState<boolean>(false);
+  // When the capture last heard system audio, for the idle stop.
+  const lastAudibleAtRef = useRef(0);
   // Post-session summary generated after a capture ends (survives the stop
   // cleanup; cleared on the next start or when dismissed).
   const [sessionSummary, setSessionSummary] = useState<string>("");
@@ -1086,7 +1093,10 @@ export function useSystemAudio() {
             // The warning fires when a capture starts before anything plays
             // (every capture started ahead of a call), and it stayed up for
             // the whole call. Audio arriving answers it.
-            if (isAudible(level)) setNoAudioDetected(false);
+            if (isAudible(level)) {
+              lastAudibleAtRef.current = Date.now();
+              setNoAudioDetected(false);
+            }
           }),
         ),
       ),
@@ -1337,6 +1347,7 @@ export function useSystemAudio() {
             setLiveNotice("");
             setCapturing(true);
             capturingRef.current = true;
+            lastAudibleAtRef.current = Date.now();
             setSessionStartedAt(Date.now());
             setIsPopoverOpen(true);
             setIsContinuousMode(isContinuous);
@@ -1513,6 +1524,23 @@ export function useSystemAudio() {
     error,
     resizeWindow,
   ]);
+
+  // Stop a capture that has heard nothing for a long time (see IDLE_STOP_MS).
+  useEffect(() => {
+    if (!capturing) return;
+    const timer = setInterval(() => {
+      if (!capturingRef.current || captureStoppingRef.current) return;
+      if (!idleStopDue(lastAudibleAtRef.current, Date.now())) return;
+      void invoke("log_ui_message", {
+        message: "Capture stopped by itself: no audio for 20 minutes",
+        level: "info",
+      }).catch(() => {});
+      void stopCaptureRef.current().then(() => {
+        setError(IDLE_STOP_NOTICE);
+      });
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [capturing]);
 
   useEffect(() => {
     return globalShortcuts.registerSystemAudioCallback(async () => {

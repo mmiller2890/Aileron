@@ -27,3 +27,23 @@ export const AUDIBLE_LEVEL = 0.002;
 export function isAudible(level: number): boolean {
   return Number.isFinite(level) && level > AUDIBLE_LEVEL;
 }
+
+/**
+ * A capture with no audible system audio for this long stops by itself.
+ * Captures were left running for hours after a call (6 h on 2026-11-24, 25 h
+ * on 2026-11-20), holding the speech models in memory on an 8 GB Mac. No
+ * call goes this long without a sound; a quiet one stays well inside it.
+ */
+export const IDLE_STOP_MS = 20 * 60 * 1000;
+
+/** Whether a capture last heard audio long enough ago to stop it. */
+export function idleStopDue(
+  lastAudibleAt: number,
+  now: number,
+  limitMs = IDLE_STOP_MS,
+): boolean {
+  return now - lastAudibleAt >= limitMs;
+}
+
+export const IDLE_STOP_NOTICE =
+  "Listening stopped after 20 minutes without any audio. Start it again when your call begins.";

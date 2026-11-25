@@ -235,7 +235,7 @@ pub fn activate_app<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         let main_thread =
             MainThreadMarker::new().expect("application activation must run on the main thread");
         let ns_app = NSApplication::sharedApplication(main_thread);
-        unsafe { ns_app.activate() };
+        ns_app.activate();
     })
     .map_err(|e| format!("Failed to activate application: {}", e))
 }

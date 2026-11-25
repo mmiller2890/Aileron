@@ -231,12 +231,14 @@ pub(crate) async fn apply_conversation(
             .map_err(ConversationError::Database)?;
     }
 
-    // The message triggers set `updated_at` to the timestamp of whichever
-    // message was written last. Rewriting every message left it at the final
-    // message's timestamp; keep that now that most saves write only a few.
-    if let Some(last) = conversation.messages.last() {
+    // A conversation was last updated when its newest message was written.
+    // Not the last one in the list: the capture session lists newest first,
+    // so that was its oldest, and a session updated today sorted as if it
+    // ended at its first line. (The message triggers set `updated_at` to
+    // whichever message was written last, so it is set here, once, after.)
+    if let Some(newest) = conversation.messages.iter().map(|m| m.timestamp).max() {
         sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
-            .bind(last.timestamp)
+            .bind(newest)
             .bind(&conversation.id)
             .execute(&mut *tx)
             .await
@@ -478,6 +480,34 @@ mod tests {
         // Saving the same thing again changes nothing.
         apply_conversation(&pool, &second, Operation::Upsert).await.unwrap();
         assert_eq!(rows(&pool, "c1").await, after);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn updated_at_is_the_newest_message_whatever_the_list_order() {
+        let (pool, path) = test_pool(1).await;
+        // The capture session lists its messages newest first.
+        let newest_first = conversation(
+            "c1",
+            "Session",
+            vec![message("m3", "three", 300), message("m2", "two", 200), message("m1", "one", 100)],
+        );
+        apply_conversation(&pool, &newest_first, Operation::Upsert).await.unwrap();
+        assert_eq!(updated_at(&pool, "c1").await, 300);
+
+        let grown = conversation(
+            "c1",
+            "Session",
+            vec![
+                message("m4", "four", 400),
+                message("m3", "three", 300),
+                message("m2", "two", 200),
+                message("m1", "one", 100),
+            ],
+        );
+        apply_conversation(&pool, &grown, Operation::Upsert).await.unwrap();
+        assert_eq!(updated_at(&pool, "c1").await, 400);
 
         cleanup(&path);
     }

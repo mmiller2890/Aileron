@@ -6,6 +6,7 @@ import { useApp } from "@/contexts";
 import { STORAGE_KEYS } from "@/config/constants";
 import { safeLocalStorage } from "@/lib/storage";
 import { getPlatform } from "@/lib/platform";
+import { captureAnswerPrompt, isAudible } from "@/lib/capture-answer";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import {
   checkLocalServer,
@@ -856,7 +857,7 @@ export function useSystemAudio() {
             for await (const chunk of fetchAIResponse({
               provider,
               selectedProvider: selectedAIProvider,
-              systemPrompt: prompt,
+              systemPrompt: captureAnswerPrompt(prompt),
               history: previousMessages,
               userMessage: transcription,
               imagesBase64: [],
@@ -1080,7 +1081,12 @@ export function useSystemAudio() {
         listen(
           "audio-level",
           scope.guard((event) => {
-            setAudioLevel((event.payload as number) ?? 0);
+            const level = (event.payload as number) ?? 0;
+            setAudioLevel(level);
+            // The warning fires when a capture starts before anything plays
+            // (every capture started ahead of a call), and it stayed up for
+            // the whole call. Audio arriving answers it.
+            if (isAudible(level)) setNoAudioDetected(false);
           }),
         ),
       ),
